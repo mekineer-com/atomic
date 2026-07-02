@@ -34,7 +34,10 @@ async fn fetch_atomic_snapshot(
     atomic_conversation_id: &str,
 ) -> Result<String, String> {
     let response = reqwest::Client::new()
-        .post(format!("{}/integration/atomic/session_start", config.base_url))
+        .post(format!(
+            "{}/integration/atomic/session_start",
+            config.base_url
+        ))
         .json(&AtomicSessionStartRequest {
             user_id: &config.user_id,
             soul_id: &config.soul_id,

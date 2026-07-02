@@ -842,7 +842,10 @@ fn truncate_messages_to_context(
     if groups.len() <= system_prefix_groups + 1 {
         return messages; // System prefix + one group, nothing safe to drop
     }
-    let first_tokens: usize = groups[..system_prefix_groups].iter().map(|g| g.tokens).sum();
+    let first_tokens: usize = groups[..system_prefix_groups]
+        .iter()
+        .map(|g| g.tokens)
+        .sum();
     let last_tokens = groups[groups.len() - 1].tokens;
     let mut budget = max_tokens.saturating_sub(first_tokens + last_tokens);
 
