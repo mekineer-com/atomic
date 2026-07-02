@@ -5,3 +5,7 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# sqlite-vec 0.1.6 has an Alpine/musl typedef collision fixed upstream in asg017/sqlite-vec#199.
+[env]
+CFLAGS_x86_64_alpine_linux_musl = "-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t"

@@ -2458,6 +2458,18 @@ impl AtomicCore {
         self.storage.delete_conversation_sync(id).await
     }
 
+    /// Save a chat message.
+    pub async fn save_message(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+    ) -> Result<ChatMessage, AtomicCoreError> {
+        self.storage
+            .save_message_sync(conversation_id, role, content)
+            .await
+    }
+
     /// Set conversation scope (replace all tags)
     pub async fn set_conversation_scope(
         &self,

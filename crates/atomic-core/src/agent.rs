@@ -832,14 +832,23 @@ fn truncate_messages_to_context(
         return messages; // System + one group, nothing safe to drop
     }
 
-    // Always keep first group (system) and last group (most recent)
-    let first_tokens = groups[0].tokens;
+    // Always keep the leading system prefix and the last group. Atomic may store
+    // a memU entry snapshot as a second system message after its base prompt.
+    let system_prefix_groups = groups
+        .iter()
+        .take_while(|g| messages[g.start].role == MessageRole::System)
+        .count()
+        .max(1);
+    if groups.len() <= system_prefix_groups + 1 {
+        return messages; // System prefix + one group, nothing safe to drop
+    }
+    let first_tokens: usize = groups[..system_prefix_groups].iter().map(|g| g.tokens).sum();
     let last_tokens = groups[groups.len() - 1].tokens;
     let mut budget = max_tokens.saturating_sub(first_tokens + last_tokens);
 
     // Work backwards through middle groups, keeping as many as fit
     let mut keep_from_group = groups.len() - 1;
-    for gi in (1..groups.len() - 1).rev() {
+    for gi in (system_prefix_groups..groups.len() - 1).rev() {
         if groups[gi].tokens > budget {
             break;
         }
@@ -848,7 +857,10 @@ fn truncate_messages_to_context(
     }
 
     // Build result from kept groups
-    let mut result: Vec<Message> = messages[groups[0].start..groups[0].end].to_vec();
+    let mut result: Vec<Message> = Vec::new();
+    for g in &groups[..system_prefix_groups] {
+        result.extend(messages[g.start..g.end].to_vec());
+    }
     for g in &groups[keep_from_group..] {
         result.extend(messages[g.start..g.end].to_vec());
     }
@@ -856,7 +868,7 @@ fn truncate_messages_to_context(
     tracing::info!(
         original_messages = messages.len(),
         truncated_messages = result.len(),
-        groups_kept = groups.len() - keep_from_group + 1,
+        groups_kept = system_prefix_groups + groups.len() - keep_from_group,
         max_tokens,
         "[chat] Truncated message history to fit context window"
     );
@@ -1602,4 +1614,31 @@ where
     });
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_keeps_all_leading_system_messages() {
+        let messages = vec![
+            Message::system("atomic base prompt"),
+            Message::system("memu entry snapshot"),
+            Message::user("older user message ".repeat(200)),
+            Message::assistant("older assistant message ".repeat(200)),
+            Message::user("latest"),
+        ];
+
+        let truncated = truncate_messages_to_context(messages, Some(80));
+        let contents: Vec<&str> = truncated
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .collect();
+
+        assert!(contents.contains(&"atomic base prompt"));
+        assert!(contents.contains(&"memu entry snapshot"));
+        assert!(contents.contains(&"latest"));
+        assert!(!contents.iter().any(|c| c.starts_with("older user message")));
+    }
 }

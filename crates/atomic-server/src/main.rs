@@ -12,7 +12,7 @@ use atomic_server::{
     export_jobs::ExportJobManager,
     log_buffer::LogBuffer,
     mcp, mcp_auth, routes,
-    state::{AppState, ServerEvent, SetupClaimLimiter, SetupToken},
+    state::{AppState, MemuSessionConfig, ServerEvent, SetupClaimLimiter, SetupToken},
     ws, Scalar, Servable,
 };
 use clap::Parser;
@@ -75,6 +75,9 @@ async fn main() -> std::io::Result<()> {
             database_url,
             setup_token,
             dangerously_skip_setup_token,
+            memu_server_url,
+            memu_user_id,
+            memu_soul_id,
         }) => {
             // Auto-detect public URL on Fly.io if not explicitly set
             let public_url = public_url.or_else(|| {
@@ -91,6 +94,7 @@ async fn main() -> std::io::Result<()> {
                 public_url,
                 setup_token,
                 dangerously_skip_setup_token,
+                memu_session_config(memu_server_url, memu_user_id, memu_soul_id),
                 log_buffer,
             )
             .await
@@ -105,6 +109,7 @@ async fn main() -> std::io::Result<()> {
                 None,
                 None,
                 false,
+                memu_session_config(None, None, None),
                 log_buffer,
             )
             .await
@@ -142,6 +147,27 @@ async fn create_manager(
             atomic_core::DatabaseManager::new(data_dir).expect("Failed to open database manager")
         }
     }
+}
+
+fn memu_session_config(
+    base_url: Option<String>,
+    user_id: Option<String>,
+    soul_id: Option<String>,
+) -> Option<MemuSessionConfig> {
+    let base_url = base_url.or_else(|| std::env::var("MEMU_SERVER_URL").ok());
+    let user_id = user_id.or_else(|| std::env::var("MEMU_USER_ID").ok());
+    let soul_id = soul_id.or_else(|| std::env::var("MEMU_SOUL_ID").ok());
+    let base_url = base_url?.trim().trim_end_matches('/').to_string();
+    let user_id = user_id?.trim().to_string();
+    let soul_id = soul_id?.trim().to_string();
+    if base_url.is_empty() || user_id.is_empty() || soul_id.is_empty() {
+        return None;
+    }
+    Some(MemuSessionConfig {
+        base_url,
+        user_id,
+        soul_id,
+    })
 }
 
 async fn run_token_command(core: &atomic_core::AtomicCore, action: TokenAction) {
@@ -207,6 +233,7 @@ async fn run_server(
     public_url: Option<String>,
     setup_token: Option<String>,
     dangerously_skip_setup_token: bool,
+    memu_session: Option<MemuSessionConfig>,
     log_buffer: LogBuffer,
 ) -> std::io::Result<()> {
     let manager = Arc::new(manager);
@@ -262,6 +289,7 @@ async fn run_server(
         event_tx: event_tx.clone(),
         public_url: public_url.clone(),
         log_buffer,
+        memu_session,
         export_jobs,
         setup_token: setup_token.and_then(SetupToken::from_raw),
         dangerously_skip_setup_token,

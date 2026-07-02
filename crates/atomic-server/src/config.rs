@@ -79,6 +79,18 @@ pub enum Command {
             default_value_t = false
         )]
         dangerously_skip_setup_token: bool,
+
+        /// Base URL for mcp-memu-server, e.g. http://127.0.0.1:8099.
+        #[arg(long, env = "MEMU_SERVER_URL")]
+        memu_server_url: Option<String>,
+
+        /// memU user_id scope for Atomic Siri sessions.
+        #[arg(long, env = "MEMU_USER_ID")]
+        memu_user_id: Option<String>,
+
+        /// memU soul_id scope for Atomic Siri sessions.
+        #[arg(long, env = "MEMU_SOUL_ID")]
+        memu_soul_id: Option<String>,
     },
 
     /// Manage API tokens

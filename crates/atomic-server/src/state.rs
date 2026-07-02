@@ -76,6 +76,13 @@ impl SetupClaimLimiter {
     }
 }
 
+#[derive(Clone)]
+pub struct MemuSessionConfig {
+    pub base_url: String,
+    pub user_id: String,
+    pub soul_id: String,
+}
+
 /// Shared application state for all route handlers
 pub struct AppState {
     pub manager: Arc<DatabaseManager>,
@@ -84,6 +91,8 @@ pub struct AppState {
     pub public_url: Option<String>,
     /// In-memory ring buffer for recent log lines (for user export)
     pub log_buffer: LogBuffer,
+    /// memU session-start endpoint used to seed every Atomic chat with Siri context.
+    pub memu_session: Option<MemuSessionConfig>,
     /// Background database export jobs and temporary artifacts.
     pub export_jobs: ExportJobManager,
     /// Optional setup token required for first-run claims.

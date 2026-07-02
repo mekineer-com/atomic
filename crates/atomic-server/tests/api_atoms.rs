@@ -37,6 +37,7 @@ impl TestCtx {
             event_tx,
             public_url: None,
             log_buffer: atomic_server::log_buffer::LogBuffer::new(16),
+            memu_session: None,
             export_jobs: atomic_server::export_jobs::ExportJobManager::for_tests(
                 temp.path().join("exports"),
             ),
