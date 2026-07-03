@@ -115,7 +115,7 @@ async fn fake_chat_completion(body: web::Json<Value>) -> HttpResponse {
         .body("data: {\"choices\":[{\"delta\":{\"content\":\"fake answer\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
 }
 
-async fn fake_chat_completion_without_write_tools(body: web::Json<Value>) -> HttpResponse {
+async fn fake_chat_completion_with_memu_write_tools(body: web::Json<Value>) -> HttpResponse {
     let tool_names: Vec<&str> = body["tools"]
         .as_array()
         .unwrap()
@@ -125,7 +125,7 @@ async fn fake_chat_completion_without_write_tools(body: web::Json<Value>) -> Htt
     assert!(tool_names.contains(&"search_atoms"));
     assert!(tool_names.contains(&"get_atom"));
     assert!(!tool_names.contains(&"create_atom"));
-    assert!(!tool_names.contains(&"edit_atom"));
+    assert!(tool_names.contains(&"edit_atom"));
     HttpResponse::Ok()
         .content_type("text/event-stream")
         .body("data: {\"choices\":[{\"delta\":{\"content\":\"fake answer\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
@@ -146,16 +146,16 @@ fn start_fake_model() -> (String, actix_web::dev::ServerHandle) {
     (format!("http://{}", addr), handle)
 }
 
-fn start_fake_model_without_write_tools() -> (String, actix_web::dev::ServerHandle) {
+fn start_fake_model_with_memu_write_tools() -> (String, actix_web::dev::ServerHandle) {
     let server = HttpServer::new(move || {
         App::new()
             .route(
                 "/chat/completions",
-                web::post().to(fake_chat_completion_without_write_tools),
+                web::post().to(fake_chat_completion_with_memu_write_tools),
             )
             .route(
                 "/v1/chat/completions",
-                web::post().to(fake_chat_completion_without_write_tools),
+                web::post().to(fake_chat_completion_with_memu_write_tools),
             )
     })
     .bind(("127.0.0.1", 0))
@@ -356,8 +356,8 @@ async fn test_send_message_uses_memu_chat_profile() {
 }
 
 #[actix_web::test]
-async fn test_memu_backed_chat_does_not_offer_write_tools() {
-    let (model_url, model_handle) = start_fake_model_without_write_tools();
+async fn test_memu_backed_chat_offers_edit_but_not_create() {
+    let (model_url, model_handle) = start_fake_model_with_memu_write_tools();
     let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
