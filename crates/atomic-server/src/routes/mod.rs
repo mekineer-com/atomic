@@ -300,6 +300,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         "/conversations/{id}/messages",
         web::post().to(chat::send_chat_message),
     );
+    cfg.route("/memu/session/end", web::post().to(chat::end_memu_session));
 
     // memU review proxy
     cfg.route("/memu/reviews/status", web::get().to(memu_reviews::status));

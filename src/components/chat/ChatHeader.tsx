@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronLeft } from 'lucide-react';
+import { getTransport } from '../../lib/transport';
 import { ConversationWithTags, useChatStore } from '../../stores/chat';
 import { ScopeEditor } from './ScopeEditor';
 
@@ -11,7 +12,26 @@ interface ChatHeaderProps {
 export function ChatHeader({ conversation, onBack }: ChatHeaderProps) {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editedTitle, setEditedTitle] = useState(conversation.title || '');
+  const [memuEnabled, setMemuEnabled] = useState(false);
   const updateConversationTitle = useChatStore(s => s.updateConversationTitle);
+  const endMemuSession = useChatStore(s => s.endMemuSession);
+  const isStreaming = useChatStore(s => s.isStreaming);
+  const isEndingSession = useChatStore(s => s.isEndingSession);
+
+  useEffect(() => {
+    let cancelled = false;
+    getTransport()
+      .invoke<{ enabled: boolean }>('get_memu_review_status')
+      .then((status) => {
+        if (!cancelled) setMemuEnabled(Boolean(status.enabled));
+      })
+      .catch(() => {
+        if (!cancelled) setMemuEnabled(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleTitleSave = async () => {
     if (editedTitle.trim() !== conversation.title) {
@@ -66,6 +86,15 @@ export function ChatHeader({ conversation, onBack }: ChatHeaderProps) {
           >
             {conversation.title || 'New Conversation'}
           </h2>
+        )}
+        {memuEnabled && (
+          <button
+            onClick={endMemuSession}
+            disabled={isStreaming || isEndingSession}
+            className="px-3 py-1.5 text-sm text-[var(--color-text-secondary)] border border-[var(--color-border)] rounded hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {isEndingSession ? 'Ending...' : 'End Session'}
+          </button>
         )}
       </div>
 

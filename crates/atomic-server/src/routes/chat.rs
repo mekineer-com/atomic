@@ -35,6 +35,29 @@ struct AtomicChatProfileResponse {
     settings: HashMap<String, String>,
 }
 
+#[derive(Serialize)]
+struct AtomicSessionEndRequest {
+    user_id: String,
+    soul_id: String,
+    conversation_id: String,
+    activity_recap: Option<String>,
+    transcript: Vec<AtomicTranscriptRow>,
+}
+
+#[derive(Serialize)]
+struct AtomicTranscriptRow {
+    role: String,
+    content: String,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct EndMemuSessionBody {
+    conversation_id: String,
+}
+
+const ATOMIC_RECAP_INSTRUCTION: &str = "This Atomic session is ending. Write a recap of your activity with your human: what you looked at, what you changed (edits you made and why), ideas rejected or deferred, and follow-ups you want to remember. Write it as yourself, for yourself.";
+
 async fn fetch_atomic_snapshot(
     config: &MemuSessionConfig,
     atomic_conversation_id: &str,
@@ -106,6 +129,73 @@ fn hide_system_messages(
 ) -> atomic_core::ConversationWithMessages {
     conv.messages.retain(|m| m.message.role != "system");
     conv
+}
+
+fn transcript_rows(conv: &atomic_core::ConversationWithMessages) -> Vec<AtomicTranscriptRow> {
+    conv.messages
+        .iter()
+        .filter(|m| m.message.role != "system")
+        .filter(|m| !m.message.content.trim().is_empty())
+        .map(|m| AtomicTranscriptRow {
+            role: m.message.role.clone(),
+            content: m.message.content.clone(),
+            created_at: m.message.created_at.clone(),
+        })
+        .collect()
+}
+
+fn has_user_assistant_interchange(rows: &[AtomicTranscriptRow]) -> bool {
+    rows.iter().any(|m| m.role == "user") && rows.iter().any(|m| m.role == "assistant")
+}
+
+fn existing_recap(conv: &atomic_core::ConversationWithMessages) -> Option<String> {
+    let messages = &conv.messages;
+    for (idx, message) in messages.iter().enumerate().rev() {
+        if message.message.role == "user" && message.message.content.trim() == ATOMIC_RECAP_INSTRUCTION {
+            return messages
+                .iter()
+                .skip(idx + 1)
+                .find(|m| m.message.role == "assistant" && !m.message.content.trim().is_empty())
+                .map(|m| m.message.content.trim().to_string());
+        }
+    }
+    None
+}
+
+async fn post_atomic_session_end(
+    config: &MemuSessionConfig,
+    atomic_conversation_id: &str,
+    recap: Option<String>,
+    transcript: Vec<AtomicTranscriptRow>,
+) -> Result<serde_json::Value, HttpResponse> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("memU client failed: {e}")})))?;
+    let response = client
+        .post(format!("{}/integration/atomic/session_end", config.base_url))
+        .json(&AtomicSessionEndRequest {
+            user_id: config.user_id.clone(),
+            soul_id: config.soul_id.clone(),
+            conversation_id: format!("chat:atomic-{atomic_conversation_id}"),
+            activity_recap: recap,
+            transcript,
+        })
+        .send()
+        .await
+        .map_err(|e| HttpResponse::BadGateway().json(serde_json::json!({"error": format!("memU session_end request failed: {e}")})))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY),
+        )
+        .json(serde_json::json!({"error": body})));
+    }
+    response.json::<serde_json::Value>().await.map_err(|e| {
+        HttpResponse::BadGateway()
+            .json(serde_json::json!({"error": format!("memU session_end returned invalid JSON: {e}")}))
+    })
 }
 
 #[utoipa::path(post, path = "/api/conversations", request_body = CreateConversationBody, responses((status = 201, description = "Created conversation", body = atomic_core::ConversationWithTags)), tag = "chat")]
@@ -313,5 +403,70 @@ pub async fn send_chat_message(
     match result {
         Ok(message) => HttpResponse::Ok().json(message),
         Err(e) => crate::error::error_response(e),
+    }
+}
+
+#[utoipa::path(post, path = "/api/memu/session/end", responses((status = 200, description = "Ended memU Atomic session")), tag = "chat")]
+pub async fn end_memu_session(
+    state: web::Data<AppState>,
+    db: Db,
+    body: web::Json<EndMemuSessionBody>,
+) -> HttpResponse {
+    let Some(memu_session) = state.memu_session.clone() else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "MEMU_SERVER_URL, MEMU_USER_ID, and MEMU_SOUL_ID are required"
+        }));
+    };
+    let conversation_id = body.conversation_id.trim();
+    if conversation_id.is_empty() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "conversation_id is required"}));
+    }
+
+    let mut conv = match db.0.get_conversation(conversation_id).await {
+        Ok(Some(conv)) => conv,
+        Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Conversation not found"})),
+        Err(e) => return crate::error::error_response(e),
+    };
+    let mut rows = transcript_rows(&conv);
+    let mut recap = existing_recap(&conv);
+
+    if recap.is_none() && has_user_assistant_interchange(&rows) {
+        let settings = match fetch_atomic_chat_profile(&memu_session).await {
+            Ok(settings) => settings,
+            Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+        };
+        let on_event = chat_event_callback(state.event_tx.clone());
+        let memu_tools = atomic_core::MemuToolConfig {
+            base_url: memu_session.base_url.clone(),
+            user_id: memu_session.user_id.clone(),
+            soul_id: memu_session.soul_id.clone(),
+        };
+        if let Err(e) = db
+            .0
+            .send_chat_message_with_external_settings(
+                conversation_id,
+                ATOMIC_RECAP_INSTRUCTION,
+                on_event,
+                settings,
+                Some(memu_tools),
+                None,
+                None,
+            )
+            .await
+        {
+            return crate::error::error_response(e);
+        }
+        conv = match db.0.get_conversation(conversation_id).await {
+            Ok(Some(conv)) => conv,
+            Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Conversation not found"})),
+            Err(e) => return crate::error::error_response(e),
+        };
+        rows = transcript_rows(&conv);
+        recap = existing_recap(&conv);
+    }
+
+    match post_atomic_session_end(&memu_session, conversation_id, recap, rows).await {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(response) => response,
     }
 }

@@ -138,6 +138,12 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'DELETE',
     path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}`,
   },
+  end_memu_session: {
+    method: 'POST',
+    path: '/api/memu/session/end',
+    argsMode: 'body',
+    transformArgs: (a) => ({ conversation_id: a.conversationId }),
+  },
 
   // ==================== Tags ====================
   get_all_tags: {

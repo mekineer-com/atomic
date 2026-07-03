@@ -129,6 +129,7 @@ interface ChatStore {
   // Streaming state
   isLoading: boolean;
   isStreaming: boolean;
+  isEndingSession: boolean;
   streamingContent: string;
   streamingMessageId: string | null;
   /**
@@ -161,6 +162,7 @@ interface ChatStore {
 
   // Actions - Messaging (placeholder for now)
   sendMessage: (content: string) => Promise<void>;
+  endMemuSession: () => Promise<void>;
   cancelResponse: () => void;
 
   // Actions - Streaming updates (called from event handlers)
@@ -184,6 +186,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   listFilterTagId: null,
   isLoading: false,
   isStreaming: false,
+  isEndingSession: false,
   streamingContent: '',
   streamingMessageId: null,
   streamingToolCalls: [],
@@ -455,6 +458,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
+  endMemuSession: async () => {
+    const { currentConversation, openConversation, fetchConversations } = get();
+    if (!currentConversation) return;
+    set({ isEndingSession: true, error: null });
+    try {
+      await getTransport().invoke('end_memu_session', {
+        conversationId: currentConversation.id,
+      });
+      await openConversation(currentConversation.id);
+      await fetchConversations(get().listFilterTagId ?? undefined);
+      set({ view: 'list', currentConversation: null, messages: [], isEndingSession: false });
+      useUIStore.getState().setChatSidebarConversationId(null);
+    } catch (e) {
+      set({ error: String(e), isEndingSession: false });
+    }
+  },
+
   cancelResponse: () => {
     // TODO: Implement cancellation
     set({ isStreaming: false, streamingContent: '' });
@@ -542,6 +562,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       listFilterTagId: null,
       isLoading: false,
       isStreaming: false,
+      isEndingSession: false,
       streamingContent: '',
       streamingMessageId: null,
       streamingToolCalls: [],
