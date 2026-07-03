@@ -1205,7 +1205,7 @@ async fn run_agent_loop(
                                         .enumerate()
                                         .map(|(i, r)| {
                                             format!(
-                                                "[{}] (atom_id: {}, similarity: {:.2})\n{}",
+                                                "[{}] (atom_id: {}, score: {:.2})\n{}",
                                                 ctx.citations.len() - results.len() + i + 1,
                                                 r.id,
                                                 r.score.unwrap_or(0.0),
