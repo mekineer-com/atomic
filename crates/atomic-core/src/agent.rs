@@ -638,7 +638,7 @@ async fn execute_memu_edit_atom(
         ])
         .json(&json!({
             "summary": summary.trim(),
-            "edited_by": "atomic:Siri",
+            "edited_by": "atomic:agent",
         }))
         .send()
         .await
