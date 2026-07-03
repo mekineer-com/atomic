@@ -14,6 +14,7 @@ pub mod graph;
 pub mod import;
 pub mod ingest;
 pub mod logs;
+pub mod memu_reviews;
 pub mod oauth;
 pub mod ollama;
 pub mod reports;
@@ -298,6 +299,29 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route(
         "/conversations/{id}/messages",
         web::post().to(chat::send_chat_message),
+    );
+
+    // memU review proxy
+    cfg.route("/memu/reviews", web::get().to(memu_reviews::list_pending));
+    cfg.route(
+        "/memu/reviews/memory/{id}/approve",
+        web::post().to(memu_reviews::approve_memory),
+    );
+    cfg.route(
+        "/memu/reviews/category/{id}/approve",
+        web::post().to(memu_reviews::approve_category),
+    );
+    cfg.route(
+        "/memu/reviews/memory/{id}",
+        web::patch().to(memu_reviews::update_memory),
+    );
+    cfg.route(
+        "/memu/reviews/category/{id}",
+        web::patch().to(memu_reviews::update_category),
+    );
+    cfg.route(
+        "/memu/reviews/memory/{id}",
+        web::delete().to(memu_reviews::delete_memory),
     );
 
     // Ollama

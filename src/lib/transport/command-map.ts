@@ -1,5 +1,5 @@
 export interface CommandSpec {
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string | ((args: Record<string, unknown>) => string);
   argsMode?: 'body' | 'query' | 'none'; // default: 'none'
   transformArgs?: (args: Record<string, unknown>) => unknown;
@@ -103,6 +103,36 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   get_atom_links: {
     method: 'GET',
     path: (a) => `/api/atoms/${encodeURIComponent(a.id as string)}/links`,
+  },
+
+  // ==================== memU Reviews ====================
+  list_pending_memu_reviews: {
+    method: 'GET',
+    path: '/api/memu/reviews',
+  },
+  approve_memory: {
+    method: 'POST',
+    path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}/approve`,
+  },
+  approve_category: {
+    method: 'POST',
+    path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.id as string)}/approve`,
+  },
+  update_memory_summary: {
+    method: 'PATCH',
+    path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ summary: a.summary }),
+  },
+  update_category_summary: {
+    method: 'PATCH',
+    path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.id as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ summary: a.summary }),
+  },
+  delete_memory: {
+    method: 'DELETE',
+    path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}`,
   },
 
   // ==================== Tags ====================

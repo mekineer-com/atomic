@@ -12,6 +12,7 @@ import {
   Search,
   Filter,
   Telescope,
+  ClipboardCheck,
 } from 'lucide-react';
 import { motion, LayoutGroup } from 'motion/react';
 import { AtomGrid } from '../atoms/AtomGrid';
@@ -27,6 +28,7 @@ import { WikiFullView } from '../wiki/WikiFullView';
 import { WikiReader } from '../wiki/WikiReader';
 import { ReportsFullView, ReportDetailView, FindingReader } from '../reports';
 import { ChatViewer } from '../chat/ChatViewer';
+import { PendingReviewPanel } from '../memu/PendingReviewPanel';
 import { TabStrip } from './TabStrip';
 import { useAtomsStore } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
@@ -80,6 +82,7 @@ export function MainView() {
   const [isResizingChat, setIsResizingChat] = useState(false);
 
   const [filterBarOpen, setFilterBarOpen] = useState(false);
+  const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const isMobile = useIsMobile();
   const hasActiveFilter = sourceFilter !== 'all' || !!sourceValue || sortBy !== 'updated' || sortOrder !== 'desc';
 
@@ -382,6 +385,14 @@ export function MainView() {
           </div>
         )}
 
+        <button
+          onClick={() => setReviewPanelOpen(true)}
+          className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
+          title="Review memU changes"
+        >
+          <ClipboardCheck className="w-4 h-4" strokeWidth={2} />
+        </button>
+
         {/* Chat sidebar toggle */}
         <button
           onClick={handleOpenChat}
@@ -506,6 +517,7 @@ export function MainView() {
         <ChatViewer />
       </div>
     </div>
+    <PendingReviewPanel isOpen={reviewPanelOpen} onClose={() => setReviewPanelOpen(false)} />
     </>
   );
 }
