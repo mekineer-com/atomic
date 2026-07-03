@@ -21,10 +21,20 @@ use crate::storage::StorageBackend;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use uuid::Uuid;
 
 type ChatEventCallback = Arc<dyn Fn(ChatEvent) + Send + Sync + 'static>;
+
+#[derive(Clone, Debug)]
+pub struct MemuToolConfig {
+    pub base_url: String,
+    pub user_id: String,
+    pub soul_id: String,
+}
 
 // ==================== Chat Events ====================
 
@@ -86,8 +96,8 @@ pub enum ChatEvent {
 
 // ==================== Tool Definitions ====================
 
-fn get_tools() -> Vec<ToolDefinition> {
-    vec![
+fn get_tools(memu_backed: bool) -> Vec<ToolDefinition> {
+    let mut tools = vec![
         ToolDefinition::new(
             "search_atoms",
             "Search for relevant atoms using hybrid keyword and semantic search. Use this to find information related to a specific topic or question. Set since_days when the user is asking about recent notes (e.g., 7 for last week, 30 for last month).",
@@ -217,7 +227,11 @@ fn get_tools() -> Vec<ToolDefinition> {
                 "required": ["atom_id", "edits"]
             }),
         ),
-    ]
+    ];
+    if memu_backed {
+        tools.retain(|tool| tool.name != "create_atom" && tool.name != "edit_atom");
+    }
+    tools
 }
 
 // ==================== UI Context ====================
@@ -266,6 +280,7 @@ Use it before answering when the user refers to "this", "current", "open", "visi
 async fn execute_get_current_page_context(
     storage: &StorageBackend,
     page_context: Option<&PageContext>,
+    memu_tool_config: Option<&MemuToolConfig>,
 ) -> Result<Option<serde_json::Value>, String> {
     let Some(ctx) = page_context else {
         return Ok(None);
@@ -273,6 +288,38 @@ async fn execute_get_current_page_context(
 
     let mut visible_atom = serde_json::Value::Null;
     if let Some(atom_id) = ctx.atom_id.as_deref().filter(|id| !id.is_empty()) {
+        if let Some(config) = memu_tool_config.filter(|_| is_memu_id(atom_id)) {
+            visible_atom = match fetch_memu_node(config, atom_id).await? {
+                Some(node) => {
+                    let title = if node.label.is_empty() {
+                        node.id.clone()
+                    } else {
+                        node.label.clone()
+                    };
+                    json!({
+                        "id": node.id,
+                        "title": title,
+                        "snippet": node.summary,
+                        "kind": node.kind,
+                    })
+                }
+                None => json!({
+                    "id": atom_id,
+                    "title": ctx.atom_title.as_deref(),
+                    "snippet": ctx.atom_snippet.as_deref(),
+                    "not_found": true,
+                }),
+            };
+            return Ok(Some(json!({
+                "view": ctx.view.as_deref(),
+                "visible_atom": visible_atom,
+                "wiki": {
+                    "tag_id": ctx.wiki_tag_id.as_deref(),
+                    "tag_name": ctx.wiki_tag_name.as_deref(),
+                },
+                "selected_tag_id": ctx.selected_tag_id.as_deref(),
+            })));
+        }
         let stored_atom = storage
             .get_atom_impl(atom_id)
             .await
@@ -389,6 +436,165 @@ Use these tools proactively when they would help the user navigate their knowled
 
 // ==================== Tool Execution ====================
 
+#[derive(Debug, Deserialize)]
+struct MemuSearchResponse {
+    #[serde(default)]
+    nodes: Vec<MemuNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MemuNode {
+    id: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    memory_type: Option<String>,
+    #[serde(default)]
+    happened_at: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    category_names: Vec<String>,
+    #[serde(default)]
+    score: Option<f32>,
+}
+
+fn is_memu_id(atom_id: &str) -> bool {
+    atom_id.starts_with("memory:") || atom_id.starts_with("category:")
+}
+
+fn slice_text(content: &str, offset: usize, limit: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return String::new();
+    }
+    if offset >= total {
+        return format!("[offset={} is past end of atom ({} total lines)]", offset, total);
+    }
+
+    let end = (offset + limit).min(total);
+    let slice = lines[offset..end].join("\n");
+    if offset == 0 && end == total {
+        return slice;
+    }
+
+    let header = if end < total {
+        format!(
+            "[lines {}-{} of {}. {} more lines. Call get_atom again with offset={} to continue.]\n",
+            offset + 1,
+            end,
+            total,
+            total - end,
+            end,
+        )
+    } else {
+        format!("[lines {}-{} of {} (end of atom).]\n", offset + 1, end, total)
+    };
+    format!("{}{}", header, slice)
+}
+
+fn render_memu_node(node: &MemuNode) -> String {
+    let mut lines = vec![format!("kind: {}", node.kind), format!("id: {}", node.id)];
+    if let Some(memory_type) = node.memory_type.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("memory_type: {}", memory_type));
+    }
+    if !node.category_names.is_empty() {
+        lines.push(format!("categories: {}", node.category_names.join(", ")));
+    }
+    if let Some(happened_at) = node.happened_at.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("happened_at: {}", happened_at));
+    }
+    if let Some(created_at) = node.created_at.as_deref().filter(|value| !value.is_empty()) {
+        lines.push(format!("created_at: {}", created_at));
+    }
+    let summary = node.summary.trim();
+    if !summary.is_empty() {
+        lines.push(String::new());
+        lines.push(summary.to_string());
+    }
+    lines.join("\n")
+}
+
+async fn fetch_memu_node(config: &MemuToolConfig, atom_id: &str) -> Result<Option<MemuNode>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("memU client failed: {e}"))?;
+    let response = client
+        .get(format!("{}/memory/{}", config.base_url, atom_id))
+        .query(&[
+            ("user_id", config.user_id.as_str()),
+            ("soul_id", config.soul_id.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("memU get_atom request failed: {e}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("memU get_atom failed ({status})"));
+    }
+    response
+        .json::<MemuNode>()
+        .await
+        .map(Some)
+        .map_err(|e| format!("memU get_atom returned invalid JSON: {e}"))
+}
+
+async fn execute_memu_search_atoms(
+    config: &MemuToolConfig,
+    query: &str,
+    limit: i32,
+    since_days: Option<i32>,
+) -> Result<Vec<MemuNode>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("memU client failed: {e}"))?;
+    let mut params = vec![
+        ("q", query.to_string()),
+        ("user_id", config.user_id.clone()),
+        ("soul_id", config.soul_id.clone()),
+        ("limit", limit.max(1).to_string()),
+    ];
+    if let Some(days) = since_days {
+        params.push(("since_days", days.to_string()));
+    }
+    let response = client
+        .get(format!("{}/integration/atomic/search", config.base_url))
+        .query(&params)
+        .send()
+        .await
+        .map_err(|e| format!("memU search request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("memU search failed ({status})"));
+    }
+    response
+        .json::<MemuSearchResponse>()
+        .await
+        .map(|body| body.nodes)
+        .map_err(|e| format!("memU search returned invalid JSON: {e}"))
+}
+
+async fn execute_memu_get_atom(
+    config: &MemuToolConfig,
+    atom_id: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Option<String>, String> {
+    Ok(fetch_memu_node(config, atom_id)
+        .await?
+        .map(|node| slice_text(&render_memu_node(&node), offset, limit)))
+}
+
 async fn execute_search_atoms(
     storage: &StorageBackend,
     query: &str,
@@ -472,50 +678,7 @@ async fn execute_get_atom(
         return Ok(None);
     };
 
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-
-    // Empty atom — return empty before the range math, otherwise a nonzero
-    // offset would produce lines[offset..0] and panic.
-    if total == 0 {
-        return Ok(Some(String::new()));
-    }
-
-    if offset >= total {
-        return Ok(Some(format!(
-            "[offset={} is past end of atom ({} total lines)]",
-            offset, total
-        )));
-    }
-
-    let end = (offset + limit).min(total);
-    let slice = lines[offset..end].join("\n");
-
-    // Only annotate when we truncated or started partway through, so short
-    // atoms (the common case) read clean without metadata noise.
-    if offset == 0 && end == total {
-        return Ok(Some(slice));
-    }
-
-    let header = if end < total {
-        format!(
-            "[lines {}-{} of {}. {} more lines. Call get_atom again with offset={} to continue.]\n",
-            offset + 1,
-            end,
-            total,
-            total - end,
-            end,
-        )
-    } else {
-        format!(
-            "[lines {}-{} of {} (end of atom).]\n",
-            offset + 1,
-            end,
-            total,
-        )
-    };
-
-    Ok(Some(format!("{}{}", header, slice)))
+    Ok(Some(slice_text(&content, offset, limit)))
 }
 
 fn parse_optional_string_arg(args: &serde_json::Value, key: &str) -> Option<String> {
@@ -922,13 +1085,14 @@ async fn run_agent_loop(
     model: String,
     mut ctx: AgentContext,
     external_settings: Option<std::collections::HashMap<String, String>>,
+    memu_tool_config: Option<MemuToolConfig>,
     page_context: Option<&PageContext>,
     canvas_context: Option<&CanvasContext>,
     canvas_cache: Option<&crate::CanvasCache>,
 ) -> Result<ChatMessageWithContext, String> {
     let provider = create_streaming_llm_provider(&provider_config)
         .map_err(|e| format!("Failed to create streaming provider: {}", e))?;
-    let mut tools = get_tools();
+    let mut tools = get_tools(memu_tool_config.is_some());
     if page_context.is_some() {
         tools.extend(get_page_context_tools());
     }
@@ -1025,42 +1189,73 @@ async fn run_agent_loop(
                             .and_then(|v| v.as_f64())
                             .map(|v| v as i32)
                             .filter(|d| *d > 0);
-                        match execute_search_atoms(
-                            &storage,
-                            query,
-                            limit,
-                            since_days,
-                            &ctx.scope_tag_ids,
-                            external_settings.clone(),
-                        )
-                        .await
-                        {
-                            Ok(results) => {
-                                let count = results.len() as i32;
-                                for result in results.iter() {
-                                    ctx.citations.push((
-                                        result.atom.atom.id.clone(),
-                                        Some(result.matching_chunk_index),
-                                        result.matching_chunk_content.chars().take(200).collect(),
-                                    ));
+                        if let Some(config) = memu_tool_config.as_ref() {
+                            match execute_memu_search_atoms(config, query, limit, since_days).await {
+                                Ok(results) => {
+                                    let count = results.len() as i32;
+                                    for result in results.iter() {
+                                        ctx.citations.push((
+                                            result.id.clone(),
+                                            None,
+                                            result.summary.chars().take(200).collect(),
+                                        ));
+                                    }
+                                    let result_text = results
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, r)| {
+                                            format!(
+                                                "[{}] (atom_id: {}, similarity: {:.2})\n{}",
+                                                ctx.citations.len() - results.len() + i + 1,
+                                                r.id,
+                                                r.score.unwrap_or(0.0),
+                                                r.summary
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n\n");
+                                    (result_text, count)
                                 }
-                                let result_text = results
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, r)| {
-                                        format!(
-                                            "[{}] (atom_id: {}, similarity: {:.2})\n{}",
-                                            ctx.citations.len() - results.len() + i + 1,
-                                            r.atom.atom.id,
-                                            r.similarity_score,
-                                            r.matching_chunk_content
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n\n");
-                                (result_text, count)
+                                Err(e) => (format!("Error: {}", e), 0),
                             }
-                            Err(e) => (format!("Error: {}", e), 0),
+                        } else {
+                            match execute_search_atoms(
+                                &storage,
+                                query,
+                                limit,
+                                since_days,
+                                &ctx.scope_tag_ids,
+                                external_settings.clone(),
+                            )
+                            .await
+                            {
+                                Ok(results) => {
+                                    let count = results.len() as i32;
+                                    for result in results.iter() {
+                                        ctx.citations.push((
+                                            result.atom.atom.id.clone(),
+                                            Some(result.matching_chunk_index),
+                                            result.matching_chunk_content.chars().take(200).collect(),
+                                        ));
+                                    }
+                                    let result_text = results
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, r)| {
+                                            format!(
+                                                "[{}] (atom_id: {}, similarity: {:.2})\n{}",
+                                                ctx.citations.len() - results.len() + i + 1,
+                                                r.atom.atom.id,
+                                                r.similarity_score,
+                                                r.matching_chunk_content
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n\n");
+                                    (result_text, count)
+                                }
+                                Err(e) => (format!("Error: {}", e), 0),
+                            }
                         }
                     }
                     "get_atom" => {
@@ -1075,7 +1270,12 @@ async fn run_agent_loop(
                             .and_then(|v| v.as_u64())
                             .map(|v| (v as usize).clamp(1, GET_ATOM_MAX_LIMIT))
                             .unwrap_or(GET_ATOM_DEFAULT_LIMIT);
-                        match execute_get_atom(&storage, atom_id, offset, limit).await {
+                        let content = if let Some(config) = memu_tool_config.as_ref() {
+                            execute_memu_get_atom(config, atom_id, offset, limit).await
+                        } else {
+                            execute_get_atom(&storage, atom_id, offset, limit).await
+                        };
+                        match content {
                             Ok(Some(content)) => {
                                 let citation_index = ctx.citations.len() + 1;
                                 ctx.citations.push((
@@ -1096,7 +1296,13 @@ async fn run_agent_loop(
                         }
                     }
                     "get_current_page_context" => {
-                        match execute_get_current_page_context(&storage, page_context).await {
+                        match execute_get_current_page_context(
+                            &storage,
+                            page_context,
+                            memu_tool_config.as_ref(),
+                        )
+                        .await
+                        {
                             Ok(Some(mut context)) => {
                                 let visible_atom_id = context
                                     .get("visible_atom")
@@ -1329,6 +1535,7 @@ where
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1341,6 +1548,7 @@ pub async fn send_chat_message_with_canvas<F>(
     content: &str,
     on_event: F,
     external_settings: Option<std::collections::HashMap<String, String>>,
+    memu_tool_config: Option<MemuToolConfig>,
     canvas_context: Option<CanvasContext>,
     page_context: Option<PageContext>,
     canvas_cache: Option<crate::CanvasCache>,
@@ -1451,6 +1659,7 @@ where
         model,
         ctx,
         Some(settings_map),
+        memu_tool_config,
         page_context.as_ref(),
         canvas_context.as_ref(),
         canvas_cache.as_ref(),

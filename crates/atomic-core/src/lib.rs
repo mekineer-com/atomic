@@ -59,7 +59,7 @@ pub mod tokens;
 pub mod wiki;
 
 // Re-exports for convenience
-pub use agent::{CanvasClusterSummary, CanvasContext, ChatEvent, PageContext};
+pub use agent::{CanvasClusterSummary, CanvasContext, ChatEvent, MemuToolConfig, PageContext};
 pub use atom_edit::{apply_atom_edits, AtomEditOperation};
 pub use db::Database;
 pub use embedding::{EmbeddingEvent, EmbeddingStrategy, TaggingStrategy};
@@ -2554,6 +2554,7 @@ impl AtomicCore {
             content,
             on_event,
             self.settings_for_background().await,
+            None,
             canvas_context,
             page_context,
             Some(self.canvas_cache.clone()),
@@ -2569,6 +2570,7 @@ impl AtomicCore {
         content: &str,
         on_event: F,
         external_settings: HashMap<String, String>,
+        memu_tool_config: Option<agent::MemuToolConfig>,
         canvas_context: Option<CanvasContext>,
         page_context: Option<PageContext>,
     ) -> Result<ChatMessageWithContext, AtomicCoreError>
@@ -2582,6 +2584,7 @@ impl AtomicCore {
             content,
             on_event,
             Some(settings),
+            memu_tool_config,
             canvas_context,
             page_context,
             Some(self.canvas_cache.clone()),

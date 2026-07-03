@@ -291,28 +291,24 @@ pub async fn send_chat_message(
         Ok(settings) => settings,
         Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
     };
+    let memu_tools = atomic_core::MemuToolConfig {
+        base_url: memu_session.base_url,
+        user_id: memu_session.user_id,
+        soul_id: memu_session.soul_id,
+    };
 
-    let result = if body.canvas_context.is_some() || body.page_context.is_some() {
-        db.0.send_chat_message_with_external_settings(
+    let result = db
+        .0
+        .send_chat_message_with_external_settings(
             &conversation_id,
             &body.content,
             on_event,
             settings,
+            Some(memu_tools),
             body.canvas_context,
             body.page_context,
         )
-        .await
-    } else {
-        db.0.send_chat_message_with_external_settings(
-            &conversation_id,
-            &body.content,
-            on_event,
-            settings,
-            None,
-            None,
-        )
-        .await
-    };
+        .await;
 
     match result {
         Ok(message) => HttpResponse::Ok().json(message),
