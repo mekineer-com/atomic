@@ -22,6 +22,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -34,6 +35,13 @@ pub struct MemuToolConfig {
     pub base_url: String,
     pub user_id: String,
     pub soul_id: String,
+}
+
+#[derive(Serialize)]
+struct AtomicPromptLogRequest<'a> {
+    conversation_id: &'a str,
+    model: &'a str,
+    messages: &'a [Message],
 }
 
 // ==================== Chat Events ====================
@@ -658,6 +666,29 @@ async fn execute_memu_edit_atom(
         .map_err(|e| format!("memU edit_atom returned invalid JSON: {e}"))
 }
 
+async fn forward_atomic_prompt_log(
+    config: &MemuToolConfig,
+    conversation_id: &str,
+    model: &str,
+    messages: &[Message],
+) {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return;
+    };
+    let _ = client
+        .post(format!("{}/integration/atomic/prompt_log", config.base_url))
+        .json(&AtomicPromptLogRequest {
+            conversation_id,
+            model,
+            messages,
+        })
+        .send()
+        .await;
+}
+
 async fn execute_search_atoms(
     storage: &StorageBackend,
     query: &str,
@@ -970,6 +1001,30 @@ When citing sources:
     )
 }
 
+const MEMU_RESPONSE_SENTENCES_SETTING: &str = "memu_response_sentences";
+const MEMU_LOG_PROMPTS_SETTING: &str = "memu_log_prompts";
+
+fn memu_response_sentence_limit(settings: &HashMap<String, String>) -> Option<usize> {
+    settings
+        .get(MEMU_RESPONSE_SENTENCES_SETTING)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn memu_prompt_logging_enabled(settings: &HashMap<String, String>) -> bool {
+    matches!(
+        settings.get(MEMU_LOG_PROMPTS_SETTING).map(String::as_str),
+        Some("1" | "true" | "yes")
+    )
+}
+
+fn append_memu_response_limit(mut messages: Vec<Message>, limit: usize) -> Vec<Message> {
+    messages.push(Message::user(format!(
+        "**respond with maximum length {limit} sentences or fewer**"
+    )));
+    messages
+}
+
 // ==================== Context Window Management ====================
 
 /// Estimate token count for a message, including tool call content.
@@ -1195,10 +1250,28 @@ async fn run_agent_loop(
         });
 
         // Truncate messages if they've grown beyond context window (from tool results)
-        let call_messages = truncate_messages_to_context(
+        let mut call_messages = truncate_messages_to_context(
             ctx.messages.clone(),
             provider_config.context_length_for_model(&model),
         );
+        if memu_tool_config.is_some() {
+            if let Some(limit) = external_settings
+                .as_ref()
+                .and_then(memu_response_sentence_limit)
+            {
+                call_messages = append_memu_response_limit(call_messages, limit);
+            }
+        }
+        let should_forward_prompt_log = external_settings
+            .as_ref()
+            .map(memu_prompt_logging_enabled)
+            .unwrap_or(false);
+        if should_forward_prompt_log {
+            if let Some(config) = memu_tool_config.as_ref() {
+                forward_atomic_prompt_log(config, &ctx.conversation_id, &model, &call_messages)
+                    .await;
+            }
+        }
 
         let response = provider
             .complete_streaming_with_tools(&call_messages, &tools, &config, on_delta)
@@ -1816,5 +1889,18 @@ mod tests {
         assert!(contents.contains(&"memu entry snapshot"));
         assert!(contents.contains(&"latest"));
         assert!(!contents.iter().any(|c| c.starts_with("older user message")));
+    }
+
+    #[test]
+    fn memu_response_limit_is_last_transient_user_message() {
+        let messages =
+            append_memu_response_limit(vec![Message::system("system"), Message::user("hello")], 4);
+
+        let last = messages.last().expect("reminder");
+        assert_eq!(last.role, MessageRole::User);
+        assert_eq!(
+            last.content.as_deref(),
+            Some("**respond with maximum length 4 sentences or fewer**")
+        );
     }
 }
