@@ -2553,6 +2553,33 @@ impl AtomicCore {
         .map_err(|e| AtomicCoreError::DatabaseOperation(e))
     }
 
+    /// Send a chat message with caller-provided provider settings.
+    pub async fn send_chat_message_with_external_settings<F>(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        on_event: F,
+        external_settings: HashMap<String, String>,
+        canvas_context: Option<CanvasContext>,
+        page_context: Option<PageContext>,
+    ) -> Result<ChatMessageWithContext, AtomicCoreError>
+    where
+        F: Fn(ChatEvent) + Send + Sync + 'static,
+    {
+        agent::send_chat_message_with_canvas(
+            self.storage.clone(),
+            conversation_id,
+            content,
+            on_event,
+            Some(external_settings),
+            canvas_context,
+            page_context,
+            Some(self.canvas_cache.clone()),
+        )
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e))
+    }
+
     // ==================== Canvas Operations ====================
 
     /// Get all stored atom positions

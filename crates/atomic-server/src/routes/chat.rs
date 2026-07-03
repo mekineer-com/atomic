@@ -6,7 +6,7 @@ use crate::event_bridge::chat_event_callback;
 use crate::state::{AppState, MemuSessionConfig};
 use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -28,6 +28,11 @@ struct AtomicSessionStartRequest<'a> {
 #[derive(Deserialize)]
 struct AtomicSessionStartResponse {
     snapshot_text: String,
+}
+
+#[derive(Deserialize)]
+struct AtomicChatProfileResponse {
+    settings: HashMap<String, String>,
 }
 
 async fn fetch_atomic_snapshot(
@@ -65,6 +70,35 @@ async fn fetch_atomic_snapshot(
         return Err("memU session_start returned empty snapshot_text".to_string());
     }
     Ok(snapshot)
+}
+
+async fn fetch_atomic_chat_profile(
+    config: &MemuSessionConfig,
+) -> Result<HashMap<String, String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("memU chat_profile client failed: {e}"))?;
+    let response = client
+        .get(format!(
+            "{}/integration/atomic/chat_profile",
+            config.base_url
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("memU chat_profile request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("memU chat_profile failed ({status})"));
+    }
+    let body = response
+        .json::<AtomicChatProfileResponse>()
+        .await
+        .map_err(|e| format!("memU chat_profile returned invalid JSON: {e}"))?;
+    if body.settings.is_empty() {
+        return Err("memU chat_profile returned empty settings".to_string());
+    }
+    Ok(body.settings)
 }
 
 fn hide_system_messages(
@@ -248,19 +282,36 @@ pub async fn send_chat_message(
     let conversation_id = path.into_inner();
     let body = body.into_inner();
     let on_event = chat_event_callback(state.event_tx.clone());
+    let Some(memu_session) = state.memu_session.clone() else {
+        return HttpResponse::InternalServerError().json(serde_json::json!({
+            "error": "MEMU_SERVER_URL, MEMU_USER_ID, and MEMU_SOUL_ID are required"
+        }));
+    };
+    let settings = match fetch_atomic_chat_profile(&memu_session).await {
+        Ok(settings) => settings,
+        Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+    };
 
     let result = if body.canvas_context.is_some() || body.page_context.is_some() {
-        db.0.send_chat_message_with_canvas(
+        db.0.send_chat_message_with_external_settings(
             &conversation_id,
             &body.content,
             on_event,
+            settings,
             body.canvas_context,
             body.page_context,
         )
         .await
     } else {
-        db.0.send_chat_message(&conversation_id, &body.content, on_event)
-            .await
+        db.0.send_chat_message_with_external_settings(
+            &conversation_id,
+            &body.content,
+            on_event,
+            settings,
+            None,
+            None,
+        )
+        .await
     };
 
     match result {

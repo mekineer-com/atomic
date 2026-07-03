@@ -79,11 +79,84 @@ async fn atomic_session_start_fail() -> HttpResponse {
     HttpResponse::InternalServerError().json(json!({"error": "memu unavailable"}))
 }
 
+async fn atomic_chat_profile_ok() -> HttpResponse {
+    HttpResponse::Ok().json(json!({
+        "settings": {
+            "provider": "openai_compat",
+            "openai_compat_base_url": "http://127.0.0.1:9",
+            "openai_compat_api_key": "test-key",
+            "openai_compat_llm_model": "mock-llm"
+        }
+    }))
+}
+
 fn start_memu_stub(handler: fn() -> actix_web::Route) -> (String, actix_web::dev::ServerHandle) {
-    let server =
-        HttpServer::new(move || App::new().route("/integration/atomic/session_start", handler()))
-            .bind(("127.0.0.1", 0))
-            .unwrap();
+    let server = HttpServer::new(move || {
+        App::new()
+            .route("/integration/atomic/session_start", handler())
+            .route(
+                "/integration/atomic/chat_profile",
+                web::get().to(atomic_chat_profile_ok),
+            )
+    })
+    .bind(("127.0.0.1", 0))
+    .unwrap();
+    let addr = server.addrs()[0];
+    let server = server.run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    (format!("http://{}", addr), handle)
+}
+
+async fn fake_chat_completion(body: web::Json<Value>) -> HttpResponse {
+    assert_eq!(body["model"], "mock-llm");
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .body("data: {\"choices\":[{\"delta\":{\"content\":\"fake answer\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
+}
+
+fn start_fake_model() -> (String, actix_web::dev::ServerHandle) {
+    let server = HttpServer::new(move || {
+        App::new()
+            .route("/chat/completions", web::post().to(fake_chat_completion))
+            .route("/v1/chat/completions", web::post().to(fake_chat_completion))
+    })
+    .bind(("127.0.0.1", 0))
+    .unwrap();
+    let addr = server.addrs()[0];
+    let server = server.run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    (format!("http://{}", addr), handle)
+}
+
+fn start_memu_stub_with_model(model_url: String) -> (String, actix_web::dev::ServerHandle) {
+    let server = HttpServer::new(move || {
+        let model_url = model_url.clone();
+        App::new()
+            .route(
+                "/integration/atomic/session_start",
+                web::post().to(atomic_session_start_ok),
+            )
+            .route(
+                "/integration/atomic/chat_profile",
+                web::get().to(move || {
+                    let model_url = model_url.clone();
+                    async move {
+                        HttpResponse::Ok().json(json!({
+                            "settings": {
+                                "provider": "openai_compat",
+                                "openai_compat_base_url": model_url,
+                                "openai_compat_api_key": "test-key",
+                                "openai_compat_llm_model": "mock-llm"
+                            }
+                        }))
+                    }
+                }),
+            )
+    })
+    .bind(("127.0.0.1", 0))
+    .unwrap();
     let addr = server.addrs()[0];
     let server = server.run();
     let handle = server.handle();
@@ -199,6 +272,50 @@ async fn test_create_conversation_cleans_up_after_memu_failure() {
     assert_eq!(conversations.as_array().unwrap().len(), 0);
 
     memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_send_message_uses_memu_chat_profile() {
+    let (model_url, model_handle) = start_fake_model();
+    let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/conversations")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"tag_ids": [], "title": null}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 201);
+    let created: Value = actix_test::read_body_json(resp).await;
+    let conversation_id = created["id"].as_str().unwrap();
+
+    let req = actix_test::TestRequest::post()
+        .uri(&format!("/api/conversations/{conversation_id}/messages"))
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"content": "hello"}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = actix_test::read_body_json(resp).await;
+    assert_eq!(body["content"], "fake answer");
+
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let raw = core
+        .get_conversation(conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let roles: Vec<&str> = raw
+        .messages
+        .iter()
+        .map(|m| m.message.role.as_str())
+        .collect();
+    assert_eq!(roles, vec!["system", "user", "assistant"]);
+
+    memu_handle.stop(true).await;
+    model_handle.stop(true).await;
 }
 
 #[actix_web::test]
