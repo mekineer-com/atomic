@@ -33,6 +33,7 @@ import { TabStrip } from './TabStrip';
 import { useAtomsStore } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
 import { isTauri } from '../../lib/platform';
+import { getTransport } from '../../lib/transport';
 import { useIsMobile } from '../../hooks';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
 
@@ -82,6 +83,7 @@ export function MainView() {
   const [isResizingChat, setIsResizingChat] = useState(false);
 
   const [filterBarOpen, setFilterBarOpen] = useState(false);
+  const [memuReviewsEnabled, setMemuReviewsEnabled] = useState(false);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const isMobile = useIsMobile();
   const hasActiveFilter = sourceFilter !== 'all' || !!sourceValue || sortBy !== 'updated' || sortOrder !== 'desc';
@@ -90,6 +92,21 @@ export function MainView() {
   // matches. Once a tab is active, the pill carries the active styling and
   // the main nav goes back to a neutral state.
   const onBaseView = activeTabId === null;
+
+  useEffect(() => {
+    let ignore = false;
+    (async () => {
+      try {
+        const status = await getTransport().invoke<{ enabled: boolean }>('get_memu_review_status');
+        if (!ignore) setMemuReviewsEnabled(status.enabled);
+      } catch {
+        if (!ignore) setMemuReviewsEnabled(false);
+      }
+    })();
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   // Debounced server-side search when searchQuery changes
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -385,13 +402,15 @@ export function MainView() {
           </div>
         )}
 
-        <button
-          onClick={() => setReviewPanelOpen(true)}
-          className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
-          title="Review memU changes"
-        >
-          <ClipboardCheck className="w-4 h-4" strokeWidth={2} />
-        </button>
+        {memuReviewsEnabled && (
+          <button
+            onClick={() => setReviewPanelOpen(true)}
+            className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
+            title="Review memU changes"
+          >
+            <ClipboardCheck className="w-4 h-4" strokeWidth={2} />
+          </button>
+        )}
 
         {/* Chat sidebar toggle */}
         <button
@@ -517,7 +536,7 @@ export function MainView() {
         <ChatViewer />
       </div>
     </div>
-    <PendingReviewPanel isOpen={reviewPanelOpen} onClose={() => setReviewPanelOpen(false)} />
+    {memuReviewsEnabled && <PendingReviewPanel isOpen={reviewPanelOpen} onClose={() => setReviewPanelOpen(false)} />}
     </>
   );
 }

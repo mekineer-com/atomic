@@ -9,6 +9,10 @@ pub struct SummaryUpdate {
     pub summary: String,
 }
 
+pub async fn status(state: web::Data<AppState>) -> HttpResponse {
+    HttpResponse::Ok().json(json!({"enabled": state.memu_session.is_some()}))
+}
+
 fn session(state: &AppState) -> Result<MemuSessionConfig, HttpResponse> {
     state.memu_session.clone().ok_or_else(|| {
         HttpResponse::InternalServerError().json(json!({

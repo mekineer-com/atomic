@@ -302,6 +302,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     );
 
     // memU review proxy
+    cfg.route("/memu/reviews/status", web::get().to(memu_reviews::status));
     cfg.route("/memu/reviews", web::get().to(memu_reviews::list_pending));
     cfg.route(
         "/memu/reviews/memory/{id}/approve",

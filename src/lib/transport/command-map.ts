@@ -106,6 +106,10 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   },
 
   // ==================== memU Reviews ====================
+  get_memu_review_status: {
+    method: 'GET',
+    path: '/api/memu/reviews/status',
+  },
   list_pending_memu_reviews: {
     method: 'GET',
     path: '/api/memu/reviews',
