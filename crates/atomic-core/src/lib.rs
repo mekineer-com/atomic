@@ -486,6 +486,15 @@ impl AtomicCore {
         self.get_settings().await.ok()
     }
 
+    async fn settings_with_overrides(
+        &self,
+        overrides: HashMap<String, String>,
+    ) -> Result<HashMap<String, String>, AtomicCoreError> {
+        let mut settings = self.get_settings().await?;
+        settings.extend(overrides);
+        Ok(settings)
+    }
+
     /// Get the storage path (for display purposes).
     pub fn db_path(&self) -> &Path {
         self.storage.storage_path()
@@ -2553,7 +2562,7 @@ impl AtomicCore {
         .map_err(|e| AtomicCoreError::DatabaseOperation(e))
     }
 
-    /// Send a chat message with caller-provided provider settings.
+    /// Send a chat message with caller-provided provider settings layered over Atomic defaults.
     pub async fn send_chat_message_with_external_settings<F>(
         &self,
         conversation_id: &str,
@@ -2566,12 +2575,13 @@ impl AtomicCore {
     where
         F: Fn(ChatEvent) + Send + Sync + 'static,
     {
+        let settings = self.settings_with_overrides(external_settings).await?;
         agent::send_chat_message_with_canvas(
             self.storage.clone(),
             conversation_id,
             content,
             on_event,
-            Some(external_settings),
+            Some(settings),
             canvas_context,
             page_context,
             Some(self.canvas_cache.clone()),
@@ -4650,6 +4660,30 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db = AtomicCore::open_or_create(temp_file.path()).unwrap();
         (db, temp_file)
+    }
+
+    #[tokio::test]
+    async fn external_chat_settings_preserve_atomic_defaults() {
+        let (db, _temp) = create_empty_test_db();
+        let settings = db
+            .settings_with_overrides(HashMap::from([
+                ("provider".to_string(), "openai_compat".to_string()),
+                (
+                    "openai_compat_base_url".to_string(),
+                    "http://127.0.0.1:9".to_string(),
+                ),
+                (
+                    "openai_compat_llm_model".to_string(),
+                    "mock-llm".to_string(),
+                ),
+            ]))
+            .await
+            .unwrap();
+
+        assert_eq!(settings["provider"], "openai_compat");
+        assert_eq!(settings["openai_compat_llm_model"], "mock-llm");
+        assert_eq!(settings["embedding_model"], "openai/text-embedding-3-small");
+        assert_eq!(settings["openai_compat_embedding_dimension"], "1536");
     }
 
     /// Get a seeded category tag by name (e.g., "Topics")
