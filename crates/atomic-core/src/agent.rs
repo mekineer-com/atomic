@@ -1270,7 +1270,9 @@ async fn run_agent_loop(
                             .and_then(|v| v.as_u64())
                             .map(|v| (v as usize).clamp(1, GET_ATOM_MAX_LIMIT))
                             .unwrap_or(GET_ATOM_DEFAULT_LIMIT);
-                        let content = if let Some(config) = memu_tool_config.as_ref() {
+                        let content = if let Some(config) =
+                            memu_tool_config.as_ref().filter(|_| is_memu_id(atom_id))
+                        {
                             execute_memu_get_atom(config, atom_id, offset, limit).await
                         } else {
                             execute_get_atom(&storage, atom_id, offset, limit).await
