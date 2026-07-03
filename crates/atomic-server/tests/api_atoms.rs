@@ -312,6 +312,22 @@ async fn test_create_conversation_cleans_up_after_memu_failure() {
 }
 
 #[actix_web::test]
+async fn test_memu_session_satisfies_provider_verify() {
+    let (memu_url, memu_handle) = start_memu_stub(|| web::post().to(atomic_session_start_ok));
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/provider/verify")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let resp: Value = actix_test::call_and_read_body_json(&app, req).await;
+
+    assert_eq!(resp["configured"], true);
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
 async fn test_send_message_uses_memu_chat_profile() {
     let (model_url, model_handle) = start_fake_model();
     let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);
