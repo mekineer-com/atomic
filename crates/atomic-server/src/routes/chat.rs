@@ -51,7 +51,7 @@ struct AtomicTranscriptRow {
     created_at: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct EndMemuSessionBody {
     conversation_id: String,
 }
@@ -152,11 +152,20 @@ fn existing_recap(conv: &atomic_core::ConversationWithMessages) -> Option<String
     let messages = &conv.messages;
     for (idx, message) in messages.iter().enumerate().rev() {
         if message.message.role == "user" && message.message.content.trim() == ATOMIC_RECAP_INSTRUCTION {
-            return messages
+            let assistant_idx = messages
                 .iter()
+                .enumerate()
                 .skip(idx + 1)
-                .find(|m| m.message.role == "assistant" && !m.message.content.trim().is_empty())
-                .map(|m| m.message.content.trim().to_string());
+                .find(|(_, m)| m.message.role == "assistant" && !m.message.content.trim().is_empty())
+                .map(|(assistant_idx, m)| (assistant_idx, m.message.content.trim().to_string()));
+            if let Some((assistant_idx, recap)) = assistant_idx {
+                let later_chat = messages
+                    .iter()
+                    .skip(assistant_idx + 1)
+                    .any(|m| matches!(m.message.role.as_str(), "user" | "assistant"));
+                return (!later_chat).then_some(recap);
+            }
+            return None;
         }
     }
     None
