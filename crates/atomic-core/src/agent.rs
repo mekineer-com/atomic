@@ -1320,143 +1320,17 @@ pub async fn send_chat_message_with_settings<F>(
 where
     F: Fn(ChatEvent) + Send + Sync + 'static,
 {
-    let on_event: ChatEventCallback = Arc::new(on_event);
-
-    // Resolve settings (from registry if provided, otherwise from storage)
-    let settings_map = match external_settings {
-        Some(s) => s,
-        None => storage
-            .get_all_settings_sync()
-            .await
-            .map_err(|e| e.to_string())?,
-    };
-
-    // Get provider config and model from settings
-    let (provider_config, model) = {
-        let provider_config = ProviderConfig::from_settings(&settings_map);
-
-        if provider_config.provider_type == ProviderType::OpenRouter
-            && provider_config.openrouter_api_key.is_none()
-        {
-            return Err(
-                "OpenRouter API key not configured. Please set it in Settings.".to_string(),
-            );
-        }
-
-        let model = match provider_config.provider_type {
-            ProviderType::Ollama => provider_config.llm_model().to_string(),
-            ProviderType::OpenAICompat => provider_config.llm_model().to_string(),
-            ProviderType::OpenRouter => settings_map
-                .get("chat_model")
-                .cloned()
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4.6".to_string()),
-        };
-
-        (provider_config, model)
-    };
-
-    // Save user message
-    storage
-        .save_message_sync(conversation_id, "user", content)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Get conversation context
-    let scope_tag_ids = storage
-        .get_scope_tag_ids_sync(conversation_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let scope_description = storage
-        .get_scope_description_sync(&scope_tag_ids)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Get conversation messages via get_conversation_sync and convert to provider format
-    let conversation = storage
-        .get_conversation_sync(conversation_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let messages = match conversation {
-        Some(conv) => chat_messages_to_provider_messages(conv.messages),
-        None => Vec::new(),
-    };
-
-    // Build message history for API
-    let custom_chat_prefix = settings_map
-        .get("chat_prompt")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let base_system = get_system_prompt(&scope_description);
-    let system_prompt = match custom_chat_prefix {
-        Some(prefix) => format!("{prefix}\n\n{base_system}"),
-        None => base_system,
-    };
-    let mut api_messages = vec![Message::system(system_prompt)];
-    api_messages.extend(messages);
-
-    // Truncate to fit context window for providers with limited context
-    let api_messages = truncate_messages_to_context(
-        api_messages,
-        provider_config.context_length_for_model(&model),
-    );
-
-    // Create agent context
-    let ctx = AgentContext {
-        conversation_id: conversation_id.to_string(),
-        scope_tag_ids,
-        messages: api_messages,
-        citations: Vec::new(),
-        tool_calls_record: Vec::new(),
-    };
-
-    // Run agent loop (storage is Clone, so no separate connection needed)
-    let mut result = run_agent_loop(
-        Arc::clone(&on_event),
-        storage.clone(),
-        provider_config,
-        model,
-        ctx,
-        Some(settings_map),
+    send_chat_message_with_canvas(
+        storage,
+        conversation_id,
+        content,
+        on_event,
+        external_settings,
         None,
         None,
         None,
     )
-    .await?;
-
-    // Save assistant message
-    {
-        let saved_msg = storage
-            .save_message_sync(conversation_id, "assistant", &result.message.content)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        result.message.id = saved_msg.id.clone();
-        result.message.message_index = saved_msg.message_index;
-
-        for tool_call in &mut result.tool_calls {
-            tool_call.message_id = saved_msg.id.clone();
-        }
-        storage
-            .save_tool_calls_sync(&saved_msg.id, &result.tool_calls)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        for citation in &mut result.citations {
-            citation.message_id = saved_msg.id.clone();
-        }
-        storage
-            .save_citations_sync(&saved_msg.id, &result.citations)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Emit completion event
-    on_event(ChatEvent::Complete {
-        conversation_id: conversation_id.to_string(),
-        message: result.clone(),
-    });
-
-    Ok(result)
+    .await
 }
 
 /// Like `send_chat_message_with_settings` but with optional UI context for

@@ -894,9 +894,10 @@ fn keyword_search_chats(
 
     let mut msg_stmt = conn
         .prepare(
-            "SELECT conversation_id, content, bm25(chat_messages_fts) AS score
+            "SELECT chat_messages_fts.conversation_id, chat_messages_fts.content, bm25(chat_messages_fts) AS score
              FROM chat_messages_fts
-             WHERE chat_messages_fts MATCH ?1
+             JOIN chat_messages m ON m.id = chat_messages_fts.id
+             WHERE chat_messages_fts MATCH ?1 AND m.role != 'system'
              ORDER BY bm25(chat_messages_fts)
              LIMIT ?2",
         )
@@ -1163,7 +1164,7 @@ fn batch_fetch_conversation_meta(
     let query = format!(
         "SELECT c.id, c.title, c.updated_at, COUNT(m.id) AS message_count
          FROM conversations c
-         LEFT JOIN chat_messages m ON m.conversation_id = c.id
+         LEFT JOIN chat_messages m ON m.conversation_id = c.id AND m.role != 'system'
          WHERE c.id IN ({}) AND c.is_archived = 0
          GROUP BY c.id, c.title, c.updated_at",
         placeholders

@@ -897,9 +897,9 @@ async fn pg_keyword_search_chats(
                    ) AS rn
             FROM conversations c
             JOIN chat_messages m
-              ON m.conversation_id = c.id AND m.db_id = c.db_id
+              ON m.conversation_id = c.id AND m.db_id = c.db_id AND m.role != 'system'
             LEFT JOIN chat_messages m_all
-              ON m_all.conversation_id = c.id AND m_all.db_id = c.db_id
+              ON m_all.conversation_id = c.id AND m_all.db_id = c.db_id AND m_all.role != 'system'
             WHERE c.db_id = $2
               AND c.is_archived = 0
               AND m.content_tsv @@ plainto_tsquery('english', $1)
@@ -919,7 +919,7 @@ async fn pg_keyword_search_chats(
                    1 AS rn
             FROM conversations c
             LEFT JOIN chat_messages m_all
-              ON m_all.conversation_id = c.id AND m_all.db_id = c.db_id
+              ON m_all.conversation_id = c.id AND m_all.db_id = c.db_id AND m_all.role != 'system'
             WHERE c.db_id = $2
               AND c.is_archived = 0
               AND c.title IS NOT NULL

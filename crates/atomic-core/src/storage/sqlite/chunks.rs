@@ -754,7 +754,7 @@ impl SqliteStorage {
         conn.execute("DELETE FROM chat_messages_fts", [])?;
         conn.execute(
             "INSERT INTO chat_messages_fts(id, conversation_id, content)
-             SELECT id, conversation_id, content FROM chat_messages",
+             SELECT id, conversation_id, content FROM chat_messages WHERE role != 'system'",
             [],
         )?;
         Ok(())

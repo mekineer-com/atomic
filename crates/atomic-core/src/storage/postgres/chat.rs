@@ -47,7 +47,7 @@ async fn fetch_conversation_summary(
     db_id: &str,
 ) -> StorageResult<(i32, Option<String>)> {
     let message_count: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT COUNT(*) FROM chat_messages WHERE conversation_id = $1 AND db_id = $2",
+        "SELECT COUNT(*) FROM chat_messages WHERE conversation_id = $1 AND db_id = $2 AND role != 'system'",
     )
     .bind(conversation_id)
     .bind(db_id)
@@ -58,7 +58,7 @@ async fn fetch_conversation_summary(
 
     let last_message_preview: Option<String> = sqlx::query_scalar(
         "SELECT content FROM chat_messages
-         WHERE conversation_id = $1 AND db_id = $2
+         WHERE conversation_id = $1 AND db_id = $2 AND role != 'system'
          ORDER BY message_index DESC
          LIMIT 1",
     )

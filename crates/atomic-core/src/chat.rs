@@ -61,7 +61,7 @@ pub fn get_conversation_summary(
     conversation_id: &str,
 ) -> Result<(i32, Option<String>), AtomicCoreError> {
     let message_count: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM chat_messages WHERE conversation_id = ?1",
+        "SELECT COUNT(*) FROM chat_messages WHERE conversation_id = ?1 AND role != 'system'",
         [conversation_id],
         |row| row.get(0),
     )?;
@@ -69,7 +69,7 @@ pub fn get_conversation_summary(
     let last_message_preview: Option<String> = conn
         .query_row(
             "SELECT content FROM chat_messages
-             WHERE conversation_id = ?1
+             WHERE conversation_id = ?1 AND role != 'system'
              ORDER BY message_index DESC
              LIMIT 1",
             [conversation_id],
@@ -334,7 +334,7 @@ fn batch_fetch_conversation_summaries(
 
     // Get counts
     let count_query = format!(
-        "SELECT conversation_id, COUNT(*) FROM chat_messages WHERE conversation_id IN ({}) GROUP BY conversation_id",
+        "SELECT conversation_id, COUNT(*) FROM chat_messages WHERE conversation_id IN ({}) AND role != 'system' GROUP BY conversation_id",
         placeholders
     );
     let mut count_stmt = conn.prepare(&count_query)?;
@@ -350,12 +350,12 @@ fn batch_fetch_conversation_summaries(
 
     // Get last message previews using window function
     let preview_query = format!(
-        "SELECT conversation_id, content FROM (
-            SELECT conversation_id, content,
-                   ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY message_index DESC) as rn
-            FROM chat_messages
-            WHERE conversation_id IN ({})
-        ) WHERE rn = 1",
+            "SELECT conversation_id, content FROM (
+                SELECT conversation_id, content,
+                       ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY message_index DESC) as rn
+                FROM chat_messages
+                WHERE conversation_id IN ({}) AND role != 'system'
+            ) WHERE rn = 1",
         placeholders
     );
     let mut preview_stmt = conn.prepare(&preview_query)?;
@@ -979,6 +979,34 @@ mod tests {
         assert_eq!(conv_with_msgs.messages.len(), 2);
         assert_eq!(conv_with_msgs.messages[0].message.role, "user");
         assert_eq!(conv_with_msgs.messages[1].message.role, "assistant");
+    }
+
+    #[test]
+    fn test_system_messages_hidden_from_summaries() {
+        let (db, _temp) = setup_db();
+        let conn = db.conn.lock().unwrap();
+
+        let conv = create_conversation(&conn, &[], Some("Chat")).unwrap();
+        save_message(&conn, &conv.conversation.id, "system", "Hidden snapshot").unwrap();
+        save_message(&conn, &conv.conversation.id, "user", "Visible user message").unwrap();
+
+        let (message_count, preview) =
+            get_conversation_summary(&conn, &conv.conversation.id).unwrap();
+        assert_eq!(message_count, 1);
+        assert_eq!(preview.as_deref(), Some("Visible user message"));
+
+        let conversations = get_conversations(&conn, None, 10, 0).unwrap();
+        assert_eq!(conversations[0].message_count, 1);
+        assert_eq!(
+            conversations[0].last_message_preview.as_deref(),
+            Some("Visible user message")
+        );
+
+        let raw = get_conversation(&conn, &conv.conversation.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.messages.len(), 2);
+        assert_eq!(raw.messages[0].message.role, "system");
     }
 
     #[test]

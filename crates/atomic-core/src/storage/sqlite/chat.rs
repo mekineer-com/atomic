@@ -116,10 +116,12 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         let (message_id, message_index) =
             crate::chat::save_message(&conn, conversation_id, role, content)?;
-        conn.execute(
-            "INSERT INTO chat_messages_fts(id, conversation_id, content) VALUES (?1, ?2, ?3)",
-            rusqlite::params![&message_id, conversation_id, content],
-        )?;
+        if role != "system" {
+            conn.execute(
+                "INSERT INTO chat_messages_fts(id, conversation_id, content) VALUES (?1, ?2, ?3)",
+                rusqlite::params![&message_id, conversation_id, content],
+            )?;
+        }
         // Reconstruct ChatMessage from the returned id and index
         Ok(ChatMessage {
             id: message_id,

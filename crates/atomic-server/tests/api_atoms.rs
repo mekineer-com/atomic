@@ -3,7 +3,7 @@
 //! Each test spins up a real actix-web test server backed by a temporary SQLite
 //! database and exercises the endpoints with actual HTTP requests.
 
-use actix_web::{test as actix_test, web, App};
+use actix_web::{test as actix_test, web, App, HttpResponse, HttpServer};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -22,6 +22,10 @@ struct TestCtx {
 
 impl TestCtx {
     async fn new() -> Self {
+        Self::new_with_memu(None).await
+    }
+
+    async fn new_with_memu(memu_base_url: Option<String>) -> Self {
         let temp = tempfile::TempDir::new().unwrap();
         let manager = Arc::new(atomic_core::DatabaseManager::new(temp.path()).unwrap());
         let (_info, raw_token) = manager
@@ -37,7 +41,11 @@ impl TestCtx {
             event_tx,
             public_url: None,
             log_buffer: atomic_server::log_buffer::LogBuffer::new(16),
-            memu_session: None,
+            memu_session: memu_base_url.map(|base_url| atomic_server::state::MemuSessionConfig {
+                base_url,
+                user_id: "Marcos".to_string(),
+                soul_id: "Siri".to_string(),
+            }),
             export_jobs: atomic_server::export_jobs::ExportJobManager::for_tests(
                 temp.path().join("exports"),
             ),
@@ -56,6 +64,31 @@ impl TestCtx {
     fn auth_header(&self) -> (&str, String) {
         ("Authorization", format!("Bearer {}", self.token))
     }
+}
+
+async fn atomic_session_start_ok(body: web::Json<Value>) -> HttpResponse {
+    assert_eq!(body["user_id"], "Marcos");
+    assert_eq!(body["soul_id"], "Siri");
+    assert!(body["conversation_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("chat:atomic-")));
+    HttpResponse::Ok().json(json!({"snapshot_text": "hidden memU snapshot"}))
+}
+
+async fn atomic_session_start_fail() -> HttpResponse {
+    HttpResponse::InternalServerError().json(json!({"error": "memu unavailable"}))
+}
+
+fn start_memu_stub(handler: fn() -> actix_web::Route) -> (String, actix_web::dev::ServerHandle) {
+    let server =
+        HttpServer::new(move || App::new().route("/integration/atomic/session_start", handler()))
+            .bind(("127.0.0.1", 0))
+            .unwrap();
+    let addr = server.addrs()[0];
+    let server = server.run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    (format!("http://{}", addr), handle)
 }
 
 /// Build an actix App that mirrors the real server's /api scope (auth + routes).
@@ -88,6 +121,85 @@ fn test_app(
 // ---------------------------------------------------------------------------
 // Atom CRUD tests
 // ---------------------------------------------------------------------------
+
+#[actix_web::test]
+async fn test_create_conversation_requires_memu_config() {
+    let ctx = TestCtx::new().await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/conversations")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"tag_ids": [], "title": null}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 500);
+}
+
+#[actix_web::test]
+async fn test_create_conversation_stores_hidden_memu_snapshot() {
+    let (memu_url, memu_handle) = start_memu_stub(|| web::post().to(atomic_session_start_ok));
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/conversations")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"tag_ids": [], "title": null}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 201);
+    let created: Value = actix_test::read_body_json(resp).await;
+    let conversation_id = created["id"].as_str().unwrap();
+    assert_eq!(created["message_count"], 0);
+
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let raw = core
+        .get_conversation(conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(raw.messages.len(), 1);
+    assert_eq!(raw.messages[0].message.role, "system");
+    assert_eq!(raw.messages[0].message.content, "hidden memU snapshot");
+
+    let req = actix_test::TestRequest::get()
+        .uri(&format!("/api/conversations/{conversation_id}"))
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let visible: Value = actix_test::read_body_json(resp).await;
+    assert_eq!(visible["messages"].as_array().unwrap().len(), 0);
+
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_create_conversation_cleans_up_after_memu_failure() {
+    let (memu_url, memu_handle) = start_memu_stub(|| web::post().to(atomic_session_start_fail));
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/conversations")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"tag_ids": [], "title": null}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 502);
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/conversations")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let conversations: Value = actix_test::read_body_json(resp).await;
+    assert_eq!(conversations.as_array().unwrap().len(), 0);
+
+    memu_handle.stop(true).await;
+}
 
 #[actix_web::test]
 async fn test_create_and_get_atom() {

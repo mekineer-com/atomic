@@ -6,6 +6,7 @@ use crate::event_bridge::chat_event_callback;
 use crate::state::{AppState, MemuSessionConfig};
 use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use utoipa::{IntoParams, ToSchema};
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -33,7 +34,11 @@ async fn fetch_atomic_snapshot(
     config: &MemuSessionConfig,
     atomic_conversation_id: &str,
 ) -> Result<String, String> {
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("memU session_start client failed: {e}"))?;
+    let response = client
         .post(format!(
             "{}/integration/atomic/session_start",
             config.base_url
@@ -60,6 +65,13 @@ async fn fetch_atomic_snapshot(
         return Err("memU session_start returned empty snapshot_text".to_string());
     }
     Ok(snapshot)
+}
+
+fn hide_system_messages(
+    mut conv: atomic_core::ConversationWithMessages,
+) -> atomic_core::ConversationWithMessages {
+    conv.messages.retain(|m| m.message.role != "system");
+    conv
 }
 
 #[utoipa::path(post, path = "/api/conversations", request_body = CreateConversationBody, responses((status = 201, description = "Created conversation", body = atomic_core::ConversationWithTags)), tag = "chat")]
@@ -89,6 +101,10 @@ pub async fn create_conversation(
         Err(e) => {
             if let Err(cleanup_err) = db.0.delete_conversation(&conv_id).await {
                 tracing::warn!(conversation_id = %conv_id, error = %cleanup_err, "failed to clean up conversation after memU snapshot failure");
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e,
+                    "cleanup_error": cleanup_err.to_string()
+                }));
             }
             return HttpResponse::BadGateway().json(serde_json::json!({ "error": e }));
         }
@@ -98,6 +114,10 @@ pub async fn create_conversation(
         Err(e) => {
             if let Err(cleanup_err) = db.0.delete_conversation(&conv_id).await {
                 tracing::warn!(conversation_id = %conv_id, error = %cleanup_err, "failed to clean up conversation after snapshot save failure");
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "error": e.to_string(),
+                    "cleanup_error": cleanup_err.to_string()
+                }));
             }
             crate::error::error_response(e)
         }
@@ -129,7 +149,7 @@ pub async fn get_conversations(db: Db, query: web::Query<GetConversationsQuery>)
 pub async fn get_conversation(db: Db, path: web::Path<String>) -> HttpResponse {
     let id = path.into_inner();
     match db.0.get_conversation(&id).await {
-        Ok(Some(conv)) => HttpResponse::Ok().json(conv),
+        Ok(Some(conv)) => HttpResponse::Ok().json(hide_system_messages(conv)),
         Ok(None) => {
             HttpResponse::NotFound().json(serde_json::json!({"error": "Conversation not found"}))
         }
