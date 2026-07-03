@@ -54,19 +54,19 @@ export async function initTransport(): Promise<void> {
     wireConnectionCallback(activeTransport);
     connectInBackground(activeTransport);
   } else {
-    // Web SPA — require explicit config from localStorage or prompt user
+    // Web SPA — OpenAlma local launch can provide its server config via Vite env.
     const saved = localStorage.getItem('atomic-server-config');
-    if (saved) {
-      const config: HttpTransportConfig = JSON.parse(saved);
-      activeTransport = new HttpTransport(config);
-      wireConnectionCallback(activeTransport);
-      connectInBackground(activeTransport);
-      void syncSharedConfig({ serverURL: config.baseUrl, apiToken: config.authToken });
-    } else if (import.meta.env.VITE_ATOMIC_SERVER_URL && import.meta.env.VITE_ATOMIC_AUTH_TOKEN) {
+    if (import.meta.env.VITE_ATOMIC_SERVER_URL && import.meta.env.VITE_ATOMIC_AUTH_TOKEN) {
       const config: HttpTransportConfig = {
         baseUrl: import.meta.env.VITE_ATOMIC_SERVER_URL.replace(/\/$/, ''),
         authToken: import.meta.env.VITE_ATOMIC_AUTH_TOKEN,
       };
+      activeTransport = new HttpTransport(config);
+      wireConnectionCallback(activeTransport);
+      connectInBackground(activeTransport);
+      void syncSharedConfig({ serverURL: config.baseUrl, apiToken: config.authToken });
+    } else if (saved) {
+      const config: HttpTransportConfig = JSON.parse(saved);
       activeTransport = new HttpTransport(config);
       wireConnectionCallback(activeTransport);
       connectInBackground(activeTransport);
