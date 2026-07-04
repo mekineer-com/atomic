@@ -56,7 +56,9 @@ pub struct EndMemuSessionBody {
     conversation_id: String,
 }
 
-const ATOMIC_RECAP_INSTRUCTION: &str = "This Atomic session is ending. Write a recap of your activity with your human: what you looked at, what you changed (edits you made and why), ideas rejected or deferred, and follow-ups you want to remember. Write it as yourself, for yourself.";
+fn atomic_recap_instruction(user_id: &str) -> String {
+    format!("This Atomic session is ending. Write a recap of your activity with {user_id}: what you looked at, what you changed (edits you made and why), ideas rejected or deferred, and follow-ups you want to remember. Write it as yourself, for yourself.")
+}
 
 async fn fetch_atomic_snapshot(
     config: &MemuSessionConfig,
@@ -148,10 +150,10 @@ fn has_user_assistant_interchange(rows: &[AtomicTranscriptRow]) -> bool {
     rows.iter().any(|m| m.role == "user") && rows.iter().any(|m| m.role == "assistant")
 }
 
-fn existing_recap(conv: &atomic_core::ConversationWithMessages) -> Option<String> {
+fn existing_recap(conv: &atomic_core::ConversationWithMessages, recap_instruction: &str) -> Option<String> {
     let messages = &conv.messages;
     for (idx, message) in messages.iter().enumerate().rev() {
-        if message.message.role == "user" && message.message.content.trim() == ATOMIC_RECAP_INSTRUCTION {
+        if message.message.role == "user" && message.message.content.trim() == recap_instruction {
             let assistant_idx = messages
                 .iter()
                 .enumerate()
@@ -437,7 +439,8 @@ pub async fn end_memu_session(
         Err(e) => return crate::error::error_response(e),
     };
     let mut rows = transcript_rows(&conv);
-    let mut recap = existing_recap(&conv);
+    let recap_instruction = atomic_recap_instruction(&memu_session.user_id);
+    let mut recap = existing_recap(&conv, &recap_instruction);
 
     if recap.is_none() && has_user_assistant_interchange(&rows) {
         let settings = match fetch_atomic_chat_profile(&memu_session).await {
@@ -454,7 +457,7 @@ pub async fn end_memu_session(
             .0
             .send_chat_message_with_external_settings(
                 conversation_id,
-                ATOMIC_RECAP_INSTRUCTION,
+                &recap_instruction,
                 on_event,
                 settings,
                 Some(memu_tools),
@@ -471,7 +474,7 @@ pub async fn end_memu_session(
             Err(e) => return crate::error::error_response(e),
         };
         rows = transcript_rows(&conv);
-        recap = existing_recap(&conv);
+        recap = existing_recap(&conv, &recap_instruction);
     }
 
     match post_atomic_session_end(&memu_session, conversation_id, recap, rows).await {

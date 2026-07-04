@@ -976,13 +976,26 @@ async fn execute_edit_atom(
 
 // ==================== System Prompt ====================
 
-fn get_system_prompt(scope_description: &str) -> String {
+fn get_system_prompt(scope_description: &str, memu_tool_config: Option<&MemuToolConfig>) -> String {
+    let (intro, guidelines) = match memu_tool_config {
+        Some(config) => (
+            format!(
+                "You are with {} in the app Atomic, where you can work on shaping your memories together. All of memory items and summaries are represented as individual atoms. In Atomic, {} is the user.",
+                config.user_id, config.user_id
+            ),
+            "Guidelines for Atomic",
+        ),
+        None => (
+            "You are a helpful AI assistant with access to the user's personal knowledge base. Your role is to answer questions by searching through and referencing the user's stored information.".to_string(),
+            "Guidelines",
+        ),
+    };
     format!(
-        r#"You are a helpful AI assistant with access to the user's personal knowledge base. Your role is to answer questions by searching through and referencing the user's stored information.
+        r#"{intro}
 
 {}
 
-Guidelines:
+{guidelines}:
 - Use search_atoms to find relevant information before answering, unless another available tool more directly addresses the user's request
 - Only call create_atom or edit_atom when the user explicitly asks you to create or modify an atom
 - Prefer targeted edit_atom operations. Use replace_all only for intentional full-content replacement
@@ -1785,7 +1798,7 @@ where
         .get("chat_prompt")
         .filter(|s| !s.is_empty())
         .map(|s| s.as_str());
-    let base_system = get_system_prompt(&scope_description);
+    let base_system = get_system_prompt(&scope_description, memu_tool_config.as_ref());
     let mut system_prompt = match custom_chat_prefix {
         Some(prefix) => format!("{prefix}\n\n{base_system}"),
         None => base_system,
@@ -1902,5 +1915,31 @@ mod tests {
             last.content.as_deref(),
             Some("**respond with maximum length 4 sentences or fewer**")
         );
+    }
+
+    #[test]
+    fn memu_system_prompt_uses_user_id() {
+        let prompt = get_system_prompt(
+            "You have access to ALL atoms.",
+            Some(&MemuToolConfig {
+                base_url: "http://127.0.0.1:8099".to_string(),
+                user_id: "Marcos".to_string(),
+                soul_id: "Siri".to_string(),
+            }),
+        );
+
+        assert!(prompt.contains("You are with Marcos in the app Atomic"));
+        assert!(prompt.contains("In Atomic, Marcos is the user."));
+        assert!(prompt.contains("Guidelines for Atomic:"));
+        assert!(!prompt.contains("helpful AI assistant"));
+    }
+
+    #[test]
+    fn default_system_prompt_is_unchanged_without_memu() {
+        let prompt = get_system_prompt("You have access to ALL atoms.", None);
+
+        assert!(prompt.contains("You are a helpful AI assistant"));
+        assert!(prompt.contains("Guidelines:"));
+        assert!(!prompt.contains("Guidelines for Atomic:"));
     }
 }
