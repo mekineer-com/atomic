@@ -459,14 +459,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   endMemuSession: async () => {
-    const { currentConversation, openConversation, fetchConversations } = get();
+    const { currentConversation, fetchConversations } = get();
     if (!currentConversation) return;
     set({ isEndingSession: true, error: null });
     try {
       await getTransport().invoke('end_memu_session', {
         conversationId: currentConversation.id,
       });
-      await openConversation(currentConversation.id);
       await fetchConversations(get().listFilterTagId ?? undefined);
       set({ view: 'list', currentConversation: null, messages: [], isEndingSession: false });
       useUIStore.getState().setChatSidebarConversationId(null);

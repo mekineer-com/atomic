@@ -1033,7 +1033,7 @@ fn memu_prompt_logging_enabled(settings: &HashMap<String, String>) -> bool {
 
 fn append_memu_response_limit(mut messages: Vec<Message>, limit: usize) -> Vec<Message> {
     messages.push(Message::user(format!(
-        "**respond with maximum length {limit} sentences or fewer**"
+        "**respond with {limit} sentences or fewer**"
     )));
     messages
 }
@@ -1281,8 +1281,13 @@ async fn run_agent_loop(
             .unwrap_or(false);
         if should_forward_prompt_log {
             if let Some(config) = memu_tool_config.as_ref() {
-                forward_atomic_prompt_log(config, &ctx.conversation_id, &model, &call_messages)
-                    .await;
+                let config = config.clone();
+                let conversation_id = ctx.conversation_id.clone();
+                let model = model.clone();
+                let messages = call_messages.clone();
+                tokio::spawn(async move {
+                    forward_atomic_prompt_log(&config, &conversation_id, &model, &messages).await;
+                });
             }
         }
 
@@ -1913,7 +1918,7 @@ mod tests {
         assert_eq!(last.role, MessageRole::User);
         assert_eq!(
             last.content.as_deref(),
-            Some("**respond with maximum length 4 sentences or fewer**")
+            Some("**respond with 4 sentences or fewer**")
         );
     }
 
