@@ -3,8 +3,8 @@
 //! Each test spins up a real actix-web test server backed by a temporary SQLite
 //! database and exercises the endpoints with actual HTTP requests.
 
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, web};
-use serde_json::{Value, json};
+use actix_web::{test as actix_test, web, App, HttpRequest, HttpResponse, HttpServer};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -69,11 +69,9 @@ impl TestCtx {
 async fn atomic_session_start_ok(body: web::Json<Value>) -> HttpResponse {
     assert_eq!(body["user_id"], "Marcos");
     assert_eq!(body["soul_id"], "Siri");
-    assert!(
-        body["conversation_id"]
-            .as_str()
-            .is_some_and(|id| id.starts_with("chat:atomic-"))
-    );
+    assert!(body["conversation_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("chat:atomic-")));
     HttpResponse::Ok().json(json!({"snapshot_text": "hidden memU snapshot"}))
 }
 
@@ -293,6 +291,27 @@ async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
     }))
 }
 
+async fn memu_neighborhood(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    assert_eq!(path.as_str(), "memory:m1");
+    assert!(req.query_string().contains("user_id="));
+    HttpResponse::Ok().json(json!({
+        "center_atom_id": "memory:m1",
+        "nodes": [{
+            "id": "memory:m1",
+            "kind": "memory",
+            "label": "Memory one",
+            "summary": "Memory summary",
+            "memory_type": "episodic",
+            "created_at": "2026-07-04T00:00:00Z",
+            "updated_at": "2026-07-04T00:00:00Z",
+            "category_ids": ["c1"],
+            "category_names": ["Core"],
+            "depth": 0
+        }],
+        "edges": []
+    }))
+}
+
 fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
     let server = HttpServer::new(move || {
         App::new()
@@ -302,6 +321,10 @@ fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
             .route(
                 "/integration/atomic/canvas-source",
                 web::get().to(memu_canvas_source),
+            )
+            .route(
+                "/integration/atomic/neighborhood/{id}",
+                web::get().to(memu_neighborhood),
             )
             .route("/memory/{id}", web::get().to(memu_memory))
     })
@@ -483,6 +506,14 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let canvas: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(canvas["atoms"][0]["atom_id"], "memory:m1");
     assert_eq!(canvas["atoms"][0]["tag_ids"][0], "category:c1");
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/graph/neighborhood/memory:m1")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let neighborhood: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(neighborhood["center_atom_id"], "memory:m1");
+    assert_eq!(neighborhood["atoms"][0]["depth"], 0);
 
     let req = actix_test::TestRequest::put()
         .uri("/api/atoms/memory:m1/content")

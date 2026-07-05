@@ -2,6 +2,8 @@
 
 use crate::db_extractor::Db;
 use crate::error::ok_or_error;
+use crate::routes::memu_proxy;
+use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use serde::Deserialize;
 use utoipa::IntoParams;
@@ -30,6 +32,7 @@ pub struct NeighborhoodQuery {
 
 #[utoipa::path(get, path = "/api/graph/neighborhood/{atom_id}", params(("atom_id" = String, Path, description = "Center atom ID"), NeighborhoodQuery), responses((status = 200, description = "Neighborhood graph", body = atomic_core::NeighborhoodGraph)), tag = "graph")]
 pub async fn get_atom_neighborhood(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     query: web::Query<NeighborhoodQuery>,
@@ -37,6 +40,58 @@ pub async fn get_atom_neighborhood(
     let atom_id = path.into_inner();
     let depth = query.depth.unwrap_or(1);
     let min_similarity = query.min_similarity.unwrap_or(0.5);
+    if let Some(config) = state.memu_session.clone() {
+        if !memu_proxy::is_memu_id(&atom_id) {
+            return HttpResponse::NotFound().json(serde_json::json!({"error": "memU atom not found"}));
+        }
+        let client = match memu_proxy::client() {
+            Ok(client) => client,
+            Err(response) => return response,
+        };
+        let mut params = vec![
+            ("depth", depth.to_string()),
+            ("min_similarity", min_similarity.to_string()),
+        ];
+        params.extend(
+            memu_proxy::scope_query(&config)
+                .into_iter()
+                .map(|(key, value)| (key, value.to_string())),
+        );
+        let body = match memu_proxy::memu_json(
+            client
+                .get(format!(
+                    "{}/integration/atomic/neighborhood/{}",
+                    config.base_url, atom_id
+                ))
+                .query(&params),
+            "memU neighborhood",
+        )
+        .await
+        {
+            Ok(body) => body,
+            Err(response) => return response,
+        };
+        let atoms: Vec<serde_json::Value> = body["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|node| {
+                let mut atom = memu_proxy::atom_from_node(node);
+                if let Some(map) = atom.as_object_mut() {
+                    map.insert(
+                        "depth".to_string(),
+                        serde_json::json!(node["depth"].as_i64().unwrap_or(1)),
+                    );
+                }
+                atom
+            })
+            .collect();
+        return HttpResponse::Ok().json(serde_json::json!({
+            "center_atom_id": body["center_atom_id"],
+            "atoms": atoms,
+            "edges": body["edges"].as_array().cloned().unwrap_or_default(),
+        }));
+    }
     ok_or_error(
         db.0.get_atom_neighborhood(&atom_id, depth, min_similarity)
             .await,
