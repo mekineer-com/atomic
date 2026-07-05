@@ -1656,6 +1656,8 @@ impl SqliteStorage {
                     primary_tag: row.get(4)?,
                     tag_count: row.get(5)?,
                     tag_ids: vec![],
+                    entity_ids: vec![],
+                    entity_names: vec![],
                     source_url: None,
                 })
             })?

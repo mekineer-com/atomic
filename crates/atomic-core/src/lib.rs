@@ -2730,6 +2730,8 @@ impl AtomicCore {
                     primary_tag,
                     tag_count,
                     tag_ids,
+                    entity_ids: vec![],
+                    entity_names: vec![],
                     source_url,
                 })
             })

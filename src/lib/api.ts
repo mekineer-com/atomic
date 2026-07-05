@@ -294,6 +294,9 @@ export interface CanvasAtomPosition {
   primary_tag: string | null;
   tag_count: number;
   tag_ids: string[];
+  entity_ids: string[];
+  entity_names: string[];
+  source_url: string | null;
 }
 
 export interface CanvasEdgeData {

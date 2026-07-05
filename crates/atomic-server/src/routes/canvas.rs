@@ -94,6 +94,10 @@ struct MemuCanvasAtom {
     primary_tag: Option<String>,
     tag_count: i32,
     tag_ids: Vec<String>,
+    #[serde(default)]
+    entity_ids: Vec<String>,
+    #[serde(default)]
+    entity_names: Vec<String>,
     source_url: Option<String>,
 }
 
@@ -178,6 +182,8 @@ fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
                 primary_tag: atom.primary_tag,
                 tag_count: atom.tag_count,
                 tag_ids: atom.tag_ids,
+                entity_ids: atom.entity_ids,
+                entity_names: atom.entity_names,
                 source_url: atom.source_url,
             })
         })

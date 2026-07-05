@@ -1902,6 +1902,8 @@ impl AtomStore for PostgresStorage {
                     primary_tag,
                     tag_count: tag_count as i32,
                     tag_ids: vec![],
+                    entity_ids: vec![],
+                    entity_names: vec![],
                     source_url: None,
                 }
             })

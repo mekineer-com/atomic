@@ -210,6 +210,8 @@ export function SigmaCanvas({
         connectivity,
         clusterIndex: clusterIdx,
         tagIds: atom.tag_ids,
+        entityIds: atom.entity_ids,
+        entityNames: atom.entity_names,
       });
     }
 
