@@ -303,6 +303,8 @@ export interface CanvasEdgeData {
   source: string;
   target: string;
   weight: number;
+  kind?: string;
+  predicate?: string | null;
 }
 
 export interface CanvasClusterLabel {

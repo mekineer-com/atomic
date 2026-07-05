@@ -224,6 +224,8 @@ fn memu_similarity_edges(atoms: &[MemuCanvasAtom]) -> Vec<CanvasEdgeData> {
             source,
             target,
             weight,
+            kind: Some("similarity".to_string()),
+            predicate: Some("similarity".to_string()),
         });
     }
     edges
@@ -246,18 +248,28 @@ fn cosine(left: &[f32], right: &[f32]) -> Option<f32> {
 }
 
 fn merge_edges(edges: &mut Vec<CanvasEdgeData>, extra: Vec<CanvasEdgeData>) {
-    let mut seen: HashSet<(String, String)> = edges
+    let mut seen: HashSet<(String, String, String)> = edges
         .iter()
-        .map(|edge| edge_key(&edge.source, &edge.target))
+        .map(edge_key)
         .collect();
     for edge in extra {
-        if seen.insert(edge_key(&edge.source, &edge.target)) {
+        if seen.insert(edge_key(&edge)) {
             edges.push(edge);
         }
     }
 }
 
-fn edge_key(left: &str, right: &str) -> (String, String) {
+fn edge_key(edge: &CanvasEdgeData) -> (String, String, String) {
+    let (left, right) = sorted_pair(&edge.source, &edge.target);
+    let layer = edge
+        .predicate
+        .as_deref()
+        .or(edge.kind.as_deref())
+        .unwrap_or("similarity");
+    (left, right, layer.to_string())
+}
+
+fn sorted_pair(left: &str, right: &str) -> (String, String) {
     if left <= right {
         (left.to_string(), right.to_string())
     } else {
@@ -313,5 +325,64 @@ fn filter_canvas_by_source_prefix(data: &GlobalCanvasData, prefix: &str) -> Glob
         atoms,
         edges,
         clusters,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn atom(id: &str) -> MemuCanvasAtom {
+        MemuCanvasAtom {
+            id: id.to_string(),
+            title: id.to_string(),
+            embedding: vec![1.0, 0.0],
+            primary_tag: None,
+            tag_count: 0,
+            tag_ids: vec![],
+            entity_ids: vec![],
+            entity_names: vec![],
+            source_url: None,
+        }
+    }
+
+    fn edge(source: &str, target: &str, predicate: &str) -> CanvasEdgeData {
+        CanvasEdgeData {
+            source: source.to_string(),
+            target: target.to_string(),
+            weight: 0.7,
+            kind: Some(predicate.to_string()),
+            predicate: Some(predicate.to_string()),
+        }
+    }
+
+    #[test]
+    fn memu_canvas_keeps_similarity_and_predicate_layers() {
+        let data = memu_canvas_data(MemuCanvasSource {
+            atoms: vec![atom("memory:a"), atom("memory:b")],
+            edges: vec![edge("memory:a", "memory:b", "caused_by")],
+        });
+
+        let layers: HashSet<_> = data
+            .edges
+            .iter()
+            .map(|edge| edge.predicate.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(layers, HashSet::from(["caused_by", "similarity"]));
+    }
+
+    #[test]
+    fn memu_canvas_dedupes_same_pair_same_layer_symmetrically() {
+        let data = memu_canvas_data(MemuCanvasSource {
+            atoms: vec![atom("memory:a"), atom("memory:b")],
+            edges: vec![edge("memory:b", "memory:a", "similarity")],
+        });
+
+        let similarity_count = data
+            .edges
+            .iter()
+            .filter(|edge| edge.predicate.as_deref() == Some("similarity"))
+            .count();
+        assert_eq!(similarity_count, 1);
     }
 }

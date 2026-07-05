@@ -1570,6 +1570,8 @@ impl SqliteStorage {
                 source: src,
                 target: tgt,
                 weight: (score - min_w) / range,
+                kind: None,
+                predicate: None,
             })
             .collect())
     }

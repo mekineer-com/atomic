@@ -620,6 +620,10 @@ pub struct CanvasEdgeData {
     pub source: String,
     pub target: String,
     pub weight: f32,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub predicate: Option<String>,
 }
 
 /// Cluster centroid label for the global canvas

@@ -173,7 +173,7 @@ export function SigmaCanvas({
       sigmaRef.current = null;
     }
 
-    const graph = new Graph();
+    const graph = new Graph({ multi: true });
     graphRef.current = graph;
     const scale = 500;
 
@@ -226,10 +226,14 @@ export function SigmaCanvas({
     const neighbors = new Map<string, Set<string>>();
     for (const edge of edges) {
       if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue;
-      if (graph.hasEdge(edge.source, edge.target) || graph.hasEdge(edge.target, edge.source)) continue;
+      const layer = edge.predicate || edge.kind || 'similarity';
+      const [left, right] = edge.source <= edge.target ? [edge.source, edge.target] : [edge.target, edge.source];
+      const edgeKey = `${left}|${right}|${layer}`;
+      if (graph.hasEdge(edgeKey)) continue;
       const w = (edge.weight - minW) / wRange;
-      graph.addEdge(edge.source, edge.target, {
+      graph.addEdgeWithKey(edgeKey, edge.source, edge.target, {
         weight: w,
+        layer,
         type: 'curved',
       });
       if (!neighbors.has(edge.source)) neighbors.set(edge.source, new Set());

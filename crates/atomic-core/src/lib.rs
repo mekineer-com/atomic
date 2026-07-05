@@ -2799,6 +2799,8 @@ impl AtomicCore {
                 source: src.to_string(),
                 target: tgt.to_string(),
                 weight: (score - min_w) / range,
+                kind: None,
+                predicate: None,
             })
             .collect()
     }
