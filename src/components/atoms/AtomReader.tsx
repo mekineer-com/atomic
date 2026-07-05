@@ -153,6 +153,15 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
           onDelete={async () => {
             if (atomId.startsWith('memory:')) {
               await getTransport().invoke('delete_memory', { id: atomId });
+              useAtomsStore.setState((state) => {
+                const atoms = state.atoms.filter((a) => a.id !== atomId);
+                const semanticSearchResults = state.semanticSearchResults?.filter((a) => a.id !== atomId) ?? null;
+                return {
+                  atoms,
+                  semanticSearchResults,
+                  totalCount: atoms.length === state.atoms.length ? state.totalCount : Math.max(0, state.totalCount - 1),
+                };
+              });
             } else {
               await deleteAtom(atomId);
             }
@@ -343,13 +352,14 @@ function AtomReaderContent({
 
   const handleDelete = async () => {
     setIsDeleting(true);
+    setMemuError(null);
     try {
       await onDelete();
+      setShowDeleteModal(false);
     } catch (error) {
-      console.error('Failed to delete atom:', error);
+      setMemuError(String(error));
     } finally {
       setIsDeleting(false);
-      setShowDeleteModal(false);
     }
   };
 
@@ -610,6 +620,9 @@ function AtomReaderContent({
         onConfirm={handleDelete}
       >
         <p>Are you sure you want to delete this {isMemuMemory ? 'memory' : 'atom'}? This action cannot be undone.</p>
+        {memuError && (
+          <p className="mt-3 rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{memuError}</p>
+        )}
       </Modal>
     </div>
   );
