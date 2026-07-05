@@ -3,8 +3,8 @@
 //! Each test spins up a real actix-web test server backed by a temporary SQLite
 //! database and exercises the endpoints with actual HTTP requests.
 
-use actix_web::{test as actix_test, web, App, HttpRequest, HttpResponse, HttpServer};
-use serde_json::{json, Value};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, web};
+use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast;
 
@@ -69,9 +69,11 @@ impl TestCtx {
 async fn atomic_session_start_ok(body: web::Json<Value>) -> HttpResponse {
     assert_eq!(body["user_id"], "Marcos");
     assert_eq!(body["soul_id"], "Siri");
-    assert!(body["conversation_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("chat:atomic-")));
+    assert!(
+        body["conversation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("chat:atomic-"))
+    );
     HttpResponse::Ok().json(json!({"snapshot_text": "hidden memU snapshot"}))
 }
 
@@ -273,8 +275,18 @@ async fn memu_update_memory(path: web::Path<String>, body: web::Json<Value>) -> 
     }))
 }
 
+async fn memu_approve_empty() -> HttpResponse {
+    HttpResponse::Ok().json(json!({"status": "ok"}))
+}
+
 async fn memu_search(req: HttpRequest) -> HttpResponse {
-    assert!(req.query_string().contains("mode=hybrid"));
+    let query = req.query_string();
+    if query.contains("q=memory") {
+        assert!(query.contains("mode=hybrid"));
+    }
+    if query.contains("q=global") {
+        assert!(query.contains("mode=keyword"));
+    }
     HttpResponse::Ok().json(json!({
         "nodes": [{
             "id": "memory:m1",
@@ -353,6 +365,7 @@ fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
             )
             .route("/memory/{id}", web::get().to(memu_memory))
             .route("/memory/{id}", web::patch().to(memu_update_memory))
+            .route("/memory/{id}/approve", web::post().to(memu_approve_empty))
     })
     .bind(("127.0.0.1", 0))
     .unwrap();
@@ -525,6 +538,14 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let search: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(search[0]["id"], "memory:m1");
 
+    let req = actix_test::TestRequest::post()
+        .uri("/api/search/global")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"query": "global", "section_limit": 5}))
+        .to_request();
+    let search: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(search["atoms"][0]["id"], "memory:m1");
+
     let req = actix_test::TestRequest::get()
         .uri("/api/canvas/global")
         .insert_header(ctx.auth_header())
@@ -550,6 +571,29 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 409);
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/atoms")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"content": "hidden local atom"}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 409);
+
+    let req = actix_test::TestRequest::put()
+        .uri("/api/canvas/positions")
+        .insert_header(ctx.auth_header())
+        .set_json(json!([{"atom_id": "memory:m1", "x": 1.0, "y": 2.0}]))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/canvas/positions")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let positions: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(positions.as_array().unwrap().len(), 0);
 
     memu_handle.stop(true).await;
 }
@@ -580,6 +624,24 @@ async fn test_memu_review_save_broadcasts_atom_updated() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_empty_memu_review_response_does_not_broadcast_atom_updated() {
+    let (memu_url, memu_handle) = start_memu_memory_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let mut events = ctx.state.event_tx.subscribe();
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/memu/reviews/memory/m1/approve")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    assert!(events.try_recv().is_err());
 
     memu_handle.stop(true).await;
 }

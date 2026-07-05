@@ -4,10 +4,10 @@ use crate::db_extractor::Db;
 use crate::error::ok_or_error;
 use crate::routes::memu_proxy;
 use crate::state::AppState;
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use atomic_core::{
-    projection, AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData,
-    GlobalCanvasData,
+    AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData, GlobalCanvasData,
+    projection,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -19,8 +19,15 @@ pub async fn get_positions(db: Db) -> HttpResponse {
 }
 
 #[utoipa::path(put, path = "/api/canvas/positions", request_body = Vec<AtomPosition>, responses((status = 200, description = "Positions saved")), tag = "canvas")]
-pub async fn save_positions(db: Db, body: web::Json<Vec<AtomPosition>>) -> HttpResponse {
+pub async fn save_positions(
+    state: web::Data<AppState>,
+    db: Db,
+    body: web::Json<Vec<AtomPosition>>,
+) -> HttpResponse {
     let positions = body.into_inner();
+    if state.memu_session.is_some() {
+        return HttpResponse::Ok().json(serde_json::json!({"status": "ok"}));
+    }
     match db.0.save_atom_positions(&positions).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "ok"})),
         Err(e) => crate::error::error_response(e),
@@ -201,7 +208,7 @@ fn memu_similarity_edges(atoms: &[MemuCanvasAtom]) -> Vec<CanvasEdgeData> {
     let mut edges = Vec::new();
     for (source, target, weight) in scored {
         if per_atom.get(&source).copied().unwrap_or(0) >= 3
-            && per_atom.get(&target).copied().unwrap_or(0) >= 3
+            || per_atom.get(&target).copied().unwrap_or(0) >= 3
         {
             continue;
         }

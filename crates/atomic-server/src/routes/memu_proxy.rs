@@ -42,7 +42,7 @@ pub async fn memu_json(
 }
 
 pub fn is_memu_id(id: &str) -> bool {
-    id.starts_with("memory:") || id.starts_with("category:")
+    id.starts_with("memory:") || id.starts_with("category:") || id.starts_with("entity:")
 }
 
 pub fn scope_query(config: &MemuSessionConfig) -> [(&str, &str); 2] {
@@ -96,5 +96,5 @@ pub fn atom_from_node(node: &Value) -> Value {
 }
 
 pub fn readonly() -> HttpResponse {
-    HttpResponse::Conflict().json(json!({"error": "memU atoms are read-only in this slice"}))
+    HttpResponse::Conflict().json(json!({"error": "local Atomic writes are disabled in memU mode"}))
 }

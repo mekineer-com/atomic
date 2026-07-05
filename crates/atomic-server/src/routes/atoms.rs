@@ -1,11 +1,11 @@
 //! Atom and Tag CRUD routes
 
 use crate::db_extractor::Db;
-use crate::error::{ok_or_error, ApiErrorResponse};
+use crate::error::{ApiErrorResponse, ok_or_error};
 use crate::event_bridge::embedding_event_callback;
 use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use atomic_core::{
     AtomLink, AtomWithTags, BulkCreateResult, PaginatedAtoms, PaginatedTagChildren, SourceInfo,
     Tag, TagWithCount,
@@ -403,6 +403,9 @@ pub async fn create_atom(
     db: Db,
     body: web::Json<CreateAtomRequest>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let req = body.into_inner();
     let on_event = embedding_event_callback(state.event_tx.clone());
     let event_tx = state.event_tx.clone();
@@ -444,6 +447,9 @@ pub async fn bulk_create_atoms(
     db: Db,
     body: web::Json<Vec<CreateAtomRequest>>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let requests: Vec<atomic_core::CreateAtomRequest> = body
         .into_inner()
         .into_iter()
@@ -500,7 +506,7 @@ pub async fn update_atom(
     body: web::Json<UpdateAtomRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+    if state.memu_session.is_some() {
         return memu_proxy::readonly();
     }
     let req = body.into_inner();
@@ -550,7 +556,7 @@ pub async fn update_atom_content_only(
     body: web::Json<UpdateAtomRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+    if state.memu_session.is_some() {
         return memu_proxy::readonly();
     }
     let req = body.into_inner();
@@ -586,7 +592,7 @@ pub async fn process_atom_pipeline(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+    if state.memu_session.is_some() {
         return memu_proxy::readonly();
     }
     tracing::info!(atom_id = %id, "Received explicit atom pipeline request");
@@ -612,7 +618,7 @@ pub async fn delete_atom(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+    if state.memu_session.is_some() {
         return memu_proxy::readonly();
     }
     ok_or_error(db.0.delete_atom(&id).await)
@@ -730,7 +736,14 @@ pub struct CreateTagRequest {
     ),
     tag = "tags",
 )]
-pub async fn create_tag(db: Db, body: web::Json<CreateTagRequest>) -> HttpResponse {
+pub async fn create_tag(
+    state: web::Data<AppState>,
+    db: Db,
+    body: web::Json<CreateTagRequest>,
+) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let req = body.into_inner();
     match db.0.create_tag(&req.name, req.parent_id.as_deref()).await {
         Ok(tag) => HttpResponse::Created().json(tag),
@@ -760,10 +773,14 @@ pub struct UpdateTagRequest {
     tag = "tags",
 )]
 pub async fn update_tag(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     body: web::Json<UpdateTagRequest>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let id = path.into_inner();
     let req = body.into_inner();
     ok_or_error(
@@ -786,10 +803,14 @@ pub async fn update_tag(
     tag = "tags",
 )]
 pub async fn delete_tag(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let id = path.into_inner();
     let recursive = query.get("recursive").map(|v| v == "true").unwrap_or(false);
     ok_or_error(db.0.delete_tag(&id, recursive).await)
@@ -821,10 +842,14 @@ pub struct SetAutotagDescriptionRequest {
     tag = "tags",
 )]
 pub async fn set_tag_autotag_target(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     body: web::Json<SetAutotagTargetRequest>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let id = path.into_inner();
     let value = body.into_inner().value;
     match db.0.set_tag_autotag_target(&id, value).await {
@@ -847,10 +872,14 @@ pub async fn set_tag_autotag_target(
     tag = "tags",
 )]
 pub async fn set_tag_autotag_description(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     body: web::Json<SetAutotagDescriptionRequest>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let id = path.into_inner();
     let description = body.into_inner().description;
     match db.0.set_tag_autotag_description(&id, &description).await {
@@ -879,9 +908,13 @@ pub struct ConfigureAutotagTargetsRequest {
     tag = "tags",
 )]
 pub async fn configure_autotag_targets(
+    state: web::Data<AppState>,
     db: Db,
     body: web::Json<ConfigureAutotagTargetsRequest>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return memu_proxy::readonly();
+    }
     let req = body.into_inner();
     ok_or_error(
         db.0.configure_autotag_targets(&req.keep_defaults, &req.add_custom)

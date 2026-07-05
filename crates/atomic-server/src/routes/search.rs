@@ -1,10 +1,10 @@
 //! Search routes
 
 use crate::db_extractor::Db;
-use crate::error::{ok_or_error, ApiErrorResponse};
+use crate::error::{ApiErrorResponse, ok_or_error};
 use crate::routes::memu_proxy;
 use crate::state::AppState;
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use atomic_core::{SearchMode, SearchOptions, SemanticSearchResult, SimilarAtomResult};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -84,13 +84,17 @@ pub async fn global_search(
 ) -> HttpResponse {
     let req = body.into_inner();
     if let Some(config) = state.memu_session.clone() {
-        let atoms =
-            match memu_search_value(config, &req.query, "hybrid", req.section_limit.unwrap_or(5))
-                .await
-            {
-                Ok(atoms) => atoms,
-                Err(response) => return response,
-            };
+        let atoms = match memu_search_value(
+            config,
+            &req.query,
+            "keyword",
+            req.section_limit.unwrap_or(5),
+        )
+        .await
+        {
+            Ok(atoms) => atoms,
+            Err(response) => return response,
+        };
         return HttpResponse::Ok().json(serde_json::json!({
             "atoms": atoms,
             "wiki": [],

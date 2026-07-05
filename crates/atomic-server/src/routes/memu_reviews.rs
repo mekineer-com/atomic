@@ -1,8 +1,8 @@
 use crate::routes::memu_proxy::{self, client, memu_json, session};
 use crate::state::{AppState, ServerEvent};
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 pub struct SummaryUpdate {
@@ -70,10 +70,12 @@ async fn approve(state: web::Data<AppState>, kind: &str, id: &str) -> HttpRespon
 }
 
 fn updated_atom_response(state: &AppState, body: Value) -> HttpResponse {
-    if let Ok(atom) =
-        serde_json::from_value::<atomic_core::AtomWithTags>(memu_proxy::atom_from_node(&body))
-    {
-        let _ = state.event_tx.send(ServerEvent::AtomUpdated { atom });
+    if memu_proxy::is_memu_id(body["id"].as_str().unwrap_or_default()) {
+        if let Ok(atom) =
+            serde_json::from_value::<atomic_core::AtomWithTags>(memu_proxy::atom_from_node(&body))
+        {
+            let _ = state.event_tx.send(ServerEvent::AtomUpdated { atom });
+        }
     }
     HttpResponse::Ok().json(body)
 }
