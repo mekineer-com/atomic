@@ -10,7 +10,7 @@ use atomic_core::{
     projection,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use utoipa::{IntoParams, ToSchema};
 
 #[utoipa::path(get, path = "/api/canvas/positions", responses((status = 200, description = "All atom positions", body = Vec<AtomPosition>)), tag = "canvas")]
@@ -168,7 +168,6 @@ fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
             .into_iter()
             .map(|(id, x, y)| (id, (x, y)))
             .collect();
-    let similarity_edges = memu_similarity_edges(&source.atoms);
     let atoms = source
         .atoms
         .into_iter()
@@ -188,63 +187,13 @@ fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
             })
         })
         .collect();
-    let mut edges = source.edges;
-    merge_edges(&mut edges, similarity_edges);
+    let mut edges = Vec::new();
+    merge_edges(&mut edges, source.edges);
     GlobalCanvasData {
         atoms,
         edges,
         clusters: vec![],
     }
-}
-
-fn memu_similarity_edges(atoms: &[MemuCanvasAtom]) -> Vec<CanvasEdgeData> {
-    let mut scored = Vec::new();
-    for (idx, left) in atoms.iter().enumerate() {
-        for right in atoms.iter().skip(idx + 1) {
-            let Some(score) = cosine(&left.embedding, &right.embedding) else {
-                continue;
-            };
-            if score >= 0.5 {
-                scored.push((left.id.clone(), right.id.clone(), score));
-            }
-        }
-    }
-    scored.sort_by(|a, b| b.2.total_cmp(&a.2));
-    let mut per_atom: HashMap<String, usize> = HashMap::new();
-    let mut edges = Vec::new();
-    for (source, target, weight) in scored {
-        if per_atom.get(&source).copied().unwrap_or(0) >= 3
-            || per_atom.get(&target).copied().unwrap_or(0) >= 3
-        {
-            continue;
-        }
-        *per_atom.entry(source.clone()).or_default() += 1;
-        *per_atom.entry(target.clone()).or_default() += 1;
-        edges.push(CanvasEdgeData {
-            source,
-            target,
-            weight,
-            kind: Some("similarity".to_string()),
-            predicate: Some("similarity".to_string()),
-        });
-    }
-    edges
-}
-
-fn cosine(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-    let mut dot = 0.0;
-    let mut left_norm = 0.0;
-    let mut right_norm = 0.0;
-    for (a, b) in left.iter().zip(right.iter()) {
-        dot += a * b;
-        left_norm += a * a;
-        right_norm += b * b;
-    }
-    let denom = left_norm.sqrt() * right_norm.sqrt();
-    (denom > 0.0).then_some(dot / denom)
 }
 
 fn merge_edges(edges: &mut Vec<CanvasEdgeData>, extra: Vec<CanvasEdgeData>) {
@@ -357,10 +306,24 @@ mod tests {
     }
 
     #[test]
-    fn memu_canvas_keeps_similarity_and_predicate_layers() {
+    fn memu_canvas_does_not_invent_similarity_edges() {
         let data = memu_canvas_data(MemuCanvasSource {
             atoms: vec![atom("memory:a"), atom("memory:b")],
             edges: vec![edge("memory:a", "memory:b", "caused_by")],
+        });
+
+        assert_eq!(data.edges.len(), 1);
+        assert_eq!(data.edges[0].predicate.as_deref(), Some("caused_by"));
+    }
+
+    #[test]
+    fn memu_canvas_keeps_similarity_and_predicate_layers() {
+        let data = memu_canvas_data(MemuCanvasSource {
+            atoms: vec![atom("memory:a"), atom("memory:b")],
+            edges: vec![
+                edge("memory:a", "memory:b", "caused_by"),
+                edge("memory:a", "memory:b", "similarity"),
+            ],
         });
 
         let layers: HashSet<_> = data
@@ -375,7 +338,10 @@ mod tests {
     fn memu_canvas_dedupes_same_pair_same_layer_symmetrically() {
         let data = memu_canvas_data(MemuCanvasSource {
             atoms: vec![atom("memory:a"), atom("memory:b")],
-            edges: vec![edge("memory:b", "memory:a", "similarity")],
+            edges: vec![
+                edge("memory:a", "memory:b", "similarity"),
+                edge("memory:b", "memory:a", "similarity"),
+            ],
         });
 
         let similarity_count = data

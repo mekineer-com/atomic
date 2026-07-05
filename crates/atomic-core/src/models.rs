@@ -620,9 +620,9 @@ pub struct CanvasEdgeData {
     pub source: String,
     pub target: String,
     pub weight: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
 }
 
