@@ -4,18 +4,18 @@
 //! retrieves atoms, and generates responses with citations.
 //! Uses a callback-based event system (same pattern as EmbeddingEvent).
 
-use crate::atom_edit::{apply_atom_edits, AtomEditOperation};
+use crate::atom_edit::{AtomEditOperation, apply_atom_edits};
 use crate::chunking::count_tokens;
 use crate::embedding::EmbeddingEvent;
 use crate::models::{
-    AtomWithTags, ChatCitation, ChatMessage, ChatMessageWithContext, ChatToolCall,
-    SemanticSearchResult,
+    Atom, AtomKind, AtomWithTags, ChatCitation, ChatMessage, ChatMessageWithContext, ChatToolCall,
+    SemanticSearchResult, Tag,
 };
 use crate::providers::traits::LlmConfig;
 use crate::providers::types::{
     GenerationParams, Message, MessageRole, StreamDelta, ToolDefinition,
 };
-use crate::providers::{create_streaming_llm_provider, ProviderConfig, ProviderType};
+use crate::providers::{ProviderConfig, ProviderType, create_streaming_llm_provider};
 use crate::search::{SearchMode, SearchOptions};
 use crate::storage::StorageBackend;
 use chrono::Utc;
@@ -466,6 +466,8 @@ struct MemuNode {
     #[serde(default)]
     created_at: Option<String>,
     #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
     category_names: Vec<String>,
     #[serde(default)]
     score: Option<f32>,
@@ -482,7 +484,10 @@ fn slice_text(content: &str, offset: usize, limit: usize) -> String {
         return String::new();
     }
     if offset >= total {
-        return format!("[offset={} is past end of atom ({} total lines)]", offset, total);
+        return format!(
+            "[offset={} is past end of atom ({} total lines)]",
+            offset, total
+        );
     }
 
     let end = (offset + limit).min(total);
@@ -501,20 +506,33 @@ fn slice_text(content: &str, offset: usize, limit: usize) -> String {
             end,
         )
     } else {
-        format!("[lines {}-{} of {} (end of atom).]\n", offset + 1, end, total)
+        format!(
+            "[lines {}-{} of {} (end of atom).]\n",
+            offset + 1,
+            end,
+            total
+        )
     };
     format!("{}{}", header, slice)
 }
 
 fn render_memu_node(node: &MemuNode) -> String {
     let mut lines = vec![format!("kind: {}", node.kind), format!("id: {}", node.id)];
-    if let Some(memory_type) = node.memory_type.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(memory_type) = node
+        .memory_type
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         lines.push(format!("memory_type: {}", memory_type));
     }
     if !node.category_names.is_empty() {
         lines.push(format!("categories: {}", node.category_names.join(", ")));
     }
-    if let Some(happened_at) = node.happened_at.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(happened_at) = node
+        .happened_at
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         lines.push(format!("happened_at: {}", happened_at));
     }
     if let Some(created_at) = node.created_at.as_deref().filter(|value| !value.is_empty()) {
@@ -528,7 +546,74 @@ fn render_memu_node(node: &MemuNode) -> String {
     lines.join("\n")
 }
 
-async fn fetch_memu_node(config: &MemuToolConfig, atom_id: &str) -> Result<Option<MemuNode>, String> {
+fn memu_node_timestamp(node: &MemuNode) -> String {
+    node.updated_at
+        .as_deref()
+        .or(node.happened_at.as_deref())
+        .or(node.created_at.as_deref())
+        .unwrap_or("1970-01-01T00:00:00Z")
+        .to_string()
+}
+
+fn memu_node_to_atom(node: MemuNode) -> AtomWithTags {
+    let text = node.summary.clone();
+    let title = if node.label.is_empty() {
+        node.id.clone()
+    } else {
+        node.label.clone()
+    };
+    let timestamp = memu_node_timestamp(&node);
+    let tags = node
+        .category_names
+        .iter()
+        .map(|name| Tag {
+            id: format!("category-name:{name}"),
+            name: name.clone(),
+            parent_id: None,
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+            is_autotag_target: false,
+            autotag_description: String::new(),
+        })
+        .collect();
+    AtomWithTags {
+        atom: Atom {
+            id: node.id,
+            content: text.clone(),
+            title,
+            snippet: text,
+            source_url: None,
+            source: node.memory_type.or(Some(node.kind)),
+            published_at: node.happened_at,
+            created_at: node.created_at.unwrap_or_else(|| timestamp.clone()),
+            updated_at: timestamp,
+            embedding_status: "complete".to_string(),
+            tagging_status: "skipped".to_string(),
+            embedding_error: None,
+            tagging_error: None,
+            kind: AtomKind::Captured,
+        },
+        tags,
+    }
+}
+
+fn memu_node_to_search_result(node: MemuNode) -> SemanticSearchResult {
+    let score = node.score.unwrap_or(1.0);
+    let summary = node.summary.clone();
+    SemanticSearchResult {
+        atom: memu_node_to_atom(node),
+        similarity_score: score,
+        matching_chunk_content: summary,
+        matching_chunk_index: 0,
+        match_snippet: None,
+        match_offsets: None,
+        match_count: None,
+    }
+}
+
+async fn fetch_memu_node(
+    config: &MemuToolConfig,
+    atom_id: &str,
+) -> Result<Option<MemuNode>, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -554,116 +639,6 @@ async fn fetch_memu_node(config: &MemuToolConfig, atom_id: &str) -> Result<Optio
         .await
         .map(Some)
         .map_err(|e| format!("memU get_atom returned invalid JSON: {e}"))
-}
-
-async fn execute_memu_search_atoms(
-    config: &MemuToolConfig,
-    query: &str,
-    limit: i32,
-    since_days: Option<i32>,
-) -> Result<Vec<MemuNode>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("memU client failed: {e}"))?;
-    let mut params = vec![
-        ("q", query.to_string()),
-        ("user_id", config.user_id.clone()),
-        ("soul_id", config.soul_id.clone()),
-        ("limit", limit.max(1).to_string()),
-    ];
-    if let Some(days) = since_days {
-        params.push(("since_days", days.to_string()));
-    }
-    let response = client
-        .get(format!("{}/integration/atomic/search", config.base_url))
-        .query(&params)
-        .send()
-        .await
-        .map_err(|e| format!("memU search request failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("memU search failed ({status})"));
-    }
-    response
-        .json::<MemuSearchResponse>()
-        .await
-        .map(|body| body.nodes)
-        .map_err(|e| format!("memU search returned invalid JSON: {e}"))
-}
-
-async fn execute_memu_get_atom(
-    config: &MemuToolConfig,
-    atom_id: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<Option<String>, String> {
-    Ok(fetch_memu_node(config, atom_id)
-        .await?
-        .map(|node| slice_text(&render_memu_node(&node), offset, limit)))
-}
-
-async fn execute_memu_edit_atom(
-    config: &MemuToolConfig,
-    tool_args: &serde_json::Value,
-) -> Result<Option<MemuNode>, String> {
-    let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
-    if !is_memu_id(atom_id) {
-        return Err("memU-backed sessions can only edit memory: or category: atoms".to_string());
-    }
-    let Some(existing) = fetch_memu_node(config, atom_id).await? else {
-        return Ok(None);
-    };
-    let edits: Vec<AtomEditOperation> = serde_json::from_value(
-        tool_args
-            .get("edits")
-            .cloned()
-            .ok_or_else(|| "edits must be an array".to_string())?,
-    )
-    .map_err(|e| format!("edits must be valid edit operations: {}", e))?;
-    let summary = apply_atom_edits(existing.summary.trim(), &edits)?;
-    if summary == existing.summary.trim() {
-        return Err("Edits did not change the atom content".to_string());
-    }
-    if summary.trim().is_empty() {
-        return Err("Cannot update an atom to empty content".to_string());
-    }
-
-    let endpoint = if atom_id.starts_with("memory:") {
-        "memory"
-    } else {
-        "category"
-    };
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("memU client failed: {e}"))?;
-    let response = client
-        .patch(format!("{}/{}/{}", config.base_url, endpoint, atom_id))
-        .query(&[
-            ("user_id", config.user_id.as_str()),
-            ("soul_id", config.soul_id.as_str()),
-        ])
-        .json(&json!({
-            "summary": summary.trim(),
-            "edited_by": "atomic:agent",
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("memU edit_atom request failed: {e}"))?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("memU edit_atom failed ({status}): {body}"));
-    }
-    response
-        .json::<MemuNode>()
-        .await
-        .map(Some)
-        .map_err(|e| format!("memU edit_atom returned invalid JSON: {e}"))
 }
 
 async fn forward_atomic_prompt_log(
@@ -696,7 +671,44 @@ async fn execute_search_atoms(
     since_days: Option<i32>,
     scope_tag_ids: &[String],
     external_settings: Option<std::collections::HashMap<String, String>>,
+    memu_tool_config: Option<&MemuToolConfig>,
 ) -> Result<Vec<SemanticSearchResult>, String> {
+    if let Some(config) = memu_tool_config {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("memU client failed: {e}"))?;
+        let mut params = vec![
+            ("q", query.to_string()),
+            ("user_id", config.user_id.clone()),
+            ("soul_id", config.soul_id.clone()),
+            ("limit", limit.max(1).to_string()),
+        ];
+        if let Some(days) = since_days {
+            params.push(("since_days", days.to_string()));
+        }
+        let response = client
+            .get(format!("{}/integration/atomic/search", config.base_url))
+            .query(&params)
+            .send()
+            .await
+            .map_err(|e| format!("memU search request failed: {e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("memU search failed ({status})"));
+        }
+        return response
+            .json::<MemuSearchResponse>()
+            .await
+            .map(|body| {
+                body.nodes
+                    .into_iter()
+                    .map(memu_node_to_search_result)
+                    .collect()
+            })
+            .map_err(|e| format!("memU search returned invalid JSON: {e}"));
+    }
+
     // Try SQLite path first (uses full search module with settings resolution)
     if let Some(sqlite) = storage.as_sqlite() {
         let options = SearchOptions::new(query, SearchMode::Hybrid, limit)
@@ -763,7 +775,14 @@ async fn execute_get_atom(
     atom_id: &str,
     offset: usize,
     limit: usize,
+    memu_tool_config: Option<&MemuToolConfig>,
 ) -> Result<Option<String>, String> {
+    if let Some(config) = memu_tool_config.filter(|_| is_memu_id(atom_id)) {
+        return Ok(fetch_memu_node(config, atom_id)
+            .await?
+            .map(|node| slice_text(&render_memu_node(&node), offset, limit)));
+    }
+
     let Some(content) = storage
         .get_atom_content_impl(atom_id)
         .await
@@ -922,8 +941,70 @@ async fn execute_edit_atom(
     external_settings: Option<std::collections::HashMap<String, String>>,
     canvas_cache: Option<&crate::CanvasCache>,
     on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static>,
+    memu_tool_config: Option<&MemuToolConfig>,
 ) -> Result<Option<AtomWithTags>, String> {
     let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
+    if let Some(config) = memu_tool_config {
+        if !is_memu_id(atom_id) {
+            return Err(
+                "memU-backed sessions can only edit memory: or category: atoms".to_string(),
+            );
+        }
+        let Some(existing) = fetch_memu_node(config, atom_id).await? else {
+            return Ok(None);
+        };
+        let edits: Vec<AtomEditOperation> = serde_json::from_value(
+            tool_args
+                .get("edits")
+                .cloned()
+                .ok_or_else(|| "edits must be an array".to_string())?,
+        )
+        .map_err(|e| format!("edits must be valid edit operations: {}", e))?;
+        let summary = apply_atom_edits(existing.summary.trim(), &edits)?;
+        if summary == existing.summary.trim() {
+            return Err("Edits did not change the atom content".to_string());
+        }
+        if summary.trim().is_empty() {
+            return Err("Cannot update an atom to empty content".to_string());
+        }
+
+        let endpoint = if atom_id.starts_with("memory:") {
+            "memory"
+        } else {
+            "category"
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("memU client failed: {e}"))?;
+        let response = client
+            .patch(format!("{}/{}/{}", config.base_url, endpoint, atom_id))
+            .query(&[
+                ("user_id", config.user_id.as_str()),
+                ("soul_id", config.soul_id.as_str()),
+            ])
+            .json(&json!({
+                "summary": summary.trim(),
+                "edited_by": "atomic:agent",
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("memU edit_atom request failed: {e}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("memU edit_atom failed ({status}): {body}"));
+        }
+        return response
+            .json::<MemuNode>()
+            .await
+            .map(|node| Some(memu_node_to_atom(node)))
+            .map_err(|e| format!("memU edit_atom returned invalid JSON: {e}"));
+    }
+
     let Some(existing) = storage
         .get_atom_impl(atom_id)
         .await
@@ -1343,73 +1424,43 @@ async fn run_agent_loop(
                             .and_then(|v| v.as_f64())
                             .map(|v| v as i32)
                             .filter(|d| *d > 0);
-                        if let Some(config) = memu_tool_config.as_ref() {
-                            match execute_memu_search_atoms(config, query, limit, since_days).await {
-                                Ok(results) => {
-                                    let count = results.len() as i32;
-                                    for result in results.iter() {
-                                        ctx.citations.push((
-                                            result.id.clone(),
-                                            None,
-                                            result.summary.chars().take(200).collect(),
-                                        ));
-                                    }
-                                    let result_text = results
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, r)| {
-                                            format!(
-                                                "[{}] (atom_id: {}, score: {:.2})\n{}",
-                                                ctx.citations.len() - results.len() + i + 1,
-                                                r.id,
-                                                r.score.unwrap_or(0.0),
-                                                r.summary
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n\n");
-                                    (result_text, count)
+                        match execute_search_atoms(
+                            &storage,
+                            query,
+                            limit,
+                            since_days,
+                            &ctx.scope_tag_ids,
+                            external_settings.clone(),
+                            memu_tool_config.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(results) => {
+                                let count = results.len() as i32;
+                                for result in results.iter() {
+                                    ctx.citations.push((
+                                        result.atom.atom.id.clone(),
+                                        Some(result.matching_chunk_index),
+                                        result.matching_chunk_content.chars().take(200).collect(),
+                                    ));
                                 }
-                                Err(e) => (format!("Error: {}", e), 0),
+                                let result_text = results
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, r)| {
+                                        format!(
+                                            "[{}] (atom_id: {}, similarity: {:.2})\n{}",
+                                            ctx.citations.len() - results.len() + i + 1,
+                                            r.atom.atom.id,
+                                            r.similarity_score,
+                                            r.matching_chunk_content
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                (result_text, count)
                             }
-                        } else {
-                            match execute_search_atoms(
-                                &storage,
-                                query,
-                                limit,
-                                since_days,
-                                &ctx.scope_tag_ids,
-                                external_settings.clone(),
-                            )
-                            .await
-                            {
-                                Ok(results) => {
-                                    let count = results.len() as i32;
-                                    for result in results.iter() {
-                                        ctx.citations.push((
-                                            result.atom.atom.id.clone(),
-                                            Some(result.matching_chunk_index),
-                                            result.matching_chunk_content.chars().take(200).collect(),
-                                        ));
-                                    }
-                                    let result_text = results
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, r)| {
-                                            format!(
-                                                "[{}] (atom_id: {}, similarity: {:.2})\n{}",
-                                                ctx.citations.len() - results.len() + i + 1,
-                                                r.atom.atom.id,
-                                                r.similarity_score,
-                                                r.matching_chunk_content
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n\n");
-                                    (result_text, count)
-                                }
-                                Err(e) => (format!("Error: {}", e), 0),
-                            }
+                            Err(e) => (format!("Error: {}", e), 0),
                         }
                     }
                     "get_atom" => {
@@ -1424,14 +1475,15 @@ async fn run_agent_loop(
                             .and_then(|v| v.as_u64())
                             .map(|v| (v as usize).clamp(1, GET_ATOM_MAX_LIMIT))
                             .unwrap_or(GET_ATOM_DEFAULT_LIMIT);
-                        let content = if let Some(config) =
-                            memu_tool_config.as_ref().filter(|_| is_memu_id(atom_id))
+                        match execute_get_atom(
+                            &storage,
+                            atom_id,
+                            offset,
+                            limit,
+                            memu_tool_config.as_ref(),
+                        )
+                        .await
                         {
-                            execute_memu_get_atom(config, atom_id, offset, limit).await
-                        } else {
-                            execute_get_atom(&storage, atom_id, offset, limit).await
-                        };
-                        match content {
                             Ok(Some(content)) => {
                                 let citation_index = ctx.citations.len() + 1;
                                 ctx.citations.push((
@@ -1535,63 +1587,41 @@ async fn run_agent_loop(
                         }
                     }
                     "edit_atom" => {
-                        if let Some(config) = memu_tool_config.as_ref() {
-                            match execute_memu_edit_atom(config, &tool_args).await {
-                                Ok(Some(node)) => {
-                                    ctx.citations.push((
-                                        node.id.clone(),
-                                        None,
-                                        node.summary.chars().take(200).collect(),
-                                    ));
-                                    let fallback = node.id.clone();
-                                    (
-                                        serde_json::to_string_pretty(&json!({
-                                            "atom_id": node.id,
-                                            "title": node.label,
-                                            "snippet": node.summary,
-                                            "reference": format!("[[{}]]", fallback),
-                                        }))
-                                        .unwrap_or(fallback),
-                                        1,
-                                    )
-                                }
-                                Ok(None) => ("Atom not found".to_string(), 0),
-                                Err(e) => (format!("Error: {}", e), 0),
-                            }
-                        } else {
-                            match execute_edit_atom(
-                                &storage,
-                                &tool_args,
-                                external_settings.clone(),
-                                canvas_cache,
-                                Arc::clone(&on_embedding_event),
-                            )
-                            .await
-                            {
-                                Ok(Some(atom)) => {
+                        match execute_edit_atom(
+                            &storage,
+                            &tool_args,
+                            external_settings.clone(),
+                            canvas_cache,
+                            Arc::clone(&on_embedding_event),
+                            memu_tool_config.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(Some(atom)) => {
+                                if memu_tool_config.is_none() {
                                     on_event(ChatEvent::AtomUpdated {
                                         conversation_id: ctx.conversation_id.clone(),
                                         atom: atom.clone(),
                                     });
-                                    ctx.citations.push((
-                                        atom.atom.id.clone(),
-                                        None,
-                                        atom.atom.snippet.chars().take(200).collect(),
-                                    ));
-                                    (
-                                        serde_json::to_string_pretty(&json!({
-                                            "atom_id": atom.atom.id,
-                                            "title": atom.atom.title,
-                                            "snippet": atom.atom.snippet,
-                                            "reference": format!("[[{}]]", atom.atom.id),
-                                        }))
-                                        .unwrap_or_else(|_| atom.atom.id),
-                                        1,
-                                    )
                                 }
-                                Ok(None) => ("Atom not found".to_string(), 0),
-                                Err(e) => (format!("Error: {}", e), 0),
+                                ctx.citations.push((
+                                    atom.atom.id.clone(),
+                                    None,
+                                    atom.atom.snippet.chars().take(200).collect(),
+                                ));
+                                (
+                                    serde_json::to_string_pretty(&json!({
+                                        "atom_id": atom.atom.id,
+                                        "title": atom.atom.title,
+                                        "snippet": atom.atom.snippet,
+                                        "reference": format!("[[{}]]", atom.atom.id),
+                                    }))
+                                    .unwrap_or_else(|_| atom.atom.id),
+                                    1,
+                                )
                             }
+                            Ok(None) => ("Atom not found".to_string(), 0),
+                            Err(e) => (format!("Error: {}", e), 0),
                         }
                     }
                     "zoom_to_cluster" => {
