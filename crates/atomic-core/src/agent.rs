@@ -4,7 +4,7 @@
 //! retrieves atoms, and generates responses with citations.
 //! Uses a callback-based event system (same pattern as EmbeddingEvent).
 
-use crate::atom_edit::{apply_atom_edits, AtomEditOperation};
+use crate::atom_edit::{AtomEditOperation, apply_atom_edits};
 use crate::chunking::count_tokens;
 use crate::embedding::EmbeddingEvent;
 use crate::models::{
@@ -15,7 +15,7 @@ use crate::providers::traits::LlmConfig;
 use crate::providers::types::{
     GenerationParams, Message, MessageRole, StreamDelta, ToolDefinition,
 };
-use crate::providers::{create_streaming_llm_provider, ProviderConfig, ProviderType};
+use crate::providers::{ProviderConfig, ProviderType, create_streaming_llm_provider};
 use crate::search::{SearchMode, SearchOptions};
 use crate::storage::StorageBackend;
 use chrono::Utc;
@@ -476,7 +476,9 @@ struct MemuNode {
 }
 
 fn is_memu_id(atom_id: &str) -> bool {
-    atom_id.starts_with("memory:") || atom_id.starts_with("category:")
+    atom_id.starts_with("memory:")
+        || atom_id.starts_with("category:")
+        || atom_id.starts_with("entity:")
 }
 
 fn slice_text(content: &str, offset: usize, limit: usize) -> String {
@@ -949,9 +951,10 @@ async fn execute_edit_atom(
     let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
     if let Some(config) = memu_tool_config {
         if !is_memu_id(atom_id) {
-            return Err(
-                "memU-backed sessions can only edit memory: or category: atoms".to_string(),
-            );
+            return Err("memU-backed sessions can only edit memU atoms".to_string());
+        }
+        if atom_id.starts_with("entity:") {
+            return Err("memU entity atoms are read-only in this slice".to_string());
         }
         let Some(existing) = fetch_memu_node(config, atom_id).await? else {
             return Ok(None);
@@ -1990,6 +1993,14 @@ mod tests {
 
         assert_eq!(atom.tags[0].id, "category:c1");
         assert_eq!(atom.tags[0].name, "Core");
+    }
+
+    #[test]
+    fn memu_id_prefixes_include_entities() {
+        assert!(is_memu_id("memory:m1"));
+        assert!(is_memu_id("category:c1"));
+        assert!(is_memu_id("entity:e1"));
+        assert!(!is_memu_id("local-atom"));
     }
 
     #[test]

@@ -189,7 +189,7 @@ function AtomReaderContent({
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [showTagSelector, setShowTagSelector] = useState(false);
-  const isMemuAtom = atom.id.startsWith('memory:') || atom.id.startsWith('category:');
+  const isMemuAtom = atom.id.startsWith('memory:') || atom.id.startsWith('category:') || atom.id.startsWith('entity:');
 
   const {
     editContent, editSourceUrl, editTags, saveStatus,
