@@ -151,7 +151,11 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
           initialEditing={initialEditing}
           onDismiss={overlayDismiss}
           onDelete={async () => {
-            await deleteAtom(atomId);
+            if (atomId.startsWith('memory:')) {
+              await getTransport().invoke('delete_memory', { id: atomId });
+            } else {
+              await deleteAtom(atomId);
+            }
             await fetchTags();
             removeAtomFromTabs(atomId);
           }}
@@ -183,13 +187,20 @@ function AtomReaderContent({
 }: AtomReaderContentProps) {
   const readerTheme = useUIStore(s => s.readerTheme);
   const setReaderEditState = useUIStore(s => s.setReaderEditState);
+  const addAtom = useAtomsStore(s => s.addAtom);
   const retryTagging = useAtomsStore(s => s.retryTagging);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const editorHandleRef = useRef<AtomicCodeMirrorEditorHandle | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [showTagSelector, setShowTagSelector] = useState(false);
-  const isMemuAtom = atom.id.startsWith('memory:') || atom.id.startsWith('category:') || atom.id.startsWith('entity:');
+  const isMemuMemory = atom.id.startsWith('memory:');
+  const isMemuCategory = atom.id.startsWith('category:');
+  const isMemuEntity = atom.id.startsWith('entity:');
+  const isMemuAtom = isMemuMemory || isMemuCategory || isMemuEntity;
+  const [memuSummary, setMemuSummary] = useState(atom.content);
+  const [memuStatus, setMemuStatus] = useState<'idle' | 'saving'>('idle');
+  const [memuError, setMemuError] = useState<string | null>(null);
 
   const {
     editContent, editSourceUrl, editTags, saveStatus,
@@ -198,10 +209,57 @@ function AtomReaderContent({
   } = useInlineEditor({ atom, onAtomUpdated, readOnly: isMemuAtom });
   const isTaggingInFlight = atom.tagging_status === 'pending' || atom.tagging_status === 'processing';
 
+  useEffect(() => {
+    setMemuSummary(atom.content);
+    setMemuError(null);
+  }, [atom.id, atom.content]);
+
   const handleAutoTag = useCallback(async () => {
     await retryTagging(atom.id);
     onAtomUpdated?.({ ...atom, tagging_status: 'pending' });
   }, [retryTagging, atom, onAtomUpdated]);
+
+  const saveMemuSummary = useCallback(async () => {
+    if (!isMemuMemory && !isMemuCategory) return;
+    setMemuStatus('saving');
+    setMemuError(null);
+    try {
+      await getTransport().invoke(
+        isMemuMemory ? 'update_memory_summary' : 'update_category_summary',
+        { id: atom.id, summary: memuSummary },
+      );
+      const updated = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atom.id });
+      if (updated) {
+        addAtom(updated);
+        onAtomUpdated?.(updated);
+      }
+    } catch (error) {
+      setMemuError(String(error));
+    } finally {
+      setMemuStatus('idle');
+    }
+  }, [addAtom, atom.id, isMemuCategory, isMemuMemory, memuSummary, onAtomUpdated]);
+
+  const approveMemuSummary = useCallback(async () => {
+    if (!isMemuMemory && !isMemuCategory) return;
+    setMemuStatus('saving');
+    setMemuError(null);
+    try {
+      await getTransport().invoke(
+        isMemuMemory ? 'approve_memory' : 'approve_category',
+        { id: atom.id },
+      );
+      const updated = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atom.id });
+      if (updated) {
+        addAtom(updated);
+        onAtomUpdated?.(updated);
+      }
+    } catch (error) {
+      setMemuError(String(error));
+    } finally {
+      setMemuStatus('idle');
+    }
+  }, [addAtom, atom.id, isMemuCategory, isMemuMemory, onAtomUpdated]);
 
   useEffect(() => {
     setReaderEditState(Boolean(initialEditing), saveStatus);
@@ -255,7 +313,9 @@ function AtomReaderContent({
 
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        void saveNow();
+        void (isMemuAtom
+          ? (memuSummary === atom.content ? approveMemuSummary() : saveMemuSummary())
+          : saveNow());
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
@@ -273,7 +333,7 @@ function AtomReaderContent({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [flushDraft, onDismiss, saveNow, showDeleteModal]);
+  }, [approveMemuSummary, atom.content, flushDraft, isMemuAtom, memuSummary, onDismiss, saveMemuSummary, saveNow, showDeleteModal]);
 
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {
@@ -369,10 +429,54 @@ function AtomReaderContent({
         <div className="max-w-6xl mx-auto px-3 py-5 sm:px-4 sm:py-6 @4xl:px-6 @4xl:flex @4xl:gap-10">
           <div className="flex-1 min-w-0">
             {isMemuAtom ? (
-              <div className="prose prose-invert max-w-none prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-a:text-[var(--color-text-primary)] prose-a:underline prose-a:decoration-[var(--color-border-hover)] prose-strong:text-[var(--color-text-primary)] prose-code:text-[var(--color-accent-light)] prose-code:bg-[var(--color-bg-card)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[var(--color-bg-card)] prose-pre:border prose-pre:border-[var(--color-border)] prose-blockquote:border-l-[var(--color-accent)] prose-blockquote:text-[var(--color-text-secondary)] prose-li:text-[var(--color-text-primary)]">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {atom.content}
-                </ReactMarkdown>
+              <div className="space-y-4">
+                {isMemuMemory || isMemuCategory ? (
+                  <>
+                    <textarea
+                      value={memuSummary}
+                      onChange={(e) => setMemuSummary(e.target.value)}
+                      className="min-h-[24rem] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+                    />
+                    {memuError && (
+                      <p className="rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{memuError}</p>
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => void saveMemuSummary()}
+                        disabled={memuStatus !== 'idle' || memuSummary === atom.content}
+                        className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {memuStatus === 'saving' ? 'Saving...' : 'Save + approve'}
+                      </button>
+                      <button
+                        onClick={() => void approveMemuSummary()}
+                        disabled={memuStatus !== 'idle' || memuSummary !== atom.content}
+                        className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        Approve current
+                      </button>
+                      {isMemuMemory ? (
+                        <button
+                          onClick={() => setShowDeleteModal(true)}
+                          disabled={memuStatus !== 'idle'}
+                          className="rounded border border-red-500/50 px-3 py-1.5 text-sm text-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Delete
+                        </button>
+                      ) : (
+                        <button disabled className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm opacity-50">
+                          Delete disabled
+                        </button>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <div className="prose prose-invert max-w-none prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-a:text-[var(--color-text-primary)] prose-a:underline prose-a:decoration-[var(--color-border-hover)] prose-strong:text-[var(--color-text-primary)] prose-code:text-[var(--color-accent-light)] prose-code:bg-[var(--color-bg-card)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[var(--color-bg-card)] prose-pre:border prose-pre:border-[var(--color-border)] prose-blockquote:border-l-[var(--color-accent)] prose-blockquote:text-[var(--color-text-secondary)] prose-li:text-[var(--color-text-primary)]">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {atom.content}
+                    </ReactMarkdown>
+                  </div>
+                )}
               </div>
             ) : (
               <Suspense fallback={null}>
@@ -500,12 +604,12 @@ function AtomReaderContent({
       <Modal
         isOpen={showDeleteModal}
         onClose={() => setShowDeleteModal(false)}
-        title="Delete Atom"
+        title={isMemuMemory ? 'Delete Memory' : 'Delete Atom'}
         confirmLabel={isDeleting ? 'Deleting...' : 'Delete'}
         confirmVariant="danger"
         onConfirm={handleDelete}
       >
-        <p>Are you sure you want to delete this atom? This action cannot be undone.</p>
+        <p>Are you sure you want to delete this {isMemuMemory ? 'memory' : 'atom'}? This action cannot be undone.</p>
       </Modal>
     </div>
   );
