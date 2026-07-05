@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useUIStore } from '../../stores/ui';
 import { useDatabasesStore } from '../../stores/databases';
@@ -11,7 +11,6 @@ import {
   CANVAS_THEMES,
   DEFAULT_THEME,
   nodeColor,
-  edgeColor,
   type CanvasTheme,
 } from './sigma/themes';
 import { AtomPreviewPopover } from './AtomPreviewPopover';
@@ -25,6 +24,44 @@ function parseRgbColor(s: string): [number, number, number] | null {
   const m = s.match(/^rgb\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)$/);
   if (!m) return null;
   return [+m[1], +m[2], +m[3]];
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+function paletteRgb(theme: CanvasTheme, key: string, weight = 1): string {
+  const base = theme.palette[hashString(key) % theme.palette.length] || theme.nodeMax;
+  const factor = 0.55 + Math.max(0, Math.min(1, weight)) * 0.45;
+  return `rgb(${Math.round(base[0] * factor)},${Math.round(base[1] * factor)},${Math.round(base[2] * factor)})`;
+}
+
+function canvasNodeColor(theme: CanvasTheme, attrs: { primaryTag?: string | null; tagIds?: string[]; connectivity?: number; clusterIndex?: number }): string {
+  if (attrs.primaryTag || (attrs.tagIds?.length ?? 0) > 0) {
+    return paletteRgb(theme, attrs.primaryTag || attrs.tagIds![0], attrs.connectivity ?? 0.5);
+  }
+  return nodeColor(theme, attrs.connectivity ?? 0, attrs.clusterIndex);
+}
+
+function edgeLayer(edge: { predicate?: string | null; kind?: string }): string {
+  return edge.predicate || edge.kind || 'similarity';
+}
+
+function visibleNeighbors(graph: Graph, visibleLayers: Record<string, boolean>, allVisible = false): Map<string, Set<string>> {
+  const neighbors = new Map<string, Set<string>>();
+  graph.forEachEdge((_edge, attrs, source, target) => {
+    const layer = (attrs as any).layer || 'similarity';
+    if (!allVisible && visibleLayers[layer] !== true) return;
+    if (!neighbors.has(source)) neighbors.set(source, new Set());
+    if (!neighbors.has(target)) neighbors.set(target, new Set());
+    neighbors.get(source)!.add(target);
+    neighbors.get(target)!.add(source);
+  });
+  return neighbors;
 }
 
 export type SigmaCanvasMode = 'main' | 'preview';
@@ -78,10 +115,16 @@ export function SigmaCanvas({
   const [theme, setTheme] = useState<CanvasTheme>(DEFAULT_THEME);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [edgeThreshold, setEdgeThreshold] = useState(0);
+  const [visibleEdgeLayers, setVisibleEdgeLayers] = useState<Record<string, boolean>>({});
   const edgeThresholdRef = useRef(0);
+  const visibleEdgeLayersRef = useRef<Record<string, boolean>>({});
   const edgeAnimProgress = useRef(0); // 0 = invisible, 1 = fully visible
   const themeRef = useRef(theme);
   themeRef.current = theme;
+  const edgeLayerNames = useMemo(
+    () => [...new Set((data?.edges ?? []).map(edgeLayer))].sort(),
+    [data]
+  );
 
   // Hover emphasis: when a node is hovered, dim everything outside its neighborhood.
   // neighborsRef lets the edge/node reducers answer "is X a neighbor of hovered?" in O(1).
@@ -137,6 +180,25 @@ export function SigmaCanvas({
 
     return () => { cancelled = true; };
   }, [activeDbId]);
+
+  useEffect(() => {
+    if (isPreview) return;
+    setVisibleEdgeLayers(prev => {
+      const next: Record<string, boolean> = {};
+      for (const layer of edgeLayerNames) next[layer] = prev[layer] ?? false;
+      const same =
+        Object.keys(prev).length === Object.keys(next).length &&
+        Object.keys(next).every(layer => prev[layer] === next[layer]);
+      return same ? prev : next;
+    });
+  }, [edgeLayerNames, isPreview]);
+
+  useEffect(() => {
+    visibleEdgeLayersRef.current = visibleEdgeLayers;
+    const graph = graphRef.current;
+    if (graph) neighborsRef.current = visibleNeighbors(graph, visibleEdgeLayers);
+    sigmaRef.current?.refresh();
+  }, [visibleEdgeLayers]);
 
   // Precomputed data for the graph
   const graphDataRef = useRef<{
@@ -204,11 +266,17 @@ export function SigmaCanvas({
         x: 0,
         y: 0,
         size: 2.5 + connectivity * 5,
-        color: nodeColor(theme, connectivity, clusterIdx),
+        color: canvasNodeColor(theme, {
+          primaryTag: atom.primary_tag,
+          tagIds: atom.tag_ids,
+          connectivity,
+          clusterIndex: clusterIdx,
+        }),
         label: truncLabel(atom.title || atom.atom_id.substring(0, 8), 30),
         fullLabel: atom.title || atom.atom_id.substring(0, 8),
         connectivity,
         clusterIndex: clusterIdx,
+        primaryTag: atom.primary_tag,
         tagIds: atom.tag_ids,
         entityIds: atom.entity_ids,
         entityNames: atom.entity_names,
@@ -223,10 +291,9 @@ export function SigmaCanvas({
     }
     const wRange = Math.max(maxW - minW, 0.001);
 
-    const neighbors = new Map<string, Set<string>>();
     for (const edge of edges) {
       if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue;
-      const layer = edge.predicate || edge.kind || 'similarity';
+      const layer = edgeLayer(edge);
       const [left, right] = edge.source <= edge.target ? [edge.source, edge.target] : [edge.target, edge.source];
       const edgeKey = `${left}|${right}|${layer}`;
       if (graph.hasEdge(edgeKey)) continue;
@@ -236,12 +303,8 @@ export function SigmaCanvas({
         layer,
         type: 'curved',
       });
-      if (!neighbors.has(edge.source)) neighbors.set(edge.source, new Set());
-      if (!neighbors.has(edge.target)) neighbors.set(edge.target, new Set());
-      neighbors.get(edge.source)!.add(edge.target);
-      neighbors.get(edge.target)!.add(edge.source);
     }
-    neighborsRef.current = neighbors;
+    neighborsRef.current = visibleNeighbors(graph, visibleEdgeLayersRef.current, isPreview);
 
     const sigma = new Sigma(graph, container, {
       // Atom labels are drawn manually on the overlay canvas (drawLabels) with
@@ -303,6 +366,10 @@ export function SigmaCanvas({
       },
       edgeReducer: (edge, attrs) => {
         const w = (attrs as any).weight ?? 0.5;
+        const layer = ((attrs as any).layer as string | undefined) || 'similarity';
+        if (!isPreview && visibleEdgeLayersRef.current[layer] !== true) {
+          return { ...attrs, hidden: true };
+        }
         const hovered = hoveredNodeRef.current;
         const pinned = pinnedNodeRef.current;
         const t = themeRef.current;
@@ -320,7 +387,7 @@ export function SigmaCanvas({
             const size = (0.2 + w * 0.7) * anim + ((0.5 + w * 1.2) * anim - (0.2 + w * 0.7) * anim) * h;
             return {
               ...attrs,
-              color: edgeColor(t, Math.min(1, bright)),
+              color: paletteRgb(t, layer, Math.min(1, bright)),
               size,
               zIndex: 1,
             };
@@ -329,7 +396,7 @@ export function SigmaCanvas({
             // Pinned edges stay at normal brightness — they don't pulse like hover.
             return {
               ...attrs,
-              color: edgeColor(t, w * anim),
+              color: paletteRgb(t, layer, w * anim),
               size: (0.2 + w * 0.7) * anim,
               zIndex: 1,
             };
@@ -339,7 +406,7 @@ export function SigmaCanvas({
           const dim = pinned ? 1 : h;
           return {
             ...attrs,
-            color: edgeColor(t, w * anim * (1 - dim)),
+            color: paletteRgb(t, layer, w * anim * (1 - dim)),
             size: (0.2 + w * 0.7) * anim * (1 - dim),
           };
         }
@@ -348,7 +415,7 @@ export function SigmaCanvas({
         }
         return {
           ...attrs,
-          color: edgeColor(t, w * anim),
+          color: paletteRgb(t, layer, w * anim),
           size: (0.2 + w * 0.7) * anim,
         };
       },
@@ -840,7 +907,12 @@ export function SigmaCanvas({
     // Update node colors
     graph.forEachNode((node, attrs) => {
       const connectivity = (edgeCounts.get(node) || 0) / maxEdges;
-      graph.setNodeAttribute(node, 'color', nodeColor(theme, connectivity, (attrs as any).clusterIndex));
+      graph.setNodeAttribute(node, 'color', canvasNodeColor(theme, {
+        primaryTag: (attrs as any).primaryTag,
+        tagIds: (attrs as any).tagIds,
+        connectivity,
+        clusterIndex: (attrs as any).clusterIndex,
+      }));
     });
 
     // Atom label color comes from themeRef inside drawLabels — just trigger a refresh.
@@ -1025,6 +1097,28 @@ export function SigmaCanvas({
                 {Math.round((1 - edgeThreshold) * 100)}%
               </span>
             </div>
+            {edgeLayerNames.length > 0 && (
+              <div className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 backdrop-blur">
+                <div className="mb-1 text-[9px] uppercase tracking-wide text-white/35">Tethers</div>
+                <div className="flex max-h-28 flex-col gap-1 overflow-y-auto pr-1">
+                  {edgeLayerNames.map(layer => (
+                    <label key={layer} className="flex items-center gap-1.5 text-[10px] text-white/60">
+                      <input
+                        type="checkbox"
+                        checked={visibleEdgeLayers[layer] === true}
+                        onChange={(e) => setVisibleEdgeLayers(prev => ({ ...prev, [layer]: e.target.checked }))}
+                        className="h-3 w-3 accent-white/70"
+                      />
+                      <span
+                        className="h-2 w-2 rounded-full"
+                        style={{ backgroundColor: paletteRgb(theme, layer) }}
+                      />
+                      <span className="truncate">{layer}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
