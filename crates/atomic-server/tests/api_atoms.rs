@@ -5,7 +5,7 @@
 
 use actix_web::{test as actix_test, web, App, HttpRequest, HttpResponse, HttpServer};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
@@ -257,6 +257,22 @@ async fn memu_memory(path: web::Path<String>) -> HttpResponse {
     }))
 }
 
+async fn memu_update_memory(path: web::Path<String>, body: web::Json<Value>) -> HttpResponse {
+    assert_eq!(path.as_str(), "m1");
+    assert_eq!(body["summary"], "Updated memory");
+    HttpResponse::Ok().json(json!({
+        "id": "memory:m1",
+        "kind": "memory",
+        "label": "Memory one",
+        "summary": "Updated memory",
+        "memory_type": "episodic",
+        "created_at": "2026-07-04T00:00:00Z",
+        "updated_at": "2026-07-05T00:00:00Z",
+        "category_ids": ["c1"],
+        "category_names": ["Core"]
+    }))
+}
+
 async fn memu_search() -> HttpResponse {
     HttpResponse::Ok().json(json!({
         "nodes": [{
@@ -327,6 +343,7 @@ fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
                 web::get().to(memu_neighborhood),
             )
             .route("/memory/{id}", web::get().to(memu_memory))
+            .route("/memory/{id}", web::patch().to(memu_update_memory))
     })
     .bind(("127.0.0.1", 0))
     .unwrap();
@@ -522,6 +539,36 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 409);
+
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_memu_review_save_broadcasts_atom_updated() {
+    let (memu_url, memu_handle) = start_memu_memory_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let mut events = ctx.state.event_tx.subscribe();
+
+    let req = actix_test::TestRequest::patch()
+        .uri("/api/memu/reviews/memory/m1")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"summary": "Updated memory"}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    match tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        atomic_server::state::ServerEvent::AtomUpdated { atom } => {
+            assert_eq!(atom.atom.id, "memory:m1");
+            assert_eq!(atom.atom.content, "Updated memory");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 
     memu_handle.stop(true).await;
 }
