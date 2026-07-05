@@ -3,8 +3,8 @@
 //! Each test spins up a real actix-web test server backed by a temporary SQLite
 //! database and exercises the endpoints with actual HTTP requests.
 
-use actix_web::{test as actix_test, web, App, HttpResponse, HttpServer};
-use serde_json::{json, Value};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, web};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -69,9 +69,11 @@ impl TestCtx {
 async fn atomic_session_start_ok(body: web::Json<Value>) -> HttpResponse {
     assert_eq!(body["user_id"], "Marcos");
     assert_eq!(body["soul_id"], "Siri");
-    assert!(body["conversation_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("chat:atomic-")));
+    assert!(
+        body["conversation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("chat:atomic-"))
+    );
     HttpResponse::Ok().json(json!({"snapshot_text": "hidden memU snapshot"}))
 }
 
@@ -191,6 +193,98 @@ fn start_memu_stub_with_model(model_url: String) -> (String, actix_web::dev::Ser
                     }
                 }),
             )
+    })
+    .bind(("127.0.0.1", 0))
+    .unwrap();
+    let addr = server.addrs()[0];
+    let server = server.run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    (format!("http://{}", addr), handle)
+}
+
+async fn memu_atoms(req: HttpRequest) -> HttpResponse {
+    let qs = req.query_string();
+    assert!(qs.contains("user_id="));
+    assert!(qs.contains("soul_id="));
+    HttpResponse::Ok().json(json!({
+        "atoms": [{
+            "id": "memory:m1",
+            "title": "Memory one",
+            "snippet": "Memory summary",
+            "source_url": null,
+            "source": "episodic",
+            "published_at": null,
+            "created_at": "2026-07-04T00:00:00Z",
+            "updated_at": "2026-07-04T00:00:00Z",
+            "embedding_status": "complete",
+            "tagging_status": "skipped",
+            "embedding_error": null,
+            "tagging_error": null,
+            "tags": []
+        }],
+        "total_count": 1,
+        "limit": 50,
+        "offset": 0
+    }))
+}
+
+async fn memu_tags(req: HttpRequest) -> HttpResponse {
+    assert!(req.query_string().contains("user_id="));
+    HttpResponse::Ok().json(json!([{
+        "id": "category:c1",
+        "name": "Core",
+        "parent_id": null,
+        "created_at": "2026-07-04T00:00:00Z",
+        "is_autotag_target": false,
+        "autotag_description": "",
+        "atom_count": 1,
+        "children_total": 0,
+        "children": []
+    }]))
+}
+
+async fn memu_memory(path: web::Path<String>) -> HttpResponse {
+    assert_eq!(path.as_str(), "memory:m1");
+    HttpResponse::Ok().json(json!({
+        "id": "memory:m1",
+        "kind": "memory",
+        "label": "Memory one",
+        "summary": "Memory summary",
+        "memory_type": "episodic",
+        "created_at": "2026-07-04T00:00:00Z",
+        "updated_at": "2026-07-04T00:00:00Z",
+        "category_ids": ["c1"],
+        "category_names": ["Core"]
+    }))
+}
+
+async fn memu_search() -> HttpResponse {
+    HttpResponse::Ok().json(json!({
+        "nodes": [{
+            "id": "memory:m1",
+            "kind": "memory",
+            "label": "Memory one",
+            "summary": "Memory summary",
+            "memory_type": "episodic",
+            "score": 0.9,
+            "created_at": "2026-07-04T00:00:00Z",
+            "updated_at": "2026-07-04T00:00:00Z",
+            "category_ids": ["c1"],
+            "category_names": ["Core"]
+        }],
+        "limit": 5,
+        "count": 1
+    }))
+}
+
+fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
+    let server = HttpServer::new(move || {
+        App::new()
+            .route("/integration/atomic/atoms", web::get().to(memu_atoms))
+            .route("/integration/atomic/tags", web::get().to(memu_tags))
+            .route("/integration/atomic/search", web::get().to(memu_search))
+            .route("/memory/{id}", web::get().to(memu_memory))
     })
     .bind(("127.0.0.1", 0))
     .unwrap();
@@ -324,6 +418,53 @@ async fn test_memu_session_satisfies_provider_verify() {
     let resp: Value = actix_test::call_and_read_body_json(&app, req).await;
 
     assert_eq!(resp["configured"], true);
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
+    let (memu_url, memu_handle) = start_memu_memory_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/atoms")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let atoms: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(atoms["atoms"][0]["id"], "memory:m1");
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/tags?min_count=0")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let tags: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(tags[0]["id"], "category:c1");
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/atoms/memory:m1")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let atom: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(atom["content"], "Memory summary");
+    assert_eq!(atom["tags"][0]["id"], "category:c1");
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/search")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"query": "memory", "mode": "hybrid"}))
+        .to_request();
+    let search: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(search[0]["id"], "memory:m1");
+
+    let req = actix_test::TestRequest::put()
+        .uri("/api/atoms/memory:m1/content")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"content": "changed"}))
+        .to_request();
+    let resp = actix_test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 409);
+
     memu_handle.stop(true).await;
 }
 

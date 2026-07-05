@@ -1,8 +1,10 @@
 //! Search routes
 
 use crate::db_extractor::Db;
-use crate::error::{ok_or_error, ApiErrorResponse};
-use actix_web::{web, HttpResponse};
+use crate::error::{ApiErrorResponse, ok_or_error};
+use crate::routes::memu_proxy;
+use crate::state::AppState;
+use actix_web::{HttpResponse, web};
 use atomic_core::{SearchMode, SearchOptions, SemanticSearchResult, SimilarAtomResult};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -37,8 +39,15 @@ pub struct GlobalSearchRequest {
     ),
     tag = "search",
 )]
-pub async fn search(db: Db, body: web::Json<SearchRequest>) -> HttpResponse {
+pub async fn search(
+    state: web::Data<AppState>,
+    db: Db,
+    body: web::Json<SearchRequest>,
+) -> HttpResponse {
     let req = body.into_inner();
+    if let Some(config) = state.memu_session.clone() {
+        return memu_search(config, &req.query, req.limit.unwrap_or(20)).await;
+    }
     let mode = match req.mode.as_str() {
         "keyword" => SearchMode::Keyword,
         "semantic" => SearchMode::Semantic,
@@ -68,8 +77,25 @@ pub async fn search(db: Db, body: web::Json<SearchRequest>) -> HttpResponse {
     ),
     tag = "search",
 )]
-pub async fn global_search(db: Db, body: web::Json<GlobalSearchRequest>) -> HttpResponse {
+pub async fn global_search(
+    state: web::Data<AppState>,
+    db: Db,
+    body: web::Json<GlobalSearchRequest>,
+) -> HttpResponse {
     let req = body.into_inner();
+    if let Some(config) = state.memu_session.clone() {
+        let atoms =
+            match memu_search_value(config, &req.query, req.section_limit.unwrap_or(5)).await {
+                Ok(atoms) => atoms,
+                Err(response) => return response,
+            };
+        return HttpResponse::Ok().json(serde_json::json!({
+            "atoms": atoms,
+            "wiki": [],
+            "chats": [],
+            "tags": [],
+        }));
+    }
     ok_or_error(
         db.0.search_global_keyword(&req.query, req.section_limit.unwrap_or(5))
             .await,
@@ -98,12 +124,68 @@ pub struct FindSimilarQuery {
     tag = "search",
 )]
 pub async fn find_similar(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     query: web::Query<FindSimilarQuery>,
 ) -> HttpResponse {
     let atom_id = path.into_inner();
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&atom_id) {
+        return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
+    }
     let limit = query.limit.unwrap_or(10);
     let threshold = query.threshold.unwrap_or(0.7);
     ok_or_error(db.0.find_similar(&atom_id, limit, threshold).await)
+}
+
+async fn memu_search(
+    config: crate::state::MemuSessionConfig,
+    query: &str,
+    limit: i32,
+) -> HttpResponse {
+    match memu_search_value(config, query, limit).await {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(response) => response,
+    }
+}
+
+async fn memu_search_value(
+    config: crate::state::MemuSessionConfig,
+    query: &str,
+    limit: i32,
+) -> Result<Vec<serde_json::Value>, HttpResponse> {
+    let client = memu_proxy::client()?;
+    let params = vec![
+        ("q", query.to_string()),
+        ("user_id", config.user_id),
+        ("soul_id", config.soul_id),
+        ("limit", limit.max(1).to_string()),
+    ];
+    let body = memu_proxy::memu_json(
+        client
+            .get(format!("{}/integration/atomic/search", config.base_url))
+            .query(&params),
+        "memU search",
+    )
+    .await?;
+    Ok(body["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|node| {
+            let mut atom = memu_proxy::atom_from_node(node);
+            if let Some(map) = atom.as_object_mut() {
+                map.insert(
+                    "similarity_score".to_string(),
+                    serde_json::json!(node["score"].as_f64().unwrap_or(1.0) as f32),
+                );
+                map.insert(
+                    "matching_chunk_content".to_string(),
+                    serde_json::json!(node["summary"].as_str().unwrap_or_default()),
+                );
+                map.insert("matching_chunk_index".to_string(), serde_json::json!(0));
+            }
+            atom
+        })
+        .collect())
 }

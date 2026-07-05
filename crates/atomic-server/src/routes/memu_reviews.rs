@@ -1,8 +1,8 @@
-use crate::state::{AppState, MemuSessionConfig};
-use actix_web::{http::StatusCode, web, HttpResponse};
+use crate::routes::memu_proxy::{client, memu_json, session};
+use crate::state::AppState;
+use actix_web::{HttpResponse, web};
 use serde::Deserialize;
-use serde_json::{json, Value};
-use std::time::Duration;
+use serde_json::json;
 
 #[derive(Deserialize)]
 pub struct SummaryUpdate {
@@ -11,44 +11,6 @@ pub struct SummaryUpdate {
 
 pub async fn status(state: web::Data<AppState>) -> HttpResponse {
     HttpResponse::Ok().json(json!({"enabled": state.memu_session.is_some()}))
-}
-
-fn session(state: &AppState) -> Result<MemuSessionConfig, HttpResponse> {
-    state.memu_session.clone().ok_or_else(|| {
-        HttpResponse::InternalServerError().json(json!({
-            "error": "MEMU_SERVER_URL, MEMU_USER_ID, and MEMU_SOUL_ID are required"
-        }))
-    })
-}
-
-async fn memu_json(
-    request: reqwest::RequestBuilder,
-    error_prefix: &str,
-) -> Result<Value, HttpResponse> {
-    let response = request.send().await.map_err(|e| {
-        HttpResponse::BadGateway()
-            .json(json!({"error": format!("{error_prefix} request failed: {e}")}))
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return Err(HttpResponse::build(status).json(json!({"error": body})));
-    }
-    response.json::<Value>().await.map_err(|e| {
-        HttpResponse::BadGateway()
-            .json(json!({"error": format!("{error_prefix} returned invalid JSON: {e}")}))
-    })
-}
-
-fn client() -> Result<reqwest::Client, HttpResponse> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            HttpResponse::InternalServerError()
-                .json(json!({"error": format!("memU client failed: {e}")}))
-        })
 }
 
 pub async fn list_pending(state: web::Data<AppState>) -> HttpResponse {

@@ -14,6 +14,7 @@ pub mod graph;
 pub mod import;
 pub mod ingest;
 pub mod logs;
+pub mod memu_proxy;
 pub mod memu_reviews;
 pub mod oauth;
 pub mod ollama;

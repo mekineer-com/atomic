@@ -1,10 +1,11 @@
 //! Atom and Tag CRUD routes
 
 use crate::db_extractor::Db;
-use crate::error::{ok_or_error, ApiErrorResponse};
+use crate::error::{ApiErrorResponse, ok_or_error};
 use crate::event_bridge::embedding_event_callback;
+use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
-use actix_web::{web, HttpResponse};
+use actix_web::{HttpResponse, web};
 use atomic_core::{
     AtomLink, AtomWithTags, BulkCreateResult, PaginatedAtoms, PaginatedTagChildren, SourceInfo,
     Tag, TagWithCount,
@@ -87,7 +88,38 @@ fn parse_kinds(raw: Option<&str>) -> Result<atomic_core::models::KindFilter, Htt
     ),
     tag = "atoms",
 )]
-pub async fn get_atoms(db: Db, query: web::Query<GetAtomsQuery>) -> HttpResponse {
+pub async fn get_atoms(
+    state: web::Data<AppState>,
+    db: Db,
+    query: web::Query<GetAtomsQuery>,
+) -> HttpResponse {
+    if let Some(config) = state.memu_session.clone() {
+        let client = match memu_proxy::client() {
+            Ok(client) => client,
+            Err(response) => return response,
+        };
+        let mut params = vec![
+            ("user_id", config.user_id),
+            ("soul_id", config.soul_id),
+            ("limit", query.limit.unwrap_or(50).to_string()),
+            ("offset", query.offset.unwrap_or(0).to_string()),
+        ];
+        if let Some(tag_id) = &query.tag_id {
+            params.push(("tag_id", tag_id.clone()));
+        }
+        return match memu_proxy::memu_json(
+            client
+                .get(format!("{}/integration/atomic/atoms", config.base_url))
+                .query(&params),
+            "memU atoms",
+        )
+        .await
+        {
+            Ok(body) => HttpResponse::Ok().json(body),
+            Err(response) => response,
+        };
+    }
+
     let source_filter = match query.source.as_deref() {
         Some("manual") => atomic_core::SourceFilter::Manual,
         Some("external") => atomic_core::SourceFilter::External,
@@ -199,7 +231,10 @@ mod tests {
     ),
     tag = "atoms",
 )]
-pub async fn get_source_list(db: Db) -> HttpResponse {
+pub async fn get_source_list(state: web::Data<AppState>, db: Db) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
+    }
     ok_or_error(db.0.get_source_list().await)
 }
 
@@ -215,8 +250,29 @@ pub async fn get_source_list(db: Db) -> HttpResponse {
     ),
     tag = "atoms",
 )]
-pub async fn get_atom(db: Db, path: web::Path<String>) -> HttpResponse {
+pub async fn get_atom(state: web::Data<AppState>, db: Db, path: web::Path<String>) -> HttpResponse {
     let id = path.into_inner();
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+        let config = match memu_proxy::session(&state) {
+            Ok(config) => config,
+            Err(response) => return response,
+        };
+        let client = match memu_proxy::client() {
+            Ok(client) => client,
+            Err(response) => return response,
+        };
+        return match memu_proxy::memu_json(
+            client
+                .get(format!("{}/memory/{}", config.base_url, id))
+                .query(&memu_proxy::scope_query(&config)),
+            "memU atom",
+        )
+        .await
+        {
+            Ok(body) => HttpResponse::Ok().json(memu_proxy::atom_from_node(&body)),
+            Err(response) => response,
+        };
+    }
     match db.0.get_atom(&id).await {
         Ok(Some(atom)) => HttpResponse::Ok().json(atom),
         Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Atom not found"})),
@@ -236,8 +292,15 @@ pub async fn get_atom(db: Db, path: web::Path<String>) -> HttpResponse {
     ),
     tag = "atoms",
 )]
-pub async fn get_atom_links(db: Db, path: web::Path<String>) -> HttpResponse {
+pub async fn get_atom_links(
+    state: web::Data<AppState>,
+    db: Db,
+    path: web::Path<String>,
+) -> HttpResponse {
     let id = path.into_inner();
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+        return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
+    }
     ok_or_error(db.0.get_atom_links(&id).await)
 }
 
@@ -431,6 +494,9 @@ pub async fn update_atom(
     body: web::Json<UpdateAtomRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+        return memu_proxy::readonly();
+    }
     let req = body.into_inner();
     let on_event = embedding_event_callback(state.event_tx.clone());
     let event_tx = state.event_tx.clone();
@@ -472,11 +538,15 @@ pub async fn update_atom(
     tag = "atoms",
 )]
 pub async fn update_atom_content_only(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     body: web::Json<UpdateAtomRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+        return memu_proxy::readonly();
+    }
     let req = body.into_inner();
     ok_or_error(
         db.0.update_atom_content_only(
@@ -510,6 +580,9 @@ pub async fn process_atom_pipeline(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+        return memu_proxy::readonly();
+    }
     tracing::info!(atom_id = %id, "Received explicit atom pipeline request");
     let on_event = embedding_event_callback(state.event_tx.clone());
     ok_or_error(db.0.process_atom_pipeline(&id, on_event).await)
@@ -527,8 +600,15 @@ pub async fn process_atom_pipeline(
     ),
     tag = "atoms",
 )]
-pub async fn delete_atom(db: Db, path: web::Path<String>) -> HttpResponse {
+pub async fn delete_atom(
+    state: web::Data<AppState>,
+    db: Db,
+    path: web::Path<String>,
+) -> HttpResponse {
     let id = path.into_inner();
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+        return memu_proxy::readonly();
+    }
     ok_or_error(db.0.delete_atom(&id).await)
 }
 
@@ -561,7 +641,33 @@ pub struct GetTagChildrenQuery {
     ),
     tag = "tags",
 )]
-pub async fn get_tags(db: Db, query: web::Query<GetTagsQuery>) -> HttpResponse {
+pub async fn get_tags(
+    state: web::Data<AppState>,
+    db: Db,
+    query: web::Query<GetTagsQuery>,
+) -> HttpResponse {
+    if let Some(config) = state.memu_session.clone() {
+        let client = match memu_proxy::client() {
+            Ok(client) => client,
+            Err(response) => return response,
+        };
+        let params = vec![
+            ("user_id", config.user_id),
+            ("soul_id", config.soul_id),
+            ("min_count", query.min_count.unwrap_or(0).to_string()),
+        ];
+        return match memu_proxy::memu_json(
+            client
+                .get(format!("{}/integration/atomic/tags", config.base_url))
+                .query(&params),
+            "memU tags",
+        )
+        .await
+        {
+            Ok(body) => HttpResponse::Ok().json(body),
+            Err(response) => response,
+        };
+    }
     let min_count = query.min_count.unwrap_or(2);
     ok_or_error(db.0.get_all_tags_filtered(min_count).await)
 }
@@ -579,11 +685,18 @@ pub async fn get_tags(db: Db, query: web::Query<GetTagsQuery>) -> HttpResponse {
     tag = "tags",
 )]
 pub async fn get_tag_children(
+    state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     query: web::Query<GetTagChildrenQuery>,
 ) -> HttpResponse {
     let parent_id = path.into_inner();
+    if state.memu_session.is_some() && parent_id.starts_with("category:") {
+        return HttpResponse::Ok().json(serde_json::json!({
+            "children": [],
+            "total": 0,
+        }));
+    }
     let min_count = query.min_count.unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
