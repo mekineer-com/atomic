@@ -10,6 +10,7 @@ export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 interface UseInlineEditorOptions {
   atom: AtomWithTags;
   onAtomUpdated?: (atom: AtomWithTags) => void;
+  readOnly?: boolean;
 }
 
 interface UseInlineEditorReturn {
@@ -34,6 +35,7 @@ interface UseInlineEditorReturn {
 export function useInlineEditor({
   atom,
   onAtomUpdated,
+  readOnly = false,
 }: UseInlineEditorOptions): UseInlineEditorReturn {
   const updateAtomContentOnly = useAtomsStore(s => s.updateAtomContentOnly);
   const processAtomPipeline = useAtomsStore(s => s.processAtomPipeline);
@@ -136,6 +138,7 @@ export function useInlineEditor({
 
   /** Content-only save (no pipeline). */
   const doContentSave = useCallback(async () => {
+    if (readOnly) return;
     if (isSavingRef.current) return;
     isSavingRef.current = true;
     setSaveStatus('saving');
@@ -170,10 +173,11 @@ export function useInlineEditor({
     })();
     savingPromiseRef.current = promise;
     await promise;
-  }, [atom.id, hasPipelineRelevantChanges, updateAtomContentOnly, onAtomUpdated]);
+  }, [atom.id, hasPipelineRelevantChanges, readOnly, updateAtomContentOnly, onAtomUpdated]);
 
   /** Flush latest draft and only kick the pipeline when content/source changed. */
   const finalizeDraft = useCallback(async () => {
+    if (readOnly) return;
     // Wait for any in-flight content-only save to complete first
     await savingPromiseRef.current;
     setSaveStatus('saving');
@@ -190,16 +194,17 @@ export function useInlineEditor({
     } catch {
       setSaveStatus('error');
     }
-  }, [atom.id, isDirty, doContentSave, processAtomPipeline, fetchTags]);
+  }, [atom.id, isDirty, readOnly, doContentSave, processAtomPipeline, fetchTags]);
 
   /** Schedule a debounced content-only save. */
   const scheduleSave = useCallback(() => {
+    if (readOnly) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null;
       doContentSave();
     }, AUTO_SAVE_DELAY);
-  }, [doContentSave]);
+  }, [doContentSave, readOnly]);
 
   /** Wrappers that schedule auto-save on change. */
   const handleSetContent = useCallback((content: string) => {
@@ -221,13 +226,15 @@ export function useInlineEditor({
   }, [scheduleSave]);
 
   const startEditing = useCallback((offset?: number) => {
+    if (readOnly) return;
     needsPipelineRef.current = false;
     setIsEditing(true);
     setCursorOffset(offset ?? null);
     setSaveStatus('idle');
-  }, []);
+  }, [readOnly]);
 
   const stopEditing = useCallback(async () => {
+    if (readOnly) return;
     // Cancel pending debounced save
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
@@ -266,10 +273,11 @@ export function useInlineEditor({
         }
       });
     });
-  }, [isDirty, finalizeDraft, editContent, atom.id, deleteAtom, fetchTags]);
+  }, [isDirty, finalizeDraft, editContent, atom.id, readOnly, deleteAtom, fetchTags]);
 
   /** Immediate content-only save (for Cmd+S). */
   const saveNow = useCallback(async () => {
+    if (readOnly) return;
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
@@ -277,9 +285,10 @@ export function useInlineEditor({
     if (isDirty()) {
       await doContentSave();
     }
-  }, [isDirty, doContentSave]);
+  }, [isDirty, doContentSave, readOnly]);
 
   const flushDraft = useCallback(async () => {
+    if (readOnly) return;
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
@@ -287,11 +296,12 @@ export function useInlineEditor({
     if (isDirty() || needsPipelineRef.current) {
       await finalizeDraft();
     }
-  }, [isDirty, finalizeDraft]);
+  }, [isDirty, finalizeDraft, readOnly]);
 
   // Cleanup on unmount: delete if empty, otherwise save
   useEffect(() => {
     return () => {
+      if (readOnly) return;
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
       }
@@ -329,7 +339,7 @@ export function useInlineEditor({
         }
       }
     };
-  }, [atom.id]);
+  }, [atom.id, readOnly]);
 
   // Fade save status back to idle after 2s
   useEffect(() => {

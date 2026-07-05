@@ -4,7 +4,7 @@
 //! retrieves atoms, and generates responses with citations.
 //! Uses a callback-based event system (same pattern as EmbeddingEvent).
 
-use crate::atom_edit::{AtomEditOperation, apply_atom_edits};
+use crate::atom_edit::{apply_atom_edits, AtomEditOperation};
 use crate::chunking::count_tokens;
 use crate::embedding::EmbeddingEvent;
 use crate::models::{
@@ -15,7 +15,7 @@ use crate::providers::traits::LlmConfig;
 use crate::providers::types::{
     GenerationParams, Message, MessageRole, StreamDelta, ToolDefinition,
 };
-use crate::providers::{ProviderConfig, ProviderType, create_streaming_llm_provider};
+use crate::providers::{create_streaming_llm_provider, ProviderConfig, ProviderType};
 use crate::search::{SearchMode, SearchOptions};
 use crate::storage::StorageBackend;
 use chrono::Utc;
@@ -468,6 +468,8 @@ struct MemuNode {
     #[serde(default)]
     updated_at: Option<String>,
     #[serde(default)]
+    category_ids: Vec<String>,
+    #[serde(default)]
     category_names: Vec<String>,
     #[serde(default)]
     score: Option<f32>,
@@ -564,10 +566,11 @@ fn memu_node_to_atom(node: MemuNode) -> AtomWithTags {
     };
     let timestamp = memu_node_timestamp(&node);
     let tags = node
-        .category_names
+        .category_ids
         .iter()
-        .map(|name| Tag {
-            id: format!("category-name:{name}"),
+        .zip(node.category_names.iter())
+        .map(|(id, name)| Tag {
+            id: format!("category:{id}"),
             name: name.clone(),
             parent_id: None,
             created_at: "1970-01-01T00:00:00Z".to_string(),
@@ -1967,6 +1970,26 @@ mod tests {
         assert!(prompt.contains("In Atomic, Marcos is the user."));
         assert!(prompt.contains("Guidelines for Atomic:"));
         assert!(!prompt.contains("helpful AI assistant"));
+    }
+
+    #[test]
+    fn memu_node_to_atom_uses_stable_category_ids() {
+        let atom = memu_node_to_atom(MemuNode {
+            id: "memory:m1".to_string(),
+            kind: "memory".to_string(),
+            label: "Memory".to_string(),
+            summary: "Summary".to_string(),
+            memory_type: Some("episode".to_string()),
+            happened_at: None,
+            created_at: None,
+            updated_at: None,
+            category_ids: vec!["c1".to_string()],
+            category_names: vec!["Core".to_string()],
+            score: None,
+        });
+
+        assert_eq!(atom.tags[0].id, "category:c1");
+        assert_eq!(atom.tags[0].name, "Core");
     }
 
     #[test]

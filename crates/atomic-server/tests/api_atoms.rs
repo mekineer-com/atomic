@@ -273,7 +273,8 @@ async fn memu_update_memory(path: web::Path<String>, body: web::Json<Value>) -> 
     }))
 }
 
-async fn memu_search() -> HttpResponse {
+async fn memu_search(req: HttpRequest) -> HttpResponse {
+    assert!(req.query_string().contains("mode=hybrid"));
     HttpResponse::Ok().json(json!({
         "nodes": [{
             "id": "memory:m1",
@@ -299,6 +300,14 @@ async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
             "id": "memory:m1",
             "title": "Memory one",
             "embedding": [1.0, 0.0],
+            "primary_tag": "Core",
+            "tag_count": 1,
+            "tag_ids": ["category:c1"],
+            "source_url": null
+        }, {
+            "id": "memory:m2",
+            "title": "Memory two",
+            "embedding": [0.9, 0.1],
             "primary_tag": "Core",
             "tag_count": 1,
             "tag_ids": ["category:c1"],
@@ -523,6 +532,8 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let canvas: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(canvas["atoms"][0]["atom_id"], "memory:m1");
     assert_eq!(canvas["atoms"][0]["tag_ids"][0], "category:c1");
+    assert_eq!(canvas["edges"][0]["source"], "memory:m1");
+    assert_eq!(canvas["edges"][0]["target"], "memory:m2");
 
     let req = actix_test::TestRequest::get()
         .uri("/api/graph/neighborhood/memory:m1")

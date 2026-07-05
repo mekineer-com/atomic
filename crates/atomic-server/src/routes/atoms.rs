@@ -1,11 +1,11 @@
 //! Atom and Tag CRUD routes
 
 use crate::db_extractor::Db;
-use crate::error::{ApiErrorResponse, ok_or_error};
+use crate::error::{ok_or_error, ApiErrorResponse};
 use crate::event_bridge::embedding_event_callback;
 use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
-use actix_web::{HttpResponse, web};
+use actix_web::{web, HttpResponse};
 use atomic_core::{
     AtomLink, AtomWithTags, BulkCreateResult, PaginatedAtoms, PaginatedTagChildren, SourceInfo,
     Tag, TagWithCount,
@@ -660,7 +660,7 @@ pub async fn get_tags(
         let params = vec![
             ("user_id", config.user_id),
             ("soul_id", config.soul_id),
-            ("min_count", query.min_count.unwrap_or(0).to_string()),
+            ("min_count", query.min_count.unwrap_or(2).to_string()),
         ];
         return match memu_proxy::memu_json(
             client

@@ -1,5 +1,7 @@
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ChevronDown, Trash2 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { openExternalUrl } from '../../lib/platform';
 import { Modal } from '../ui/Modal';
 import { Input } from '../ui/Input';
@@ -187,12 +189,13 @@ function AtomReaderContent({
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [showTagSelector, setShowTagSelector] = useState(false);
+  const isMemuAtom = atom.id.startsWith('memory:') || atom.id.startsWith('category:');
 
   const {
     editContent, editSourceUrl, editTags, saveStatus,
     editorRevision,
     startEditing, setEditContent, setEditSourceUrl, setEditTags, saveNow, flushDraft,
-  } = useInlineEditor({ atom, onAtomUpdated });
+  } = useInlineEditor({ atom, onAtomUpdated, readOnly: isMemuAtom });
   const isTaggingInFlight = atom.tagging_status === 'pending' || atom.tagging_status === 'processing';
 
   const handleAutoTag = useCallback(async () => {
@@ -208,8 +211,8 @@ function AtomReaderContent({
   }, [initialEditing, saveStatus, setReaderEditState]);
 
   useEffect(() => {
-    startEditing();
-  }, [startEditing]);
+    if (!isMemuAtom) startEditing();
+  }, [isMemuAtom, startEditing]);
 
   useEffect(() => {
     if (!initialEditing) return;
@@ -365,21 +368,29 @@ function AtomReaderContent({
       <div className="@container flex-1 overflow-y-auto scrollbar-auto-hide">
         <div className="max-w-6xl mx-auto px-3 py-5 sm:px-4 sm:py-6 @4xl:px-6 @4xl:flex @4xl:gap-10">
           <div className="flex-1 min-w-0">
-            <Suspense fallback={null}>
-              <AtomicCodeMirrorEditor
-                key={`${atom.id}:${editorRevision}`}
-                documentId={atom.id}
-                markdownSource={editContent}
-                initialRevealText={highlightText}
-                blurEditorOnMount={!initialEditing}
-                onMarkdownChange={setEditContent}
-                onLinkClick={(url) => {
-                  void openExternalUrl(url);
-                }}
-                editorHandleRef={editorHandleRef}
-                extensions={atomLinkExtensions}
-              />
-            </Suspense>
+            {isMemuAtom ? (
+              <div className="prose prose-invert max-w-none prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-a:text-[var(--color-text-primary)] prose-a:underline prose-a:decoration-[var(--color-border-hover)] prose-strong:text-[var(--color-text-primary)] prose-code:text-[var(--color-accent-light)] prose-code:bg-[var(--color-bg-card)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[var(--color-bg-card)] prose-pre:border prose-pre:border-[var(--color-border)] prose-blockquote:border-l-[var(--color-accent)] prose-blockquote:text-[var(--color-text-secondary)] prose-li:text-[var(--color-text-primary)]">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {atom.content}
+                </ReactMarkdown>
+              </div>
+            ) : (
+              <Suspense fallback={null}>
+                <AtomicCodeMirrorEditor
+                  key={`${atom.id}:${editorRevision}`}
+                  documentId={atom.id}
+                  markdownSource={editContent}
+                  initialRevealText={highlightText}
+                  blurEditorOnMount={!initialEditing}
+                  onMarkdownChange={setEditContent}
+                  onLinkClick={(url) => {
+                    void openExternalUrl(url);
+                  }}
+                  editorHandleRef={editorHandleRef}
+                  extensions={atomLinkExtensions}
+                />
+              </Suspense>
+            )}
           </div>
 
           <div className="w-full @4xl:w-80 @4xl:shrink-0 mt-6 @4xl:mt-0 border border-[var(--color-border)] rounded-lg p-4 self-start">
@@ -393,10 +404,12 @@ function AtomReaderContent({
                     onChange={(e) => setEditSourceUrl(e.target.value)}
                     placeholder="Source URL (optional)"
                     className="text-xs"
+                    disabled={isMemuAtom}
                   />
                 </div>
                 <button
                   onClick={() => setShowDeleteModal(true)}
+                  disabled={isMemuAtom}
                   className="shrink-0 p-1.5 rounded text-[var(--color-text-secondary)] hover:text-red-400 hover:bg-[var(--color-bg-hover)] transition-colors"
                   title="Delete atom"
                   aria-label="Delete atom"
@@ -424,23 +437,23 @@ function AtomReaderContent({
                     key={tag.id}
                     name={tag.name}
                     size="sm"
-                    onRemove={() => setEditTags(editTags.filter((t) => t.id !== tag.id))}
+                    onRemove={isMemuAtom ? undefined : () => setEditTags(editTags.filter((t) => t.id !== tag.id))}
                     onClick={() => onTagClick(tag.id)}
                   />
                 ))}
-                <button
+                {!isMemuAtom && <button
                   onClick={() => setShowTagSelector(!showTagSelector)}
                   className="text-xs text-[var(--color-accent)] hover:text-[var(--color-accent-light)] transition-colors px-1.5 py-0.5 rounded border border-dashed border-[var(--color-border)]"
                 >
                   +
-                </button>
+                </button>}
               </div>
-              {showTagSelector && (
+              {!isMemuAtom && showTagSelector && (
                 <TagSelector selectedTags={editTags} onTagsChange={setEditTags} />
               )}
             </div>
 
-            {editTags.length === 0 && (
+            {!isMemuAtom && editTags.length === 0 && (
               <div className="mb-4 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-card)]/60 p-3">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">

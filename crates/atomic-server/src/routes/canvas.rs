@@ -4,13 +4,13 @@ use crate::db_extractor::Db;
 use crate::error::ok_or_error;
 use crate::routes::memu_proxy;
 use crate::state::AppState;
-use actix_web::{HttpResponse, web};
+use actix_web::{web, HttpResponse};
 use atomic_core::{
-    AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData, GlobalCanvasData,
-    projection,
+    projection, AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData,
+    GlobalCanvasData,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use utoipa::{IntoParams, ToSchema};
 
 #[utoipa::path(get, path = "/api/canvas/positions", responses((status = 200, description = "All atom positions", body = Vec<AtomPosition>)), tag = "canvas")]
@@ -75,6 +75,8 @@ pub struct GlobalCanvasQuery {
 #[derive(Deserialize)]
 struct MemuCanvasSource {
     atoms: Vec<MemuCanvasAtom>,
+    #[serde(default)]
+    edges: Vec<CanvasEdgeData>,
 }
 
 #[derive(Deserialize)]
@@ -155,6 +157,7 @@ fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
             .into_iter()
             .map(|(id, x, y)| (id, (x, y)))
             .collect();
+    let similarity_edges = memu_similarity_edges(&source.atoms);
     let atoms = source
         .atoms
         .into_iter()
@@ -172,10 +175,80 @@ fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
             })
         })
         .collect();
+    let mut edges = source.edges;
+    merge_edges(&mut edges, similarity_edges);
     GlobalCanvasData {
         atoms,
-        edges: vec![],
+        edges,
         clusters: vec![],
+    }
+}
+
+fn memu_similarity_edges(atoms: &[MemuCanvasAtom]) -> Vec<CanvasEdgeData> {
+    let mut scored = Vec::new();
+    for (idx, left) in atoms.iter().enumerate() {
+        for right in atoms.iter().skip(idx + 1) {
+            let Some(score) = cosine(&left.embedding, &right.embedding) else {
+                continue;
+            };
+            if score >= 0.5 {
+                scored.push((left.id.clone(), right.id.clone(), score));
+            }
+        }
+    }
+    scored.sort_by(|a, b| b.2.total_cmp(&a.2));
+    let mut per_atom: HashMap<String, usize> = HashMap::new();
+    let mut edges = Vec::new();
+    for (source, target, weight) in scored {
+        if per_atom.get(&source).copied().unwrap_or(0) >= 3
+            && per_atom.get(&target).copied().unwrap_or(0) >= 3
+        {
+            continue;
+        }
+        *per_atom.entry(source.clone()).or_default() += 1;
+        *per_atom.entry(target.clone()).or_default() += 1;
+        edges.push(CanvasEdgeData {
+            source,
+            target,
+            weight,
+        });
+    }
+    edges
+}
+
+fn cosine(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
+    for (a, b) in left.iter().zip(right.iter()) {
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    let denom = left_norm.sqrt() * right_norm.sqrt();
+    (denom > 0.0).then_some(dot / denom)
+}
+
+fn merge_edges(edges: &mut Vec<CanvasEdgeData>, extra: Vec<CanvasEdgeData>) {
+    let mut seen: HashSet<(String, String)> = edges
+        .iter()
+        .map(|edge| edge_key(&edge.source, &edge.target))
+        .collect();
+    for edge in extra {
+        if seen.insert(edge_key(&edge.source, &edge.target)) {
+            edges.push(edge);
+        }
+    }
+}
+
+fn edge_key(left: &str, right: &str) -> (String, String) {
+    if left <= right {
+        (left.to_string(), right.to_string())
+    } else {
+        (right.to_string(), left.to_string())
     }
 }
 
