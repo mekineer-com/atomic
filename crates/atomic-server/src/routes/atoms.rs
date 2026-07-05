@@ -107,6 +107,12 @@ pub async fn get_atoms(
         if let Some(tag_id) = &query.tag_id {
             params.push(("tag_id", tag_id.clone()));
         }
+        if let Some(cursor) = &query.cursor {
+            params.push(("cursor", cursor.clone()));
+        }
+        if let Some(cursor_id) = &query.cursor_id {
+            params.push(("cursor_id", cursor_id.clone()));
+        }
         return match memu_proxy::memu_json(
             client
                 .get(format!("{}/integration/atomic/atoms", config.base_url))
