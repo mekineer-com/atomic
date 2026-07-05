@@ -2,9 +2,12 @@
 
 use crate::db_extractor::Db;
 use crate::error::ok_or_error;
-use actix_web::{web, HttpResponse};
+use crate::routes::memu_proxy;
+use crate::state::AppState;
+use actix_web::{HttpResponse, web};
 use atomic_core::{
     AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData, GlobalCanvasData,
+    projection,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -69,8 +72,64 @@ pub struct GlobalCanvasQuery {
     pub source_prefix: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct MemuCanvasSource {
+    atoms: Vec<MemuCanvasAtom>,
+}
+
+#[derive(Deserialize)]
+struct MemuCanvasAtom {
+    id: String,
+    title: String,
+    embedding: Vec<f32>,
+    primary_tag: Option<String>,
+    tag_count: i32,
+    tag_ids: Vec<String>,
+    source_url: Option<String>,
+}
+
 #[utoipa::path(get, path = "/api/canvas/global", params(GlobalCanvasQuery), responses((status = 200, description = "Global canvas data", body = atomic_core::GlobalCanvasData)), tag = "canvas")]
-pub async fn get_global_canvas(db: Db, query: web::Query<GlobalCanvasQuery>) -> HttpResponse {
+pub async fn get_global_canvas(
+    state: web::Data<AppState>,
+    db: Db,
+    query: web::Query<GlobalCanvasQuery>,
+) -> HttpResponse {
+    if let Some(config) = state.memu_session.clone() {
+        let client = match memu_proxy::client() {
+            Ok(client) => client,
+            Err(response) => return response,
+        };
+        let mut params = vec![("limit", "500".to_string())];
+        params.extend(
+            memu_proxy::scope_query(&config)
+                .into_iter()
+                .map(|(key, value)| (key, value.to_string())),
+        );
+        let body = match memu_proxy::memu_json(
+            client
+                .get(format!(
+                    "{}/integration/atomic/canvas-source",
+                    config.base_url
+                ))
+                .query(&params),
+            "memU canvas source",
+        )
+        .await
+        {
+            Ok(body) => body,
+            Err(response) => return response,
+        };
+        let source = match serde_json::from_value::<MemuCanvasSource>(body) {
+            Ok(source) => source,
+            Err(e) => {
+                return HttpResponse::BadGateway().json(
+                    serde_json::json!({"error": format!("memU canvas source shape failed: {e}")}),
+                );
+            }
+        };
+        return HttpResponse::Ok().json(memu_canvas_data(source));
+    }
+
     let source_prefix = query.into_inner().source_prefix;
 
     match db.0.compute_and_get_canvas_data().await {
@@ -82,6 +141,41 @@ pub async fn get_global_canvas(db: Db, query: web::Query<GlobalCanvasQuery>) -> 
             }
         }
         Err(e) => crate::error::error_response(e),
+    }
+}
+
+fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
+    let embeddings: Vec<(String, Vec<f32>)> = source
+        .atoms
+        .iter()
+        .map(|atom| (atom.id.clone(), atom.embedding.clone()))
+        .collect();
+    let positions: std::collections::HashMap<String, (f64, f64)> =
+        projection::compute_2d_projection(&embeddings)
+            .into_iter()
+            .map(|(id, x, y)| (id, (x, y)))
+            .collect();
+    let atoms = source
+        .atoms
+        .into_iter()
+        .filter_map(|atom| {
+            let (x, y) = positions.get(&atom.id)?;
+            Some(CanvasAtomPosition {
+                atom_id: atom.id,
+                x: *x,
+                y: *y,
+                title: atom.title,
+                primary_tag: atom.primary_tag,
+                tag_count: atom.tag_count,
+                tag_ids: atom.tag_ids,
+                source_url: atom.source_url,
+            })
+        })
+        .collect();
+    GlobalCanvasData {
+        atoms,
+        edges: vec![],
+        clusters: vec![],
     }
 }
 

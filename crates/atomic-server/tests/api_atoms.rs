@@ -278,12 +278,31 @@ async fn memu_search() -> HttpResponse {
     }))
 }
 
+async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
+    assert!(req.query_string().contains("user_id="));
+    HttpResponse::Ok().json(json!({
+        "atoms": [{
+            "id": "memory:m1",
+            "title": "Memory one",
+            "embedding": [1.0, 0.0],
+            "primary_tag": "Core",
+            "tag_count": 1,
+            "tag_ids": ["category:c1"],
+            "source_url": null
+        }]
+    }))
+}
+
 fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
     let server = HttpServer::new(move || {
         App::new()
             .route("/integration/atomic/atoms", web::get().to(memu_atoms))
             .route("/integration/atomic/tags", web::get().to(memu_tags))
             .route("/integration/atomic/search", web::get().to(memu_search))
+            .route(
+                "/integration/atomic/canvas-source",
+                web::get().to(memu_canvas_source),
+            )
             .route("/memory/{id}", web::get().to(memu_memory))
     })
     .bind(("127.0.0.1", 0))
@@ -456,6 +475,14 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
         .to_request();
     let search: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(search[0]["id"], "memory:m1");
+
+    let req = actix_test::TestRequest::get()
+        .uri("/api/canvas/global")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let canvas: Value = actix_test::call_and_read_body_json(&app, req).await;
+    assert_eq!(canvas["atoms"][0]["atom_id"], "memory:m1");
+    assert_eq!(canvas["atoms"][0]["tag_ids"][0], "category:c1");
 
     let req = actix_test::TestRequest::put()
         .uri("/api/atoms/memory:m1/content")
