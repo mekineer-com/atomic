@@ -196,7 +196,6 @@ function AtomReaderContent({
 }: AtomReaderContentProps) {
   const readerTheme = useUIStore(s => s.readerTheme);
   const setReaderEditState = useUIStore(s => s.setReaderEditState);
-  const addAtom = useAtomsStore(s => s.addAtom);
   const retryTagging = useAtomsStore(s => s.retryTagging);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const editorHandleRef = useRef<AtomicCodeMirrorEditorHandle | null>(null);
@@ -239,7 +238,6 @@ function AtomReaderContent({
       );
       const updated = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atom.id });
       if (updated) {
-        addAtom(updated);
         onAtomUpdated?.(updated);
       }
     } catch (error) {
@@ -247,7 +245,7 @@ function AtomReaderContent({
     } finally {
       setMemuStatus('idle');
     }
-  }, [addAtom, atom.id, isMemuCategory, isMemuMemory, memuSummary, onAtomUpdated]);
+  }, [atom.id, isMemuCategory, isMemuMemory, memuSummary, onAtomUpdated]);
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -260,7 +258,6 @@ function AtomReaderContent({
       );
       const updated = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atom.id });
       if (updated) {
-        addAtom(updated);
         onAtomUpdated?.(updated);
       }
     } catch (error) {
@@ -268,7 +265,7 @@ function AtomReaderContent({
     } finally {
       setMemuStatus('idle');
     }
-  }, [addAtom, atom.id, isMemuCategory, isMemuMemory, onAtomUpdated]);
+  }, [atom.id, isMemuCategory, isMemuMemory, onAtomUpdated]);
 
   useEffect(() => {
     setReaderEditState(Boolean(initialEditing), saveStatus);
