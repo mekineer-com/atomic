@@ -223,6 +223,7 @@ export function SigmaCanvas({
 
   useEffect(() => {
     if (isPreview) return;
+    selectedEntityIdsRef.current = new Set();
     setSelectedEntityIds([]);
   }, [data, isPreview]);
 
@@ -374,18 +375,18 @@ export function SigmaCanvas({
         if (hovered || pinned) {
           if (hovered && node === hovered) {
             const next = { ...attrs, zIndex: 2 };
-            return selected ? next : dimNode(next);
+            return selected ? next : { ...dimNode(attrs), zIndex: 2 };
           }
           if (pinned && node === pinned) {
             const next = { ...attrs, zIndex: 2 };
-            return selected ? next : dimNode(next);
+            return selected ? next : { ...dimNode(attrs), zIndex: 2 };
           }
           const isNeighbor =
             (hovered && neighborsRef.current.get(hovered)?.has(node)) ||
             (pinned && neighborsRef.current.get(pinned)?.has(node));
           if (isNeighbor) {
             const next = { ...attrs, zIndex: 1 };
-            return selected ? next : dimNode(next);
+            return selected ? next : { ...dimNode(attrs), zIndex: 1 };
           }
           // Non-neighbors dim. Hover fades in/out via hoverAnim; pin holds
           // the dim at full strength so edges/nodes stay faded after the
@@ -401,7 +402,7 @@ export function SigmaCanvas({
             size: (attrs.size || 4) * (1 - 0.45 * dim),
             label: dim > 0.5 ? '' : (attrs.label as string),
           };
-          return selected ? next : dimNode(next);
+          return selected ? next : dimNode(attrs);
         }
         return selected ? attrs : dimNode(attrs);
       },
