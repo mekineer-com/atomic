@@ -583,10 +583,7 @@ export function SigmaCanvas({
       const candidates: Cand[] = [];
       graph!.forEachNode((id, attrs) => {
         if (pinnedId && id !== pinnedId && !pinnedNeighbors?.has(id)) return;
-        if (tagFilter) {
-          const tagIds = (attrs as any).tagIds as string[] | undefined;
-          if (!tagIds?.includes(tagFilter)) return;
-        }
+        if (!matchesSelection(attrs, tagFilter, selectedEntityIdsRef.current)) return;
         const rsize = sigma!.scaleSize(attrs.size as number);
         if (rsize < minRenderedSize) return;
         const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
