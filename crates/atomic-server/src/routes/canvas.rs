@@ -300,7 +300,7 @@ mod tests {
             source: source.to_string(),
             target: target.to_string(),
             weight: 0.7,
-            kind: Some(predicate.to_string()),
+            kind: Some(if predicate == "similarity" { predicate } else { "triple" }.to_string()),
             predicate: Some(predicate.to_string()),
         }
     }
@@ -350,5 +350,23 @@ mod tests {
             .filter(|edge| edge.predicate.as_deref() == Some("similarity"))
             .count();
         assert_eq!(similarity_count, 1);
+    }
+
+    #[test]
+    fn memu_canvas_dedupes_symmetric_predicate_edges() {
+        let data = memu_canvas_data(MemuCanvasSource {
+            atoms: vec![atom("memory:a"), atom("memory:b")],
+            edges: vec![
+                edge("memory:a", "memory:b", "caused_by"),
+                edge("memory:b", "memory:a", "caused_by"),
+            ],
+        });
+
+        let caused_by_count = data
+            .edges
+            .iter()
+            .filter(|edge| edge.predicate.as_deref() == Some("caused_by"))
+            .count();
+        assert_eq!(caused_by_count, 1);
     }
 }
