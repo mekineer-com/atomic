@@ -64,6 +64,23 @@ function visibleNeighbors(graph: Graph, visibleLayers: Record<string, boolean>, 
   return neighbors;
 }
 
+function matchesSelection(attrs: any, tagId: string | null, entityIds: Set<string>): boolean {
+  const tagIds = attrs.tagIds as string[] | undefined;
+  const nodeEntityIds = attrs.entityIds as string[] | undefined;
+  const tagOk = !tagId || tagIds?.includes(tagId) === true;
+  const entityOk = entityIds.size === 0 || nodeEntityIds?.some(id => entityIds.has(id)) === true;
+  return tagOk && entityOk;
+}
+
+function dimNode(attrs: any) {
+  return {
+    ...attrs,
+    color: 'rgba(50, 50, 50, 0.3)',
+    size: (attrs.size || 4) * 0.6,
+    label: '',
+  };
+}
+
 export type SigmaCanvasMode = 'main' | 'preview';
 
 interface SigmaCanvasProps {
@@ -116,8 +133,10 @@ export function SigmaCanvas({
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [edgeThreshold, setEdgeThreshold] = useState(0);
   const [visibleEdgeLayers, setVisibleEdgeLayers] = useState<Record<string, boolean>>({});
+  const [selectedEntityIds, setSelectedEntityIds] = useState<string[]>([]);
   const edgeThresholdRef = useRef(0);
   const visibleEdgeLayersRef = useRef<Record<string, boolean>>({});
+  const selectedEntityIdsRef = useRef<Set<string>>(new Set());
   const edgeAnimProgress = useRef(0); // 0 = invisible, 1 = fully visible
   const themeRef = useRef(theme);
   themeRef.current = theme;
@@ -125,6 +144,15 @@ export function SigmaCanvas({
     () => [...new Set((data?.edges ?? []).map(edgeLayer))].sort(),
     [data]
   );
+  const entityChoices = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const atom of data?.atoms ?? []) {
+      for (let i = 0; i < atom.entity_ids.length; i++) {
+        byId.set(atom.entity_ids[i], atom.entity_names[i] || atom.entity_ids[i]);
+      }
+    }
+    return [...byId.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [data]);
 
   // Hover emphasis: when a node is hovered, dim everything outside its neighborhood.
   // neighborsRef lets the edge/node reducers answer "is X a neighbor of hovered?" in O(1).
@@ -194,11 +222,21 @@ export function SigmaCanvas({
   }, [edgeLayerNames, isPreview]);
 
   useEffect(() => {
+    if (isPreview) return;
+    setSelectedEntityIds([]);
+  }, [data, isPreview]);
+
+  useEffect(() => {
     visibleEdgeLayersRef.current = visibleEdgeLayers;
     const graph = graphRef.current;
     if (graph) neighborsRef.current = visibleNeighbors(graph, visibleEdgeLayers);
     sigmaRef.current?.refresh();
   }, [visibleEdgeLayers]);
+
+  useEffect(() => {
+    selectedEntityIdsRef.current = new Set(selectedEntityIds);
+    sigmaRef.current?.refresh();
+  }, [selectedEntityIds]);
 
   // Precomputed data for the graph
   const graphDataRef = useRef<{
@@ -328,15 +366,27 @@ export function SigmaCanvas({
       // labelCanvas, so drawing the hover pill here would render it behind.
       defaultDrawNodeHover: () => {},
       nodeReducer: (node, attrs) => {
+        const tagId = selectedTagRef.current;
+        const selectedEntities = selectedEntityIdsRef.current;
+        const selected = matchesSelection(attrs, tagId, selectedEntities);
         const hovered = hoveredNodeRef.current;
         const pinned = pinnedNodeRef.current;
         if (hovered || pinned) {
-          if (hovered && node === hovered) return { ...attrs, zIndex: 2 };
-          if (pinned && node === pinned) return { ...attrs, zIndex: 2 };
+          if (hovered && node === hovered) {
+            const next = { ...attrs, zIndex: 2 };
+            return selected ? next : dimNode(next);
+          }
+          if (pinned && node === pinned) {
+            const next = { ...attrs, zIndex: 2 };
+            return selected ? next : dimNode(next);
+          }
           const isNeighbor =
             (hovered && neighborsRef.current.get(hovered)?.has(node)) ||
             (pinned && neighborsRef.current.get(pinned)?.has(node));
-          if (isNeighbor) return { ...attrs, zIndex: 1 };
+          if (isNeighbor) {
+            const next = { ...attrs, zIndex: 1 };
+            return selected ? next : dimNode(next);
+          }
           // Non-neighbors dim. Hover fades in/out via hoverAnim; pin holds
           // the dim at full strength so edges/nodes stay faded after the
           // cursor moves off the pinned node.
@@ -345,24 +395,15 @@ export function SigmaCanvas({
           const color = rgb
             ? `rgb(${Math.round(rgb[0] + (60 - rgb[0]) * dim)},${Math.round(rgb[1] + (60 - rgb[1]) * dim)},${Math.round(rgb[2] + (60 - rgb[2]) * dim)})`
             : attrs.color;
-          return {
+          const next = {
             ...attrs,
             color,
             size: (attrs.size || 4) * (1 - 0.45 * dim),
             label: dim > 0.5 ? '' : (attrs.label as string),
           };
+          return selected ? next : dimNode(next);
         }
-        const tagId = selectedTagRef.current;
-        if (!tagId) return attrs;
-        const tagIds = (attrs as any).tagIds as string[] | undefined;
-        const matches = tagIds?.includes(tagId);
-        if (matches) return attrs;
-        return {
-          ...attrs,
-          color: 'rgba(50, 50, 50, 0.3)',
-          size: (attrs.size || 4) * 0.6,
-          label: '',
-        };
+        return selected ? attrs : dimNode(attrs);
       },
       edgeReducer: (edge, attrs) => {
         const w = (attrs as any).weight ?? 0.5;
@@ -591,6 +632,21 @@ export function SigmaCanvas({
       }
 
       // === Pinned-node ring (persists while a popover is open) ===
+      const selectedEntities = selectedEntityIdsRef.current;
+      if (selectedEntities.size > 0) {
+        const tagId = selectedTagRef.current;
+        graph!.forEachNode((_id, attrs) => {
+          if (!matchesSelection(attrs, tagId, selectedEntities)) return;
+          const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
+          const size = sigma!.scaleSize(attrs.size as number);
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, size + 5, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255, 220, 120, 0.85)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        });
+      }
+
       if (pinnedId && graph!.hasNode(pinnedId)) {
         const pAttrs = graph!.getNodeAttributes(pinnedId);
         const pPos = sigma!.graphToViewport({ x: pAttrs.x as number, y: pAttrs.y as number });
@@ -1114,6 +1170,26 @@ export function SigmaCanvas({
                         style={{ backgroundColor: paletteRgb(theme, layer) }}
                       />
                       <span className="truncate">{layer}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            {entityChoices.length > 0 && (
+              <div className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 backdrop-blur">
+                <div className="mb-1 text-[9px] uppercase tracking-wide text-white/35">Entities</div>
+                <div className="flex max-h-28 flex-col gap-1 overflow-y-auto pr-1">
+                  {entityChoices.map(([id, name]) => (
+                    <label key={id} className="flex items-center gap-1.5 text-[10px] text-white/60">
+                      <input
+                        type="checkbox"
+                        checked={selectedEntityIds.includes(id)}
+                        onChange={(e) => setSelectedEntityIds(prev =>
+                          e.target.checked ? [...prev, id] : prev.filter(item => item !== id)
+                        )}
+                        className="h-3 w-3 accent-white/70"
+                      />
+                      <span className="truncate">{name}</span>
                     </label>
                   ))}
                 </div>
