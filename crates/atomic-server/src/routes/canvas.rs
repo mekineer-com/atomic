@@ -113,7 +113,7 @@ pub async fn get_global_canvas(
     query: web::Query<GlobalCanvasQuery>,
 ) -> HttpResponse {
     if let Some(config) = state.memu_session.clone() {
-        let source = match fetch_memu_canvas_source(&config).await {
+        let source = match fetch_memu_canvas_source(&config, None).await {
             Ok(source) => source,
             Err(response) => return response,
         };
@@ -146,14 +146,10 @@ pub async fn rebuild_canvas(
         .collect();
 
     if let Some(config) = state.memu_session.clone() {
-        let mut source = match fetch_memu_canvas_source(&config).await {
+        let source = match fetch_memu_canvas_source(&config, Some(&requested)).await {
             Ok(source) => source,
             Err(response) => return response,
         };
-        source.atoms.retain(|atom| requested.contains(&atom.id));
-        source.edges.retain(|edge| {
-            requested.contains(&edge.source) && requested.contains(&edge.target)
-        });
         return HttpResponse::Ok().json(memu_canvas_data(source));
     }
 
@@ -197,6 +193,7 @@ pub async fn rebuild_canvas(
 
 async fn fetch_memu_canvas_source(
     config: &MemuSessionConfig,
+    atom_ids: Option<&HashSet<String>>,
 ) -> Result<MemuCanvasSource, HttpResponse> {
     let client = memu_proxy::client()?;
     let mut params = vec![("limit", "500".to_string())];
@@ -205,6 +202,11 @@ async fn fetch_memu_canvas_source(
             .into_iter()
             .map(|(key, value)| (key, value.to_string())),
     );
+    if let Some(atom_ids) = atom_ids {
+        let mut ids: Vec<&str> = atom_ids.iter().map(String::as_str).collect();
+        ids.sort_unstable();
+        params.push(("atom_ids", ids.join(",")));
+    }
     let body = memu_proxy::memu_json(
         client
             .get(format!(
