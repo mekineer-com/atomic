@@ -92,7 +92,11 @@ function resolveNodeVisibility(
   const entityMatch = entities.length === 0
     ? checked(entityVisible, CANVAS_NONE_KEY)
     : entities.some(id => checked(entityVisible, id));
-  if (filterMode ? categoryMatch && entityMatch : categoryMatch || entityMatch) return 'visible';
+  if (!filterMode) {
+    if (categoryMatch || entityMatch) return 'visible';
+    return categoryDimmed || entityDimmed ? 'dimmed' : 'hidden';
+  }
+  if (categoryMatch && entityMatch) return 'visible';
   if ((!categoryMatch && !categoryDimmed) || (!entityMatch && !entityDimmed)) return 'hidden';
   return 'dimmed';
 }
