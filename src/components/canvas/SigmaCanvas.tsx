@@ -35,8 +35,14 @@ function hashString(value: string): number {
 }
 
 function paletteRgb(theme: CanvasTheme, key: string, weight = 1): string {
-  const fixed = key === 'caused_by' ? [226, 180, 71] : key === 'shaped_by' ? [83, 190, 196] : null;
-  const base = fixed || theme.palette[hashString(key) % theme.palette.length] || theme.nodeMax;
+  const base = theme.palette[hashString(key) % theme.palette.length] || theme.nodeMax;
+  const factor = 0.55 + Math.max(0, Math.min(1, weight)) * 0.45;
+  return `rgb(${Math.round(base[0] * factor)},${Math.round(base[1] * factor)},${Math.round(base[2] * factor)})`;
+}
+
+function edgePaletteRgb(theme: CanvasTheme, layer: string, layers: string[], weight = 1): string {
+  const index = Math.max(0, layers.indexOf(layer));
+  const base = theme.palette[index % theme.palette.length] || theme.edgeMax;
   const factor = 0.55 + Math.max(0, Math.min(1, weight)) * 0.45;
   return `rgb(${Math.round(base[0] * factor)},${Math.round(base[1] * factor)},${Math.round(base[2] * factor)})`;
 }
@@ -220,6 +226,8 @@ export function SigmaCanvas({
     () => [...new Set((data?.edges ?? []).map(edgeLayer))].sort(),
     [data]
   );
+  const edgeLayerNamesRef = useRef<string[]>([]);
+  edgeLayerNamesRef.current = edgeLayerNames;
   // Hover emphasis: when a node is hovered, dim everything outside its neighborhood.
   // neighborsRef lets the edge/node reducers answer "is X a neighbor of hovered?" in O(1).
   const hoveredNodeRef = useRef<string | null>(null);
@@ -604,7 +612,7 @@ export function SigmaCanvas({
             const size = (0.2 + w * 0.7) * anim + ((0.5 + w * 1.2) * anim - (0.2 + w * 0.7) * anim) * h;
             return {
               ...attrs,
-              color: paletteRgb(t, layer, Math.min(1, bright * visibilityFactor)),
+              color: edgePaletteRgb(t, layer, edgeLayerNamesRef.current, Math.min(1, bright * visibilityFactor)),
               size: size * visibilityFactor,
               zIndex: 1,
             };
@@ -613,7 +621,7 @@ export function SigmaCanvas({
             // Pinned edges stay at normal brightness — they don't pulse like hover.
             return {
               ...attrs,
-              color: paletteRgb(t, layer, w * anim * visibilityFactor),
+              color: edgePaletteRgb(t, layer, edgeLayerNamesRef.current, w * anim * visibilityFactor),
               size: (0.2 + w * 0.7) * anim * visibilityFactor,
               zIndex: 1,
             };
@@ -623,7 +631,7 @@ export function SigmaCanvas({
           const dim = pinned ? 1 : h;
           return {
             ...attrs,
-            color: paletteRgb(t, layer, w * anim * (1 - dim) * visibilityFactor),
+            color: edgePaletteRgb(t, layer, edgeLayerNamesRef.current, w * anim * (1 - dim) * visibilityFactor),
             size: (0.2 + w * 0.7) * anim * (1 - dim) * visibilityFactor,
           };
         }
@@ -632,7 +640,7 @@ export function SigmaCanvas({
         }
         return {
           ...attrs,
-          color: paletteRgb(t, layer, w * anim * visibilityFactor),
+          color: edgePaletteRgb(t, layer, edgeLayerNamesRef.current, w * anim * visibilityFactor),
           size: (0.2 + w * 0.7) * anim * visibilityFactor,
         };
       },
@@ -1344,7 +1352,7 @@ export function SigmaCanvas({
                       />
                       <span
                         className="h-2 w-2 rounded-full"
-                        style={{ backgroundColor: paletteRgb(theme, layer) }}
+                        style={{ backgroundColor: edgePaletteRgb(theme, layer, edgeLayerNames) }}
                       />
                       <span className="truncate">{layer}</span>
                     </label>
