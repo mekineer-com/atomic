@@ -412,6 +412,10 @@ export function getCachedAtomNeighborhood(
   return cached && cached.expiresAt > Date.now() ? cached.promise : null;
 }
 
+export function clearAtomNeighborhoodCache(): void {
+  neighborhoodCache.clear();
+}
+
 export async function rebuildSemanticEdges(): Promise<number> {
   return getTransport().invoke('rebuild_semantic_edges');
 }

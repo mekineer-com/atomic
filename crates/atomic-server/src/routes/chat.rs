@@ -173,8 +173,25 @@ fn has_user_assistant_interchange(rows: &[AtomicTranscriptRow]) -> bool {
     rows.iter().any(|m| m.role == "user") && rows.iter().any(|m| m.role == "assistant")
 }
 
-fn rows_without_tools(rows: &[AtomicTranscriptRow]) -> Vec<AtomicTranscriptRow> {
-    rows.iter().filter(|row| row.role != "tool").cloned().collect()
+fn rows_for_saved_history(rows: &[AtomicTranscriptRow], recap_instruction: &str) -> Vec<AtomicTranscriptRow> {
+    let mut cleaned = Vec::new();
+    let mut skip_next_assistant = false;
+    for row in rows {
+        if row.role == "tool" {
+            continue;
+        }
+        if skip_next_assistant && row.role == "assistant" {
+            skip_next_assistant = false;
+            continue;
+        }
+        skip_next_assistant = false;
+        if row.role == "user" && row.content.trim().lines().next().unwrap_or("") == recap_instruction {
+            skip_next_assistant = true;
+            continue;
+        }
+        cleaned.push(row.clone());
+    }
+    cleaned
 }
 
 fn existing_recap(conv: &atomic_core::ConversationWithMessages, recap_instruction: &str) -> Option<String> {
@@ -477,11 +494,6 @@ pub async fn end_memu_session(
             Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
         };
         let on_event = chat_event_callback(state.event_tx.clone());
-        let memu_tools = atomic_core::MemuToolConfig {
-            base_url: memu_session.base_url.clone(),
-            user_id: memu_session.user_id.clone(),
-            soul_id: memu_session.soul_id.clone(),
-        };
         let recap_prompt = atomic_recap_prompt(&memu_session.user_id, &transcript_before_recap);
         if let Err(e) = db
             .0
@@ -490,7 +502,7 @@ pub async fn end_memu_session(
                 &recap_prompt,
                 on_event,
                 settings,
-                Some(memu_tools),
+                None,
                 None,
                 None,
             )
@@ -504,15 +516,9 @@ pub async fn end_memu_session(
             Err(e) => return crate::error::error_response(e),
         };
         recap = existing_recap(&conv, &recap_instruction);
-        rows = rows_without_tools(&transcript_before_recap);
-        if let Some(recap_text) = &recap {
-            rows.push(AtomicTranscriptRow {
-                role: "assistant".to_string(),
-                content: recap_text.clone(),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            });
-        }
+        rows = rows_for_saved_history(&transcript_before_recap, &recap_instruction);
     }
+    rows = rows_for_saved_history(&rows, &recap_instruction);
 
     match post_atomic_session_end(&memu_session, conversation_id, recap, rows).await {
         Ok(body) => HttpResponse::Ok().json(body),

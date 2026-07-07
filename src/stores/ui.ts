@@ -944,13 +944,14 @@ export const useUIStore = create<UIStore>()(
       },
 
       navigateLocalGraph: (atomId: string) =>
-        get().openEntry(
-          {
-            type: 'graph',
-            atomId,
-            tagId: get().selectedTagId,
+        set((state) => ({
+          localGraph: {
+            ...state.localGraph,
+            isOpen: true,
+            centerAtomId: atomId,
+            navigationHistory: [...state.localGraph.navigationHistory, atomId],
           },
-        ),
+        })),
 
       goBackLocalGraph: () =>
         set((state) => {

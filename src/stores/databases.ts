@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { toast } from 'sonner';
 import { getTransport } from '../lib/transport';
+import { clearAtomNeighborhoodCache } from '../lib/api';
 import { syncSharedConfig } from '../lib/mobile/shared-config';
 import { useAtomsStore } from './atoms';
 import { useTagsStore } from './tags';
@@ -145,6 +146,7 @@ export const useDatabasesStore = create<DatabasesStore>()(
       useWikiStore.getState().reset();
       useChatStore.getState().reset();
       useFeaturedReportStore.getState().reset();
+      clearAtomNeighborhoodCache();
 
       // Hydrate the new DB's cached data before firing fetches — user sees
       // the sidebar/list for the new DB instantly instead of an empty flash.

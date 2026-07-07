@@ -140,8 +140,7 @@ pub async fn find_similar(
     let threshold = query.threshold.unwrap_or(0.7);
     if let Some(config) = state.memu_session.clone() {
         if !memu_proxy::is_memu_id(&atom_id) {
-            return HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "memU atom not found"}));
+            return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
         }
         return memu_find_similar(config, &atom_id, limit, threshold).await;
     }
@@ -161,6 +160,7 @@ async fn memu_find_similar(
     let mut params = vec![
         ("depth", "1".to_string()),
         ("min_similarity", threshold.to_string()),
+        ("limit", limit.to_string()),
     ];
     params.extend(
         memu_proxy::scope_query(&config)
