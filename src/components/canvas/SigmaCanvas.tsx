@@ -124,7 +124,7 @@ function buildVisibilityMap(
 function dimNode(attrs: any) {
   return {
     ...attrs,
-    color: 'rgba(50, 50, 50, 0.3)',
+    color: 'rgba(50, 50, 50, 0.2)',
     size: (attrs.size || 4) * 0.6,
     label: '',
   };
@@ -567,7 +567,7 @@ export function SigmaCanvas({
         const g = graphRef.current;
         const sourceVisibility = g ? visibilityRef.current.get(g.source(edge)) : 'visible';
         const targetVisibility = g ? visibilityRef.current.get(g.target(edge)) : 'visible';
-        const visibilityFactor = !isPreview && (sourceVisibility === 'dimmed' || targetVisibility === 'dimmed') ? 0.25 : 1;
+        const visibilityFactor = !isPreview && (sourceVisibility === 'dimmed' || targetVisibility === 'dimmed') ? 0.15 : 1;
         const hovered = hoveredNodeRef.current;
         const pinned = pinnedNodeRef.current;
         const t = themeRef.current;
