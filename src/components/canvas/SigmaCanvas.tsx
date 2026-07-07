@@ -187,6 +187,7 @@ export function SigmaCanvas({
   const graphRef = useRef<Graph | null>(null);
   const [data, setData] = useState<GlobalCanvasData | null>(null);
   const [rebuildData, setRebuildData] = useState<GlobalCanvasData | null>(null);
+  const [isRebuilding, setIsRebuilding] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<CanvasTheme>(DEFAULT_THEME);
@@ -302,22 +303,31 @@ export function SigmaCanvas({
       visibleAtomIds.length === data.atoms.length
     ) {
       setRebuildData(null);
+      setIsRebuilding(false);
       return;
     }
 
     const timer = window.setTimeout(() => {
+      setIsRebuilding(true);
       rebuildCanvas(visibleAtomIds)
         .then(result => {
-          if (rebuildGenRef.current === gen) setRebuildData(result.atoms.length > 0 ? result : null);
+          if (rebuildGenRef.current === gen) {
+            setRebuildData(result.atoms.length > 0 ? result : null);
+            setIsRebuilding(false);
+          }
         })
         .catch(err => {
           if (rebuildGenRef.current !== gen) return;
           console.warn('Canvas rebuild failed; using full layout', err);
           setRebuildData(null);
+          setIsRebuilding(false);
         });
     }, 300);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      rebuildGenRef.current++;
+    };
   }, [
     isPreview,
     data,
@@ -1212,6 +1222,13 @@ export function SigmaCanvas({
               <Loader2 className={`animate-spin ${isPreview ? 'h-4 w-4' : 'h-5 w-5'}`} strokeWidth={2} />
               {!isPreview && <span className="text-sm">Computing layout...</span>}
             </div>
+          </div>
+        )}
+
+        {!isPreview && isRebuilding && !isLoading && (
+          <div className="absolute right-4 top-4 z-20 flex items-center gap-2 rounded-full border border-white/10 bg-black/45 px-3 py-1.5 text-xs text-white/80 shadow-lg backdrop-blur">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2} />
+            <span>Rebuilding view...</span>
           </div>
         )}
 
