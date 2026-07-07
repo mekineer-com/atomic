@@ -730,6 +730,12 @@ export function SigmaCanvas({
       });
 
       if (pinnedId && graph!.hasNode(pinnedId)) {
+        if (!isPreview && visibilityRef.current.get(pinnedId) === 'hidden') {
+          pinnedNodeRef.current = null;
+          setPreviewAtomId(null);
+          setPreviewAnchorRect(null);
+          return;
+        }
         const pAttrs = graph!.getNodeAttributes(pinnedId);
         const pPos = sigma!.graphToViewport({ x: pAttrs.x as number, y: pAttrs.y as number });
         const pSize = sigma!.scaleSize(pAttrs.size as number);

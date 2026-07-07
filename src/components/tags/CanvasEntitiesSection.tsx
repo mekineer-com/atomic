@@ -29,7 +29,7 @@ export function CanvasEntitiesSection() {
     overscan: 5,
   });
 
-  if (viewMode !== 'canvas' || entities.length === 0) return null;
+  if (viewMode !== 'canvas' || atoms.length === 0) return null;
 
   return (
     <div className="border-t border-[var(--color-border)] px-3 py-2 shrink-0">

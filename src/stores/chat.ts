@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { getTransport } from '../lib/transport';
-import { useUIStore } from './ui';
+import { CANVAS_NONE_KEY, useUIStore } from './ui';
 import { useCanvasStore } from './canvas';
 
 // ==================== Types ====================
@@ -437,8 +437,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               atom_count: c.atom_count,
             })),
             layers: {
-              categories: categoryIds.filter((id) => ui.canvasCategoryVisible[id] ?? true),
-              entities: entityIds.filter((id) => ui.canvasEntityVisible[id] ?? true),
+              categories: [CANVAS_NONE_KEY, ...categoryIds].filter((id) => ui.canvasCategoryVisible[id] ?? true),
+              entities: [CANVAS_NONE_KEY, ...entityIds].filter((id) => ui.canvasEntityVisible[id] ?? true),
               filter: ui.canvasFilter,
               category_show_dimmed: ui.canvasCategoryShowDimmed,
               entity_show_dimmed: ui.canvasEntityShowDimmed,
