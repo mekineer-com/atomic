@@ -439,11 +439,12 @@ export function SigmaCanvas({
     for (const atom of atoms) {
       const connectivity = (edgeCounts.get(atom.atom_id) || 0) / maxEdges;
       const clusterIdx = atomCluster.get(atom.atom_id);
+      const isCategory = atom.atom_id.startsWith('category:');
       targetPositions[atom.atom_id] = { x: atom.x * scale, y: atom.y * scale };
       graph.addNode(atom.atom_id, {
         x: 0,
         y: 0,
-        size: 2.5 + connectivity * 5,
+        size: (2.5 + connectivity * 5) + (isCategory ? 3 : 0),
         color: canvasNodeColor(theme, {
           primaryTag: atom.primary_tag,
           tagIds: atom.tag_ids,
@@ -458,7 +459,7 @@ export function SigmaCanvas({
         tagIds: atom.tag_ids,
         entityIds: atom.entity_ids,
         entityNames: atom.entity_names,
-        isCategory: atom.atom_id.startsWith('category:'),
+        isCategory,
       });
     }
     visibilityRef.current = isPreview
