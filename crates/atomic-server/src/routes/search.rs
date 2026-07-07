@@ -158,7 +158,6 @@ async fn memu_find_similar(
         Err(response) => return response,
     };
     let mut params = vec![
-        ("depth", "1".to_string()),
         ("min_similarity", threshold.to_string()),
         ("limit", limit.to_string()),
     ];
@@ -170,7 +169,7 @@ async fn memu_find_similar(
     let body = match memu_proxy::memu_json(
         client
             .get(format!(
-                "{}/integration/atomic/neighborhood/{}",
+                "{}/integration/atomic/similar/{}",
                 config.base_url, atom_id
             ))
             .query(&params),
@@ -181,42 +180,17 @@ async fn memu_find_similar(
         Ok(body) => body,
         Err(response) => return response,
     };
-    let mut scores = std::collections::HashMap::new();
-    for edge in body["edges"].as_array().into_iter().flatten() {
-        let source = edge["source_id"].as_str().unwrap_or_default();
-        let target = edge["target_id"].as_str().unwrap_or_default();
-        let other = if source == atom_id {
-            target
-        } else if target == atom_id {
-            source
-        } else {
-            continue;
-        };
-        scores.insert(
-            other.to_string(),
-            edge["similarity_score"]
-                .as_f64()
-                .or_else(|| edge["strength"].as_f64())
-                .unwrap_or(1.0) as f32,
-        );
-    }
-    let atoms: Vec<serde_json::Value> = body["nodes"]
+    let atoms: Vec<serde_json::Value> = body
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|node| node["id"].as_str() != Some(atom_id))
         .take(limit.max(1) as usize)
         .map(|node| {
             let mut atom = memu_proxy::atom_from_node(node);
             if let Some(map) = atom.as_object_mut() {
                 map.insert(
                     "similarity_score".to_string(),
-                    serde_json::json!(
-                        scores
-                            .get(node["id"].as_str().unwrap_or_default())
-                            .copied()
-                            .unwrap_or(1.0)
-                    ),
+                    serde_json::json!(node["similarity_score"].as_f64().unwrap_or(1.0)),
                 );
                 map.insert(
                     "matching_chunk_content".to_string(),
