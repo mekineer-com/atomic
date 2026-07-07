@@ -196,24 +196,35 @@ async fn fetch_memu_canvas_source(
     atom_ids: Option<&HashSet<String>>,
 ) -> Result<MemuCanvasSource, HttpResponse> {
     let client = memu_proxy::client()?;
-    let mut params = vec![("limit", "500".to_string())];
-    params.extend(
-        memu_proxy::scope_query(config)
-            .into_iter()
-            .map(|(key, value)| (key, value.to_string())),
-    );
-    if let Some(atom_ids) = atom_ids {
-        let mut ids: Vec<&str> = atom_ids.iter().map(String::as_str).collect();
-        ids.sort_unstable();
-        params.push(("atom_ids", ids.join(",")));
-    }
     let body = memu_proxy::memu_json(
-        client
-            .get(format!(
-                "{}/integration/atomic/canvas-source",
-                config.base_url
-            ))
-            .query(&params),
+        if let Some(atom_ids) = atom_ids {
+            let mut ids: Vec<&str> = atom_ids.iter().map(String::as_str).collect();
+            ids.sort_unstable();
+            client
+                .post(format!(
+                    "{}/integration/atomic/canvas-source",
+                    config.base_url
+                ))
+                .json(&serde_json::json!({
+                    "limit": 500,
+                    "user_id": config.user_id,
+                    "soul_id": config.soul_id,
+                    "atom_ids": ids,
+                }))
+        } else {
+            let mut params = vec![("limit", "500".to_string())];
+            params.extend(
+                memu_proxy::scope_query(config)
+                    .into_iter()
+                    .map(|(key, value)| (key, value.to_string())),
+            );
+            client
+                .get(format!(
+                    "{}/integration/atomic/canvas-source",
+                    config.base_url
+                ))
+                .query(&params)
+        },
         "memU canvas source",
     )
     .await?;
