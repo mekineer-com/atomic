@@ -246,9 +246,18 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
 
       {/* Tags header with search button */}
       <div className="flex items-center justify-between px-3 py-2 shrink-0">
-        <span className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider">
-          Tags
-        </span>
+        <div className="flex items-center gap-1">
+          <span className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider">
+            Tags
+          </span>
+          <button
+            onClick={() => setNewTagModal({ isOpen: true, parentId: null, name: '' })}
+            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+            title="New tag"
+          >
+            <Plus className="w-4 h-4" strokeWidth={2} />
+          </button>
+        </div>
         <div className="flex items-center gap-1">
           {showCanvasControls && (
             <>
@@ -282,13 +291,14 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
       </div>
 
       {showCanvasControls && (
-        <label className="flex items-center gap-2 px-3 py-1 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card)]">
+        <label className="flex items-center gap-1 px-2 py-1.5 rounded-md text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card)]">
           <input
             type="checkbox"
             checked={canvasCategoryVisible[CANVAS_NONE_KEY] ?? true}
             onChange={(e) => setCanvasCategoryVisible(CANVAS_NONE_KEY, e.target.checked)}
             className="h-3 w-3 accent-[var(--color-accent)]"
           />
+          <span className="w-4" />
           <span className="truncate">Uncategorized</span>
         </label>
       )}
@@ -364,18 +374,6 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
           </div>
         )}
       </div>
-
-      {/* New Tag button */}
-      <div className="px-3 py-2 border-t border-[var(--color-border)] shrink-0">
-        <button
-          className="w-full flex items-center justify-start gap-1.5 px-2 py-1.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] rounded-md transition-colors"
-          onClick={() => setNewTagModal({ isOpen: true, parentId: null, name: '' })}
-        >
-          <Plus className="w-3.5 h-3.5" strokeWidth={2} />
-          New Tag
-        </button>
-      </div>
-
       {/* Context Menu */}
       <ContextMenu
         items={contextMenuItems}

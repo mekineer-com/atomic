@@ -1,5 +1,6 @@
-import { useMemo, useRef } from 'react';
+import { useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { Search } from 'lucide-react';
 import { useCanvasStore } from '../../stores/canvas';
 import { CANVAS_NONE_KEY, useUIStore } from '../../stores/ui';
 import type { CanvasAtomPosition } from '../../lib/api';
@@ -12,6 +13,9 @@ export function CanvasEntitiesSection() {
   const canvasEntityVisible = useUIStore(s => s.canvasEntityVisible);
   const setCanvasEntityVisible = useUIStore(s => s.setCanvasEntityVisible);
   const setCanvasEntityVisibleMap = useUIStore(s => s.setCanvasEntityVisibleMap);
+  const [showSearch, setShowSearch] = useState(false);
+  const [query, setQuery] = useState('');
+  const [height, setHeight] = useState(208);
   const parentRef = useRef<HTMLDivElement>(null);
 
   const entities = useMemo(() => {
@@ -25,12 +29,16 @@ export function CanvasEntitiesSection() {
   }, [atoms]);
 
   const rows = useMemo(() => [[CANVAS_NONE_KEY, 'No entities'] as [string, string], ...entities], [entities]);
+  const visibleRows = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return needle ? rows.filter(([, name]) => name.toLocaleLowerCase().includes(needle)) : rows;
+  }, [query, rows]);
   const hasMemuAtoms = useMemo(
     () => atoms.some(atom => atom.atom_id.startsWith('memory:') || atom.atom_id.startsWith('category:')),
     [atoms]
   );
   const virtualizer = useVirtualizer({
-    count: rows.length,
+    count: visibleRows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 28,
     overscan: 5,
@@ -38,9 +46,36 @@ export function CanvasEntitiesSection() {
 
   if (viewMode !== 'canvas' || atoms.length === 0 || (entities.length === 0 && !hasMemuAtoms)) return null;
 
+  const handleResizeStart = (e: ReactMouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = height;
+    const onMouseMove = (event: MouseEvent) => {
+      setHeight(Math.min(Math.max(startHeight + startY - event.clientY, 96), window.innerHeight * 0.6));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  };
+
   return (
-    <div className="border-t border-[var(--color-border)] px-3 py-2 shrink-0">
-      <div className="mb-2 flex items-center justify-between">
+    <div
+      className="relative flex min-h-24 flex-col overflow-hidden border-t border-[var(--color-border)] px-3 py-2 shrink-0"
+      style={{ height }}
+    >
+      <div
+        onMouseDown={handleResizeStart}
+        className="absolute left-0 right-0 top-0 h-2 cursor-row-resize hover:bg-[var(--color-accent)]/20"
+        title="Resize entities panel"
+      />
+      <div className="mb-2 flex shrink-0 items-center justify-between">
         <span className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider">
           Entities
         </span>
@@ -59,12 +94,28 @@ export function CanvasEntitiesSection() {
           >
             none
           </button>
+          <button
+            onClick={() => setShowSearch(open => !open)}
+            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+            title="Search entities"
+          >
+            <Search className="w-4 h-4" strokeWidth={2} />
+          </button>
         </div>
       </div>
-      <div ref={parentRef} className="max-h-44 overflow-y-auto">
+      {showSearch && (
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter entities..."
+          className="mb-2 w-full shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-bg-card)] px-2 py-1 text-xs text-[var(--color-text-primary)] placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)] focus:outline-none"
+          autoFocus
+        />
+      )}
+      <div ref={parentRef} className="min-h-0 flex-1 overflow-y-auto">
         <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative' }}>
           {virtualizer.getVirtualItems().map((virtualItem) => {
-            const [id, name] = rows[virtualItem.index];
+            const [id, name] = visibleRows[virtualItem.index];
             return (
               <label
                 key={id}
@@ -82,6 +133,9 @@ export function CanvasEntitiesSection() {
             );
           })}
         </div>
+        {visibleRows.length === 0 && (
+          <div className="px-1 py-2 text-xs text-[var(--color-text-tertiary)]">No matching entities</div>
+        )}
       </div>
     </div>
   );

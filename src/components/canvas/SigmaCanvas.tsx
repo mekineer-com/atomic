@@ -35,7 +35,8 @@ function hashString(value: string): number {
 }
 
 function paletteRgb(theme: CanvasTheme, key: string, weight = 1): string {
-  const base = theme.palette[hashString(key) % theme.palette.length] || theme.nodeMax;
+  const fixed = key === 'caused_by' ? [226, 180, 71] : key === 'shaped_by' ? [83, 190, 196] : null;
+  const base = fixed || theme.palette[hashString(key) % theme.palette.length] || theme.nodeMax;
   const factor = 0.55 + Math.max(0, Math.min(1, weight)) * 0.45;
   return `rgb(${Math.round(base[0] * factor)},${Math.round(base[1] * factor)},${Math.round(base[2] * factor)})`;
 }
@@ -1330,7 +1331,7 @@ export function SigmaCanvas({
               </span>
             </div>
             {edgeLayerNames.length > 0 && (
-              <details open className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-2 backdrop-blur">
+              <details open className="max-w-[190px] rounded-lg border border-white/10 bg-black px-2 py-2 backdrop-blur">
                 <summary className="mb-1 cursor-pointer select-none text-[11px] uppercase tracking-wide text-white/35">Tethers</summary>
                 <div className="flex max-h-36 flex-col gap-1 overflow-y-auto pr-1">
                   {edgeLayerNames.map(layer => (
@@ -1351,7 +1352,7 @@ export function SigmaCanvas({
                 </div>
               </details>
             )}
-            <details open className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-2 backdrop-blur">
+            <details open className="max-w-[190px] rounded-lg border border-white/10 bg-black px-2 py-2 backdrop-blur">
               <summary className="mb-1 cursor-pointer select-none text-[11px] uppercase tracking-wide text-white/35">Visibility</summary>
               <div className="flex flex-col gap-1">
                 <label className="flex items-center gap-1.5 text-[12px] text-white/60">
