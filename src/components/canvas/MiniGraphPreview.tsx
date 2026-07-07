@@ -149,7 +149,7 @@ export function MiniGraphPreview({ atomId, onExpand }: MiniGraphPreviewProps) {
   return (
     <div>
       <div
-        className="relative bg-[var(--color-bg-main)] rounded-md overflow-hidden cursor-pointer hover:bg-[var(--color-bg-hover)] transition-colors aspect-square w-3/4 mx-auto"
+        className="relative bg-[var(--color-bg-main)] rounded-md overflow-hidden cursor-pointer ring-1 ring-transparent hover:ring-white/70 transition-shadow aspect-square w-3/4 mx-auto"
         onClick={handleExpand}
       >
         <svg width="100%" height="100%" viewBox="0 0 200 200" preserveAspectRatio="xMidYMid meet">
