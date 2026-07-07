@@ -109,11 +109,14 @@ export function Layout() {
   useEffect(() => {
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
+    let startupRetries = 0;
+    const maxStartupRetries = 30;
 
     const checkSetup = async () => {
       try {
         const configured = await verifyProviderConfigured();
         if (cancelled) return;
+        startupRetries = 0;
         setIsSetupRequired(!configured);
 
         if (configured) {
@@ -124,7 +127,12 @@ export function Layout() {
         console.error('Failed to check provider configuration:', error);
         if (cancelled) return;
         const message = String(error);
-        if (hasServerConfig() && (message.includes('Failed to fetch') || message.includes('NetworkError'))) {
+        if (
+          hasServerConfig() &&
+          startupRetries < maxStartupRetries &&
+          (message.includes('Failed to fetch') || message.includes('NetworkError'))
+        ) {
+          startupRetries++;
           retryTimer = setTimeout(checkSetup, 1000);
           return;
         }

@@ -4,7 +4,7 @@ use crate::db_extractor::Db;
 use crate::error::ok_or_error;
 use crate::routes::memu_proxy;
 use crate::state::{AppState, MemuSessionConfig};
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
 use atomic_core::{
     AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData, GlobalCanvasData,
     projection,
@@ -136,7 +136,7 @@ pub async fn get_global_canvas(
 
 pub async fn rebuild_canvas(
     state: web::Data<AppState>,
-    db: Db,
+    req: HttpRequest,
     body: web::Json<RebuildCanvasBody>,
 ) -> HttpResponse {
     let requested: HashSet<String> = body
@@ -153,7 +153,11 @@ pub async fn rebuild_canvas(
         return HttpResponse::Ok().json(memu_canvas_data(source));
     }
 
-    let projected = match db.0.project_atom_subset(&requested).await {
+    let db = match state.resolve_core(&req).await {
+        Ok(core) => core,
+        Err(e) => return HttpResponse::BadRequest().body(format!("Database not found: {}", e)),
+    };
+    let projected = match db.project_atom_subset(&requested).await {
         Ok(projected) => projected,
         Err(e) => return crate::error::error_response(e),
     };
@@ -161,7 +165,7 @@ pub async fn rebuild_canvas(
         .into_iter()
         .map(|(id, x, y)| (id, (x, y)))
         .collect();
-    let data = match db.0.compute_and_get_canvas_data().await {
+    let data = match db.compute_and_get_canvas_data().await {
         Ok(data) => data,
         Err(e) => return crate::error::error_response(e),
     };

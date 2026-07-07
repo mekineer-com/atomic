@@ -290,8 +290,6 @@ export function SigmaCanvas({
     canvasEntityShowDimmed,
     canvasFilter,
   ]);
-  const visibleSetKey = visibleAtomIds.join('\0');
-
   useEffect(() => {
     const gen = ++rebuildGenRef.current;
     if (
@@ -326,7 +324,7 @@ export function SigmaCanvas({
     canvasRebuildPerView,
     canvasCategoryShowDimmed,
     canvasEntityShowDimmed,
-    visibleSetKey,
+    visibleAtomIds,
   ]);
 
   useEffect(() => {
