@@ -372,6 +372,9 @@ export interface NeighborhoodGraph {
   edges: NeighborhoodEdge[];
 }
 
+const neighborhoodCache = new Map<string, { expiresAt: number; promise: Promise<NeighborhoodGraph> }>();
+const NEIGHBORHOOD_CACHE_MS = 10_000;
+
 export async function getSemanticEdges(minSimilarity: number = 0.5): Promise<SemanticEdge[]> {
   return getTransport().invoke('get_semantic_edges', { minSimilarity });
 }
@@ -381,7 +384,19 @@ export async function getAtomNeighborhood(
   depth: number = 1,
   minSimilarity: number = 0.5
 ): Promise<NeighborhoodGraph> {
-  return getTransport().invoke('get_atom_neighborhood', { atomId, depth, minSimilarity });
+  const key = `${atomId}:${depth}:${minSimilarity}`;
+  const now = Date.now();
+  const cached = neighborhoodCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.promise;
+
+  const promise = getTransport()
+    .invoke<NeighborhoodGraph>('get_atom_neighborhood', { atomId, depth, minSimilarity })
+    .catch((error) => {
+      neighborhoodCache.delete(key);
+      throw error;
+    });
+  neighborhoodCache.set(key, { expiresAt: now + NEIGHBORHOOD_CACHE_MS, promise });
+  return promise;
 }
 
 export async function rebuildSemanticEdges(): Promise<number> {
