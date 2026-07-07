@@ -881,7 +881,14 @@ export const useUIStore = create<UIStore>()(
       setCanvasEntityShowDimmed: (show) => set({ canvasEntityShowDimmed: show }),
       setCanvasFilter: (enabled) => set({ canvasFilter: enabled }),
       setCanvasRebuildPerView: (enabled) => set({ canvasRebuildPerView: enabled }),
-      resetCanvasLayerState: () => set({ canvasCategoryVisible: {}, canvasEntityVisible: {} }),
+      resetCanvasLayerState: () => set({
+        canvasCategoryVisible: {},
+        canvasEntityVisible: {},
+        canvasCategoryShowDimmed: false,
+        canvasEntityShowDimmed: false,
+        canvasFilter: false,
+        canvasRebuildPerView: false,
+      }),
 
       setViewMode: (mode: ViewMode) => {
         // Clicking a main-nav button drops out of any active tab and shows

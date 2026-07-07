@@ -22,6 +22,10 @@ export function CanvasEntitiesSection() {
   }, [atoms]);
 
   const rows = useMemo(() => [[CANVAS_NONE_KEY, 'No entities'] as [string, string], ...entities], [entities]);
+  const hasMemuAtoms = useMemo(
+    () => atoms.some(atom => atom.atom_id.startsWith('memory:') || atom.atom_id.startsWith('category:')),
+    [atoms]
+  );
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
@@ -29,7 +33,7 @@ export function CanvasEntitiesSection() {
     overscan: 5,
   });
 
-  if (viewMode !== 'canvas' || atoms.length === 0) return null;
+  if (viewMode !== 'canvas' || atoms.length === 0 || (entities.length === 0 && !hasMemuAtoms)) return null;
 
   return (
     <div className="border-t border-[var(--color-border)] px-3 py-2 shrink-0">

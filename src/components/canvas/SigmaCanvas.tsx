@@ -497,9 +497,6 @@ export function SigmaCanvas({
         const g = graphRef.current;
         const sourceVisibility = g ? visibilityRef.current.get(g.source(edge)) : 'visible';
         const targetVisibility = g ? visibilityRef.current.get(g.target(edge)) : 'visible';
-        if (!isPreview && (sourceVisibility === 'hidden' || targetVisibility === 'hidden')) {
-          return { ...attrs, hidden: true };
-        }
         const visibilityFactor = !isPreview && (sourceVisibility === 'dimmed' || targetVisibility === 'dimmed') ? 0.25 : 1;
         const hovered = hoveredNodeRef.current;
         const pinned = pinnedNodeRef.current;
@@ -734,36 +731,36 @@ export function SigmaCanvas({
           pinnedNodeRef.current = null;
           setPreviewAtomId(null);
           setPreviewAnchorRect(null);
-          return;
-        }
-        const pAttrs = graph!.getNodeAttributes(pinnedId);
-        const pPos = sigma!.graphToViewport({ x: pAttrs.x as number, y: pAttrs.y as number });
-        const pSize = sigma!.scaleSize(pAttrs.size as number);
-        ctx.beginPath();
-        ctx.arc(pPos.x, pPos.y, pSize + 3, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
+        } else {
+          const pAttrs = graph!.getNodeAttributes(pinnedId);
+          const pPos = sigma!.graphToViewport({ x: pAttrs.x as number, y: pAttrs.y as number });
+          const pSize = sigma!.scaleSize(pAttrs.size as number);
+          ctx.beginPath();
+          ctx.arc(pPos.x, pPos.y, pSize + 3, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
 
-        // Keep the popover anchored to the node as the camera pans/zooms.
-        // The popover ignores these updates after the user manually drags it,
-        // so this doesn't fight with intentional repositioning.
-        const cRect = container!.getBoundingClientRect();
-        const aSize = (pAttrs.size as number) || 4;
-        const newAnchor = {
-          top: cRect.top + pPos.y - aSize,
-          left: cRect.left + pPos.x - aSize,
-          bottom: cRect.top + pPos.y + aSize,
-          width: aSize * 2,
-        };
-        setPreviewAnchorRect(prev => {
-          if (
-            prev &&
-            Math.abs(prev.top - newAnchor.top) < 0.5 &&
-            Math.abs(prev.left - newAnchor.left) < 0.5
-          ) return prev;
-          return newAnchor;
-        });
+          // Keep the popover anchored to the node as the camera pans/zooms.
+          // The popover ignores these updates after the user manually drags it,
+          // so this doesn't fight with intentional repositioning.
+          const cRect = container!.getBoundingClientRect();
+          const aSize = (pAttrs.size as number) || 4;
+          const newAnchor = {
+            top: cRect.top + pPos.y - aSize,
+            left: cRect.left + pPos.x - aSize,
+            bottom: cRect.top + pPos.y + aSize,
+            width: aSize * 2,
+          };
+          setPreviewAnchorRect(prev => {
+            if (
+              prev &&
+              Math.abs(prev.top - newAnchor.top) < 0.5 &&
+              Math.abs(prev.left - newAnchor.left) < 0.5
+            ) return prev;
+            return newAnchor;
+          });
+        }
       }
 
       // === Hover ring (drawn on canvas; the pill itself is a DOM element
