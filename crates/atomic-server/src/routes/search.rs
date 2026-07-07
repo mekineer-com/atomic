@@ -190,7 +190,7 @@ async fn memu_find_similar(
             if let Some(map) = atom.as_object_mut() {
                 map.insert(
                     "similarity_score".to_string(),
-                    serde_json::json!(node["similarity_score"].as_f64().unwrap_or(1.0)),
+                    serde_json::json!(node["similarity_score"].as_f64().unwrap_or(0.0)),
                 );
                 map.insert(
                     "matching_chunk_content".to_string(),
