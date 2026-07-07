@@ -310,7 +310,7 @@ export function SigmaCanvas({
     const timer = window.setTimeout(() => {
       rebuildCanvas(visibleAtomIds)
         .then(result => {
-          if (rebuildGenRef.current === gen) setRebuildData(result);
+          if (rebuildGenRef.current === gen) setRebuildData(result.atoms.length > 0 ? result : null);
         })
         .catch(err => {
           if (rebuildGenRef.current !== gen) return;
