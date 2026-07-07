@@ -40,6 +40,11 @@ export function getTransport(): Transport {
   return activeTransport;
 }
 
+export function hasServerConfig(): boolean {
+  if (!activeTransport) return false;
+  return Boolean((activeTransport as HttpTransport).getConfig().baseUrl);
+}
+
 export async function initTransport(): Promise<void> {
   if (typeof window !== 'undefined' && (window as any).__TAURI_INTERNALS__) {
     // Desktop app: get sidecar config via single Tauri IPC command

@@ -15,6 +15,7 @@ import { useUIStore } from '../../stores/ui';
 import { useTheme, useFont } from '../../hooks';
 import { verifyProviderConfigured } from '../../lib/api';
 import { isTauri } from '../../lib/platform';
+import { hasServerConfig } from '../../lib/transport';
 
 
 export function Layout() {
@@ -106,9 +107,13 @@ export function Layout() {
 
   // Check if setup is needed on mount
   useEffect(() => {
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
     const checkSetup = async () => {
       try {
         const configured = await verifyProviderConfigured();
+        if (cancelled) return;
         setIsSetupRequired(!configured);
 
         if (configured) {
@@ -117,12 +122,21 @@ export function Layout() {
         }
       } catch (error) {
         console.error('Failed to check provider configuration:', error);
+        if (cancelled) return;
+        if (hasServerConfig() && !String(error).includes('Authentication expired')) {
+          retryTimer = setTimeout(checkSetup, 1000);
+          return;
+        }
         // If check fails, show setup anyway
         setIsSetupRequired(true);
       }
     };
 
     checkSetup();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, []);
 
   const initializeApp = async () => {
