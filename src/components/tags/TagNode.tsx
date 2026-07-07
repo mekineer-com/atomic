@@ -9,9 +9,21 @@ interface TagNodeProps {
   selectedTagId: string | null;
   onSelect: (tagId: string) => void;
   onContextMenu: (e: MouseEvent, tag: TagWithCount) => void;
+  showCanvasCheckbox?: boolean;
+  canvasChecked?: boolean;
+  onCanvasCheck?: (tagId: string, checked: boolean) => void;
 }
 
-export const TagNode = memo(function TagNode({ tag, level, selectedTagId, onSelect, onContextMenu }: TagNodeProps) {
+export const TagNode = memo(function TagNode({
+  tag,
+  level,
+  selectedTagId,
+  onSelect,
+  onContextMenu,
+  showCanvasCheckbox = false,
+  canvasChecked = true,
+  onCanvasCheck,
+}: TagNodeProps) {
   const openChatSidebar = useUIStore(s => s.openChatSidebar);
   const isExpanded = useUIStore(s => !!s.expandedTagIds[tag.id]);
   const toggleTagExpanded = useUIStore(s => s.toggleTagExpanded);
@@ -56,6 +68,19 @@ export const TagNode = memo(function TagNode({ tag, level, selectedTagId, onSele
       onClick={(e) => hasChildren ? handleToggle(e) : onSelect(tag.id)}
       onContextMenu={handleContextMenu}
     >
+      {showCanvasCheckbox && (
+        <input
+          type="checkbox"
+          checked={canvasChecked}
+          onChange={(e) => {
+            e.stopPropagation();
+            onCanvasCheck?.(tag.id, e.target.checked);
+          }}
+          onClick={(e) => e.stopPropagation()}
+          className="h-3 w-3 accent-[var(--color-accent)]"
+          title="Show on canvas"
+        />
+      )}
       {hasChildren ? (
         <button
           onClick={handleToggle}

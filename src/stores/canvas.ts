@@ -30,7 +30,7 @@ interface CanvasStore {
 
   // Canvas data (clusters for chat context)
   canvasData: GlobalCanvasData | null;
-  setCanvasData: (data: GlobalCanvasData) => void;
+  setCanvasData: (data: GlobalCanvasData | null) => void;
 
   // Camera state to apply to the next-mounted main canvas. Set when the user
   // clicks the dashboard preview so the main view opens at the same framing

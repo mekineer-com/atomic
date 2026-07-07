@@ -153,7 +153,10 @@ export const commands: Command[] = [
     keywords: ['clear', 'reset', 'remove', 'filter'],
     icon: XIcon,
     action: () => useUIStore.getState().setSelectedTag(null),
-    isEnabled: () => useUIStore.getState().selectedTagId !== null,
+    isEnabled: () => {
+      const ui = useUIStore.getState();
+      return ui.selectedTagId !== null && ui.viewMode !== 'canvas';
+    },
   },
 
   // Utility commands

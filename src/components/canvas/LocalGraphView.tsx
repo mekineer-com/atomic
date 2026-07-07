@@ -383,6 +383,7 @@ export function LocalGraphView() {
         },
         minCameraRatio: 0.2,
         maxCameraRatio: 4,
+        zoomingRatio: 1.03,
         stagePadding: 80,
         defaultDrawNodeHover: () => {}, // Hover ring/pill drawn on overlay
         nodeReducer: (node, attrs) => {

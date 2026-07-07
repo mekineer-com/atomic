@@ -426,13 +426,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Auto-inject canvas context when chatting from canvas view
       let canvasContext = undefined;
       if (useUIStore.getState().viewMode === 'canvas') {
+        const ui = useUIStore.getState();
         const canvasData = useCanvasStore.getState().canvasData;
         if (canvasData) {
+          const categoryIds = [...new Set(canvasData.atoms.flatMap((atom) => atom.tag_ids))].sort();
+          const entityIds = [...new Set(canvasData.atoms.flatMap((atom) => atom.entity_ids))].sort();
           canvasContext = {
             clusters: canvasData.clusters.map((c) => ({
               label: c.label,
               atom_count: c.atom_count,
             })),
+            layers: {
+              categories: categoryIds.filter((id) => ui.canvasCategoryVisible[id] ?? true),
+              entities: entityIds.filter((id) => ui.canvasEntityVisible[id] ?? true),
+              filter: ui.canvasFilter,
+              category_show_dimmed: ui.canvasCategoryShowDimmed,
+              entity_show_dimmed: ui.canvasEntityShowDimmed,
+            },
           };
         }
       }

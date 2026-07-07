@@ -5,6 +5,7 @@ import { viewPath, atomReaderPath, wikiReaderPath, atomGraphPath, reportDetailPa
 
 export type ViewMode = 'dashboard' | 'atoms' | 'canvas' | 'wiki' | 'reports';
 export type AtomsLayout = 'grid' | 'list';
+export const CANVAS_NONE_KEY = '__none__';
 
 interface LocalGraphState {
   isOpen: boolean;
@@ -110,6 +111,12 @@ interface UIStore {
   chatSidebarConversationId: string | null;
   chatSidebarInitialTagId: string | null;
   chatSidebarInitialConversationId: string | null;
+  canvasCategoryVisible: Record<string, boolean>;
+  canvasEntityVisible: Record<string, boolean>;
+  canvasCategoryShowDimmed: boolean;
+  canvasEntityShowDimmed: boolean;
+  canvasFilter: boolean;
+  canvasRebuildPerView: boolean;
   // Server connection state
   serverConnected: boolean;
   // Local graph state (synced from active tab when entry.type === 'graph')
@@ -174,6 +181,15 @@ interface UIStore {
   setChatSidebarConversationId: (id: string | null) => void;
   openChatSidebar: (tagId?: string, conversationId?: string) => void;
   clearChatSidebarInitial: () => void;
+  setCanvasCategoryVisible: (id: string, visible: boolean) => void;
+  setCanvasEntityVisible: (id: string, visible: boolean) => void;
+  setCanvasCategoryVisibleMap: (visible: Record<string, boolean>) => void;
+  setCanvasEntityVisibleMap: (visible: Record<string, boolean>) => void;
+  setCanvasCategoryShowDimmed: (show: boolean) => void;
+  setCanvasEntityShowDimmed: (show: boolean) => void;
+  setCanvasFilter: (enabled: boolean) => void;
+  setCanvasRebuildPerView: (enabled: boolean) => void;
+  resetCanvasLayerState: () => void;
   setViewMode: (mode: ViewMode) => void;
   setAtomsLayout: (layout: AtomsLayout) => void;
   setSearchQuery: (query: string) => void;
@@ -346,6 +362,12 @@ export const useUIStore = create<UIStore>()(
       chatSidebarConversationId: null,
       chatSidebarInitialTagId: null,
       chatSidebarInitialConversationId: null,
+      canvasCategoryVisible: {},
+      canvasEntityVisible: {},
+      canvasCategoryShowDimmed: false,
+      canvasEntityShowDimmed: false,
+      canvasFilter: false,
+      canvasRebuildPerView: false,
       serverConnected: false,
       commandPaletteOpen: false,
       commandPaletteInitialQuery: '',
@@ -848,6 +870,18 @@ export const useUIStore = create<UIStore>()(
         }),
       clearChatSidebarInitial: () =>
         set({ chatSidebarInitialTagId: null, chatSidebarInitialConversationId: null }),
+
+      setCanvasCategoryVisible: (id, visible) =>
+        set((state) => ({ canvasCategoryVisible: { ...state.canvasCategoryVisible, [id]: visible } })),
+      setCanvasEntityVisible: (id, visible) =>
+        set((state) => ({ canvasEntityVisible: { ...state.canvasEntityVisible, [id]: visible } })),
+      setCanvasCategoryVisibleMap: (visible) => set({ canvasCategoryVisible: visible }),
+      setCanvasEntityVisibleMap: (visible) => set({ canvasEntityVisible: visible }),
+      setCanvasCategoryShowDimmed: (show) => set({ canvasCategoryShowDimmed: show }),
+      setCanvasEntityShowDimmed: (show) => set({ canvasEntityShowDimmed: show }),
+      setCanvasFilter: (enabled) => set({ canvasFilter: enabled }),
+      setCanvasRebuildPerView: (enabled) => set({ canvasRebuildPerView: enabled }),
+      resetCanvasLayerState: () => set({ canvasCategoryVisible: {}, canvasEntityVisible: {} }),
 
       setViewMode: (mode: ViewMode) => {
         // Clicking a main-nav button drops out of any active tab and shows

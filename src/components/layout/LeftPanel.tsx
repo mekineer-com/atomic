@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { TagTree } from '../tags/TagTree';
+import { CanvasEntitiesSection } from '../tags/CanvasEntitiesSection';
 import { SettingsButton, SettingsModal, type SettingsTab } from '../settings';
 import { DatabaseSwitcher } from '../DatabaseSwitcher';
 import { useUIStore } from '../../stores/ui';
@@ -75,13 +76,16 @@ export function LeftPanel() {
           </div>
 
           {/* Tag Tree with integrated search */}
-          <div className="flex-1 overflow-hidden">
-            <TagTree
-              onOpenTagSettings={() => {
-                setSettingsInitialTab('tag-categories');
-                setIsSettingsOpen(true);
-              }}
-            />
+          <div className="flex-1 overflow-hidden flex flex-col">
+            <div className="flex-1 min-h-0">
+              <TagTree
+                onOpenTagSettings={() => {
+                  setSettingsInitialTab('tag-categories');
+                  setIsSettingsOpen(true);
+                }}
+              />
+            </div>
+            <CanvasEntitiesSection />
           </div>
         </div>
 

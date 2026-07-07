@@ -6,7 +6,7 @@ import { ContextMenu } from '../ui/ContextMenu';
 import { Modal } from '../ui/Modal';
 import { Input } from '../ui/Input';
 import { useTagsStore, TagWithCount } from '../../stores/tags';
-import { useUIStore } from '../../stores/ui';
+import { CANVAS_NONE_KEY, useUIStore } from '../../stores/ui';
 import { useAtomsStore } from '../../stores/atoms';
 
 interface FlattenedTag {
@@ -60,6 +60,10 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
   const setSelectedTag = useUIStore(s => s.setSelectedTag);
   const openSearchPalette = useUIStore(s => s.openSearchPalette);
   const expandedTagIds = useUIStore(s => s.expandedTagIds);
+  const viewMode = useUIStore(s => s.viewMode);
+  const canvasCategoryVisible = useUIStore(s => s.canvasCategoryVisible);
+  const setCanvasCategoryVisible = useUIStore(s => s.setCanvasCategoryVisible);
+  const setCanvasCategoryVisibleMap = useUIStore(s => s.setCanvasCategoryVisibleMap);
   const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
   const fetchAtomsByTag = useAtomsStore(s => s.fetchAtomsByTag);
 
@@ -69,6 +73,11 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
     () => flattenVisibleTags(tags, expandedTagIds),
     [tags, expandedTagIds]
   );
+  const canvasCategoryIds = useMemo(
+    () => [CANVAS_NONE_KEY, ...flatTags.filter(item => item.level === 0 && !item.loadMoreParentId).map(item => item.tag.id)],
+    [flatTags]
+  );
+  const showCanvasControls = viewMode === 'canvas';
 
   const tagIndexMap = useMemo(() => {
     const map = new Map<string, number>();
@@ -240,17 +249,49 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
         <span className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider">
           Tags
         </span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            openSearchPalette('#');
-          }}
-          className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
-          title="Search tags"
-        >
-          <Search className="w-4 h-4" strokeWidth={2} />
-        </button>
+        <div className="flex items-center gap-1">
+          {showCanvasControls && (
+            <>
+              <button
+                onClick={() => setCanvasCategoryVisibleMap({})}
+                className="px-1.5 py-0.5 text-[10px] rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+                title="Show all categories on canvas"
+              >
+                all
+              </button>
+              <button
+                onClick={() => setCanvasCategoryVisibleMap(Object.fromEntries(canvasCategoryIds.map(id => [id, false])))}
+                className="px-1.5 py-0.5 text-[10px] rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+                title="Hide all categories on canvas"
+              >
+                none
+              </button>
+            </>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              openSearchPalette('#');
+            }}
+            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+            title="Search tags"
+          >
+            <Search className="w-4 h-4" strokeWidth={2} />
+          </button>
+        </div>
       </div>
+
+      {showCanvasControls && (
+        <label className="flex items-center gap-2 px-3 py-1 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card)]">
+          <input
+            type="checkbox"
+            checked={canvasCategoryVisible[CANVAS_NONE_KEY] ?? true}
+            onChange={(e) => setCanvasCategoryVisible(CANVAS_NONE_KEY, e.target.checked)}
+            className="h-3 w-3 accent-[var(--color-accent)]"
+          />
+          <span className="truncate">Uncategorized</span>
+        </label>
+      )}
 
       {/* Virtualized tag list */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto scrollbar-hidden">
@@ -312,6 +353,9 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
                       selectedTagId={selectedTagId}
                       onSelect={handleSelectTag}
                       onContextMenu={handleContextMenu}
+                      showCanvasCheckbox={showCanvasControls && level === 0}
+                      canvasChecked={canvasCategoryVisible[tag.id] ?? true}
+                      onCanvasCheck={setCanvasCategoryVisible}
                     />
                   )}
                 </div>

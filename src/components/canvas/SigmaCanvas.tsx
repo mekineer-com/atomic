@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
-import { useUIStore } from '../../stores/ui';
+import { CANVAS_NONE_KEY, useUIStore } from '../../stores/ui';
 import { useDatabasesStore } from '../../stores/databases';
 import { getGlobalCanvas, type GlobalCanvasData } from '../../lib/api';
 import { getTransport } from '../../lib/transport';
@@ -64,12 +64,61 @@ function visibleNeighbors(graph: Graph, visibleLayers: Record<string, boolean>, 
   return neighbors;
 }
 
-function matchesSelection(attrs: any, tagId: string | null, entityIds: Set<string>): boolean {
-  const tagIds = attrs.tagIds as string[] | undefined;
-  const nodeEntityIds = attrs.entityIds as string[] | undefined;
-  const tagOk = !tagId || tagIds?.includes(tagId) === true;
-  const entityOk = entityIds.size === 0 || nodeEntityIds?.some(id => entityIds.has(id)) === true;
-  return tagOk && entityOk;
+type NodeVisibility = 'visible' | 'dimmed' | 'hidden';
+
+function checked(map: Record<string, boolean>, id: string): boolean {
+  return map[id] ?? true;
+}
+
+function resolveNodeVisibility(
+  tagIds: string[] | undefined,
+  entityIds: string[] | undefined,
+  isCategory: boolean,
+  categoryVisible: Record<string, boolean>,
+  entityVisible: Record<string, boolean>,
+  categoryDimmed: boolean,
+  entityDimmed: boolean,
+  filterMode: boolean
+): NodeVisibility {
+  const tags = tagIds ?? [];
+  const entities = entityIds ?? [];
+  const categoryMatch = tags.length === 0
+    ? checked(categoryVisible, CANVAS_NONE_KEY)
+    : tags.some(id => checked(categoryVisible, id));
+  if (isCategory) {
+    if (categoryMatch) return 'visible';
+    return categoryDimmed ? 'dimmed' : 'hidden';
+  }
+  const entityMatch = entities.length === 0
+    ? checked(entityVisible, CANVAS_NONE_KEY)
+    : entities.some(id => checked(entityVisible, id));
+  if (filterMode ? categoryMatch && entityMatch : categoryMatch || entityMatch) return 'visible';
+  if ((!categoryMatch && !categoryDimmed) || (!entityMatch && !entityDimmed)) return 'hidden';
+  return 'dimmed';
+}
+
+function buildVisibilityMap(
+  graph: Graph,
+  categoryVisible: Record<string, boolean>,
+  entityVisible: Record<string, boolean>,
+  categoryDimmed: boolean,
+  entityDimmed: boolean,
+  filterMode: boolean
+): Map<string, NodeVisibility> {
+  const next = new Map<string, NodeVisibility>();
+  graph.forEachNode((node, attrs) => {
+    next.set(node, resolveNodeVisibility(
+      attrs.tagIds as string[] | undefined,
+      attrs.entityIds as string[] | undefined,
+      !!(attrs as any).isCategory,
+      categoryVisible,
+      entityVisible,
+      categoryDimmed,
+      entityDimmed,
+      filterMode
+    ));
+  });
+  return next;
 }
 
 function dimNode(attrs: any) {
@@ -115,7 +164,15 @@ export function SigmaCanvas({
   const onPreviewNodeClickRef = useRef(onPreviewNodeClick);
   onPreviewNodeClickRef.current = onPreviewNodeClick;
   const openReader = useUIStore(s => s.openReader);
-  const selectedTagId = useUIStore(s => s.selectedTagId);
+  const canvasCategoryVisible = useUIStore(s => s.canvasCategoryVisible);
+  const canvasEntityVisible = useUIStore(s => s.canvasEntityVisible);
+  const canvasCategoryShowDimmed = useUIStore(s => s.canvasCategoryShowDimmed);
+  const canvasEntityShowDimmed = useUIStore(s => s.canvasEntityShowDimmed);
+  const canvasFilter = useUIStore(s => s.canvasFilter);
+  const setCanvasCategoryShowDimmed = useUIStore(s => s.setCanvasCategoryShowDimmed);
+  const setCanvasEntityShowDimmed = useUIStore(s => s.setCanvasEntityShowDimmed);
+  const setCanvasFilter = useUIStore(s => s.setCanvasFilter);
+  const resetCanvasLayerState = useUIStore(s => s.resetCanvasLayerState);
   const activeDbId = useDatabasesStore(s => s.activeId);
   const containerRef = useRef<HTMLDivElement>(null);
   // The hover pill renders into this div, which lives outside the
@@ -133,27 +190,26 @@ export function SigmaCanvas({
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [edgeThreshold, setEdgeThreshold] = useState(0);
   const [visibleEdgeLayers, setVisibleEdgeLayers] = useState<Record<string, boolean>>({});
-  const [selectedEntityIds, setSelectedEntityIds] = useState<string[]>([]);
   const edgeThresholdRef = useRef(0);
   const visibleEdgeLayersRef = useRef<Record<string, boolean>>({});
-  const selectedEntityIdsRef = useRef<Set<string>>(new Set());
+  const canvasCategoryVisibleRef = useRef(canvasCategoryVisible);
+  const canvasEntityVisibleRef = useRef(canvasEntityVisible);
+  const canvasCategoryShowDimmedRef = useRef(canvasCategoryShowDimmed);
+  const canvasEntityShowDimmedRef = useRef(canvasEntityShowDimmed);
+  const canvasFilterRef = useRef(canvasFilter);
+  const visibilityRef = useRef<Map<string, NodeVisibility>>(new Map());
   const edgeAnimProgress = useRef(0); // 0 = invisible, 1 = fully visible
   const themeRef = useRef(theme);
   themeRef.current = theme;
+  canvasCategoryVisibleRef.current = canvasCategoryVisible;
+  canvasEntityVisibleRef.current = canvasEntityVisible;
+  canvasCategoryShowDimmedRef.current = canvasCategoryShowDimmed;
+  canvasEntityShowDimmedRef.current = canvasEntityShowDimmed;
+  canvasFilterRef.current = canvasFilter;
   const edgeLayerNames = useMemo(
     () => [...new Set((data?.edges ?? []).map(edgeLayer))].sort(),
     [data]
   );
-  const entityChoices = useMemo(() => {
-    const byId = new Map<string, string>();
-    for (const atom of data?.atoms ?? []) {
-      for (let i = 0; i < atom.entity_ids.length; i++) {
-        byId.set(atom.entity_ids[i], atom.entity_names[i] || atom.entity_ids[i]);
-      }
-    }
-    return [...byId.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-  }, [data]);
-
   // Hover emphasis: when a node is hovered, dim everything outside its neighborhood.
   // neighborsRef lets the edge/node reducers answer "is X a neighbor of hovered?" in O(1).
   const hoveredNodeRef = useRef<string | null>(null);
@@ -181,10 +237,6 @@ export function SigmaCanvas({
     // because enterNode/leaveNode have been running normally all along.
     sigmaRef.current?.refresh();
   }, []);
-
-  // Build a set of atom IDs that match the selected tag
-  const selectedTagRef = useRef(selectedTagId);
-  selectedTagRef.current = selectedTagId;
 
   // Fetch global canvas data
   useEffect(() => {
@@ -223,9 +275,11 @@ export function SigmaCanvas({
 
   useEffect(() => {
     if (isPreview) return;
-    selectedEntityIdsRef.current = new Set();
-    setSelectedEntityIds([]);
-  }, [data, isPreview]);
+    return () => {
+      useCanvasStore.getState().setCanvasData(null);
+      resetCanvasLayerState();
+    };
+  }, [activeDbId, isPreview, resetCanvasLayerState]);
 
   useEffect(() => {
     visibleEdgeLayersRef.current = visibleEdgeLayers;
@@ -235,9 +289,25 @@ export function SigmaCanvas({
   }, [visibleEdgeLayers]);
 
   useEffect(() => {
-    selectedEntityIdsRef.current = new Set(selectedEntityIds);
+    const graph = graphRef.current;
+    if (!graph || isPreview) return;
+    visibilityRef.current = buildVisibilityMap(
+      graph,
+      canvasCategoryVisible,
+      canvasEntityVisible,
+      canvasCategoryShowDimmed,
+      canvasEntityShowDimmed,
+      canvasFilter
+    );
     sigmaRef.current?.refresh();
-  }, [selectedEntityIds]);
+  }, [
+    canvasCategoryVisible,
+    canvasEntityVisible,
+    canvasCategoryShowDimmed,
+    canvasEntityShowDimmed,
+    canvasFilter,
+    isPreview,
+  ]);
 
   // Precomputed data for the graph
   const graphDataRef = useRef<{
@@ -319,8 +389,19 @@ export function SigmaCanvas({
         tagIds: atom.tag_ids,
         entityIds: atom.entity_ids,
         entityNames: atom.entity_names,
+        isCategory: atom.atom_id.startsWith('category:'),
       });
     }
+    visibilityRef.current = isPreview
+      ? new Map()
+      : buildVisibilityMap(
+        graph,
+        canvasCategoryVisibleRef.current,
+        canvasEntityVisibleRef.current,
+        canvasCategoryShowDimmedRef.current,
+        canvasEntityShowDimmedRef.current,
+        canvasFilterRef.current
+      );
 
     // Add edges
     let minW = 1, maxW = 0;
@@ -361,15 +442,16 @@ export function SigmaCanvas({
       },
       minCameraRatio: 0.01,
       maxCameraRatio: 10,
+      zoomingRatio: 1.03,
       stagePadding: 40,
       // Hover pill + ring are drawn on our own labelCanvas (drawLabels) so
       // they stack above atom/cluster labels. Sigma's hover canvas sits below
       // labelCanvas, so drawing the hover pill here would render it behind.
       defaultDrawNodeHover: () => {},
       nodeReducer: (node, attrs) => {
-        const tagId = selectedTagRef.current;
-        const selectedEntities = selectedEntityIdsRef.current;
-        const selected = matchesSelection(attrs, tagId, selectedEntities);
+        const visibility = isPreview ? 'visible' : (visibilityRef.current.get(node) ?? 'visible');
+        if (visibility === 'hidden') return { ...attrs, hidden: true };
+        const selected = visibility === 'visible';
         const hovered = hoveredNodeRef.current;
         const pinned = pinnedNodeRef.current;
         if (hovered || pinned) {
@@ -412,6 +494,13 @@ export function SigmaCanvas({
         if (!isPreview && visibleEdgeLayersRef.current[layer] !== true) {
           return { ...attrs, hidden: true };
         }
+        const g = graphRef.current;
+        const sourceVisibility = g ? visibilityRef.current.get(g.source(edge)) : 'visible';
+        const targetVisibility = g ? visibilityRef.current.get(g.target(edge)) : 'visible';
+        if (!isPreview && (sourceVisibility === 'hidden' || targetVisibility === 'hidden')) {
+          return { ...attrs, hidden: true };
+        }
+        const visibilityFactor = !isPreview && (sourceVisibility === 'dimmed' || targetVisibility === 'dimmed') ? 0.25 : 1;
         const hovered = hoveredNodeRef.current;
         const pinned = pinnedNodeRef.current;
         const t = themeRef.current;
@@ -429,8 +518,8 @@ export function SigmaCanvas({
             const size = (0.2 + w * 0.7) * anim + ((0.5 + w * 1.2) * anim - (0.2 + w * 0.7) * anim) * h;
             return {
               ...attrs,
-              color: paletteRgb(t, layer, Math.min(1, bright)),
-              size,
+              color: paletteRgb(t, layer, Math.min(1, bright * visibilityFactor)),
+              size: size * visibilityFactor,
               zIndex: 1,
             };
           }
@@ -438,8 +527,8 @@ export function SigmaCanvas({
             // Pinned edges stay at normal brightness — they don't pulse like hover.
             return {
               ...attrs,
-              color: paletteRgb(t, layer, w * anim),
-              size: (0.2 + w * 0.7) * anim,
+              color: paletteRgb(t, layer, w * anim * visibilityFactor),
+              size: (0.2 + w * 0.7) * anim * visibilityFactor,
               zIndex: 1,
             };
           }
@@ -448,8 +537,8 @@ export function SigmaCanvas({
           const dim = pinned ? 1 : h;
           return {
             ...attrs,
-            color: paletteRgb(t, layer, w * anim * (1 - dim)),
-            size: (0.2 + w * 0.7) * anim * (1 - dim),
+            color: paletteRgb(t, layer, w * anim * (1 - dim) * visibilityFactor),
+            size: (0.2 + w * 0.7) * anim * (1 - dim) * visibilityFactor,
           };
         }
         if (w < edgeThresholdRef.current) {
@@ -457,8 +546,8 @@ export function SigmaCanvas({
         }
         return {
           ...attrs,
-          color: paletteRgb(t, layer, w * anim),
-          size: (0.2 + w * 0.7) * anim,
+          color: paletteRgb(t, layer, w * anim * visibilityFactor),
+          size: (0.2 + w * 0.7) * anim * visibilityFactor,
         };
       },
     });
@@ -571,7 +660,6 @@ export function SigmaCanvas({
       ctx.font = `${atomFontSize}px system-ui, -apple-system, sans-serif`;
       ctx.textBaseline = 'middle';
 
-      const tagFilter = selectedTagRef.current;
       // When a node is pinned, restrict labels to the pinned node + its
       // neighbors so the highlighted subgraph is the only thing named.
       const pinnedId = pinnedNodeRef.current;
@@ -584,7 +672,7 @@ export function SigmaCanvas({
       const candidates: Cand[] = [];
       graph!.forEachNode((id, attrs) => {
         if (pinnedId && id !== pinnedId && !pinnedNeighbors?.has(id)) return;
-        if (!matchesSelection(attrs, tagFilter, selectedEntityIdsRef.current)) return;
+        if (!isPreview && visibilityRef.current.get(id) === 'hidden') return;
         const rsize = sigma!.scaleSize(attrs.size as number);
         if (rsize < minRenderedSize) return;
         const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
@@ -629,21 +717,17 @@ export function SigmaCanvas({
         drawnAtomLabels++;
       }
 
-      // === Pinned-node ring (persists while a popover is open) ===
-      const selectedEntities = selectedEntityIdsRef.current;
-      if (selectedEntities.size > 0) {
-        const tagId = selectedTagRef.current;
-        graph!.forEachNode((_id, attrs) => {
-          if (!matchesSelection(attrs, tagId, selectedEntities)) return;
-          const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
-          const size = sigma!.scaleSize(attrs.size as number);
-          ctx.beginPath();
-          ctx.arc(pos.x, pos.y, size + 5, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(255, 220, 120, 0.85)';
-          ctx.lineWidth = 2;
-          ctx.stroke();
-        });
-      }
+      graph!.forEachNode((id, attrs) => {
+        if (!isPreview && visibilityRef.current.get(id) === 'hidden') return;
+        if (!(attrs as any).isCategory) return;
+        const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
+        const size = sigma!.scaleSize(attrs.size as number);
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, size + 4, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      });
 
       if (pinnedId && graph!.hasNode(pinnedId)) {
         const pAttrs = graph!.getNodeAttributes(pinnedId);
@@ -974,11 +1058,6 @@ export function SigmaCanvas({
     sigma.refresh();
   }, [theme]);
 
-  // Refresh when selected tag changes (nodeReducer reads selectedTagRef)
-  useEffect(() => {
-    sigmaRef.current?.refresh();
-  }, [selectedTagId]);
-
   // Continuously refresh sigma during chat sidebar transition so the graph resizes smoothly
   const chatSidebarOpen = useUIStore(s => s.chatSidebarOpen);
   useEffect(() => {
@@ -1152,11 +1231,11 @@ export function SigmaCanvas({
               </span>
             </div>
             {edgeLayerNames.length > 0 && (
-              <div className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 backdrop-blur">
-                <div className="mb-1 text-[9px] uppercase tracking-wide text-white/35">Tethers</div>
-                <div className="flex max-h-28 flex-col gap-1 overflow-y-auto pr-1">
+              <details open className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-2 backdrop-blur">
+                <summary className="mb-1 cursor-pointer select-none text-[11px] uppercase tracking-wide text-white/35">Tethers</summary>
+                <div className="flex max-h-36 flex-col gap-1 overflow-y-auto pr-1">
                   {edgeLayerNames.map(layer => (
-                    <label key={layer} className="flex items-center gap-1.5 text-[10px] text-white/60">
+                    <label key={layer} className="flex items-center gap-1.5 text-[12px] text-white/60">
                       <input
                         type="checkbox"
                         checked={visibleEdgeLayers[layer] === true}
@@ -1171,28 +1250,40 @@ export function SigmaCanvas({
                     </label>
                   ))}
                 </div>
-              </div>
+              </details>
             )}
-            {entityChoices.length > 0 && (
-              <div className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 backdrop-blur">
-                <div className="mb-1 text-[9px] uppercase tracking-wide text-white/35">Entities</div>
-                <div className="flex max-h-28 flex-col gap-1 overflow-y-auto pr-1">
-                  {entityChoices.map(([id, name]) => (
-                    <label key={id} className="flex items-center gap-1.5 text-[10px] text-white/60">
-                      <input
-                        type="checkbox"
-                        checked={selectedEntityIds.includes(id)}
-                        onChange={(e) => setSelectedEntityIds(prev =>
-                          e.target.checked ? [...prev, id] : prev.filter(item => item !== id)
-                        )}
-                        className="h-3 w-3 accent-white/70"
-                      />
-                      <span className="truncate">{name}</span>
-                    </label>
-                  ))}
-                </div>
+            <details open className="max-w-[190px] rounded-lg border border-white/10 bg-black/30 px-2 py-2 backdrop-blur">
+              <summary className="mb-1 cursor-pointer select-none text-[11px] uppercase tracking-wide text-white/35">Visibility</summary>
+              <div className="flex flex-col gap-1">
+                <label className="flex items-center gap-1.5 text-[12px] text-white/60">
+                  <input
+                    type="checkbox"
+                    checked={canvasFilter}
+                    onChange={(e) => setCanvasFilter(e.target.checked)}
+                    className="h-3 w-3 accent-white/70"
+                  />
+                  <span>filter layers</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[12px] text-white/60">
+                  <input
+                    type="checkbox"
+                    checked={canvasCategoryShowDimmed}
+                    onChange={(e) => setCanvasCategoryShowDimmed(e.target.checked)}
+                    className="h-3 w-3 accent-white/70"
+                  />
+                  <span>dim categories</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[12px] text-white/60">
+                  <input
+                    type="checkbox"
+                    checked={canvasEntityShowDimmed}
+                    onChange={(e) => setCanvasEntityShowDimmed(e.target.checked)}
+                    className="h-3 w-3 accent-white/70"
+                  />
+                  <span>dim entities</span>
+                </label>
               </div>
-            )}
+            </details>
           </div>
         )}
 
