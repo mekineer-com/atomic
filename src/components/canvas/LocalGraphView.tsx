@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import Graph from 'graphology';
 import Sigma from 'sigma';
 import EdgeCurveProgram from '@sigma/edge-curve';
-import { getAtomNeighborhood, type NeighborhoodGraph, type NeighborhoodEdge } from '../../lib/api';
+import { getAtomNeighborhood, getCachedAtomNeighborhood, type NeighborhoodGraph, type NeighborhoodEdge } from '../../lib/api';
 import { useUIStore } from '../../stores/ui';
 import { DEFAULT_THEME, type CanvasTheme } from './sigma/themes';
 
@@ -251,9 +251,10 @@ export function LocalGraphView() {
   useEffect(() => {
     if (!localGraph.centerAtomId) return;
     let cancelled = false;
-    setIsLoading(true);
+    const cached = getCachedAtomNeighborhood(localGraph.centerAtomId, localGraph.depth, 0.5);
+    setIsLoading(!cached);
     setError(null);
-    getAtomNeighborhood(localGraph.centerAtomId, localGraph.depth, 0.5)
+    (cached ?? getAtomNeighborhood(localGraph.centerAtomId, localGraph.depth, 0.5))
       .then(data => {
         if (!cancelled) setGraph(data);
       })
@@ -511,8 +512,8 @@ export function LocalGraphView() {
         const pillH = fontSize + padY * 2;
         const rect = { x: c.vx - pillW / 2, y: labelY - pillH / 2, w: pillW, h: pillH };
 
-        // Center always draws even if it collides; everyone else respects collisions
-        if (!isCenter && collides(rect, 6)) continue;
+        // Immediate neighbors are the point of this view; depth-2 labels can yield.
+        if (c.depth > 1 && collides(rect, 6)) continue;
         placed.push(rect);
 
         // Pill background — slightly more opaque for the center
