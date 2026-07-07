@@ -444,7 +444,7 @@ export function SigmaCanvas({
       graph.addNode(atom.atom_id, {
         x: 0,
         y: 0,
-        size: (2.5 + connectivity * 5) + (isCategory ? 3 : 0),
+        size: (3.5 + connectivity * 5) + (isCategory ? 3 : 0),
         color: canvasNodeColor(theme, {
           primaryTag: atom.primary_tag,
           tagIds: atom.tag_ids,
