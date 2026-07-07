@@ -785,13 +785,14 @@ export function SigmaCanvas({
       }
 
       graph!.forEachNode((id, attrs) => {
-        if (!isPreview && visibilityRef.current.get(id) === 'hidden') return;
+        const visibility = !isPreview ? visibilityRef.current.get(id) : 'visible';
+        if (!isPreview && visibility === 'hidden') return;
         if (!(attrs as any).isCategory) return;
         const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
         const size = sigma!.scaleSize(attrs.size as number);
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, size + 4, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+        ctx.strokeStyle = visibility === 'dimmed' ? 'rgba(255, 255, 255, 0.18)' : 'rgba(255, 255, 255, 0.45)';
         ctx.lineWidth = 2;
         ctx.stroke();
       });

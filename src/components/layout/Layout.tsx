@@ -123,7 +123,8 @@ export function Layout() {
       } catch (error) {
         console.error('Failed to check provider configuration:', error);
         if (cancelled) return;
-        if (hasServerConfig() && !String(error).includes('Authentication expired')) {
+        const message = String(error);
+        if (hasServerConfig() && (message.includes('Failed to fetch') || message.includes('NetworkError'))) {
           retryTimer = setTimeout(checkSetup, 1000);
           return;
         }
