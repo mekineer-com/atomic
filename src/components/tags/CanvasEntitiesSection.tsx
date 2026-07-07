@@ -2,10 +2,13 @@ import { useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useCanvasStore } from '../../stores/canvas';
 import { CANVAS_NONE_KEY, useUIStore } from '../../stores/ui';
+import type { CanvasAtomPosition } from '../../lib/api';
+
+const EMPTY_ATOMS: CanvasAtomPosition[] = [];
 
 export function CanvasEntitiesSection() {
   const viewMode = useUIStore(s => s.viewMode);
-  const atoms = useCanvasStore(s => s.canvasData?.atoms ?? []);
+  const atoms = useCanvasStore(s => s.canvasData?.atoms ?? EMPTY_ATOMS);
   const canvasEntityVisible = useUIStore(s => s.canvasEntityVisible);
   const setCanvasEntityVisible = useUIStore(s => s.setCanvasEntityVisible);
   const setCanvasEntityVisibleMap = useUIStore(s => s.setCanvasEntityVisibleMap);
