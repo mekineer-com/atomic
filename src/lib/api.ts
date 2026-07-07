@@ -372,6 +372,8 @@ export interface NeighborhoodGraph {
   edges: NeighborhoodEdge[];
 }
 
+export type RelatedNeighborhoodAtom = NeighborhoodAtom & { similarity_score: number };
+
 const neighborhoodCache = new Map<string, { expiresAt: number; promise: Promise<NeighborhoodGraph> }>();
 const NEIGHBORHOOD_CACHE_MS = 120_000;
 
@@ -414,6 +416,24 @@ export function getCachedAtomNeighborhood(
 
 export function clearAtomNeighborhoodCache(): void {
   neighborhoodCache.clear();
+}
+
+export async function getRelatedAtomsFromNeighborhood(
+  atomId: string,
+  limit: number = 5,
+  minSimilarity: number = 0.5,
+): Promise<RelatedNeighborhoodAtom[]> {
+  const graph = await getAtomNeighborhood(atomId, 1, minSimilarity);
+  const scores = new Map<string, number>();
+  for (const edge of graph.edges) {
+    const other = edge.source_id === atomId ? edge.target_id : edge.target_id === atomId ? edge.source_id : null;
+    if (other) scores.set(other, Math.max(scores.get(other) ?? 0, edge.similarity_score ?? edge.strength));
+  }
+  return graph.atoms
+    .filter((atom) => atom.id !== atomId && scores.has(atom.id))
+    .map((atom) => ({ ...atom, similarity_score: scores.get(atom.id)! }))
+    .sort((a, b) => b.similarity_score - a.similarity_score || a.id.localeCompare(b.id))
+    .slice(0, Math.max(1, limit));
 }
 
 export async function rebuildSemanticEdges(): Promise<number> {

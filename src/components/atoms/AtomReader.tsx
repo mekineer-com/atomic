@@ -8,12 +8,13 @@ import { Input } from '../ui/Input';
 import { TagChip } from '../tags/TagChip';
 import { TagSelector } from '../tags/TagSelector';
 import { MiniGraphPreview } from '../canvas/MiniGraphPreview';
-import { useAtomsStore, type AtomWithTags, type SemanticSearchResult, type SimilarAtomResult } from '../../stores/atoms';
+import { useAtomsStore, type AtomWithTags, type SemanticSearchResult } from '../../stores/atoms';
 import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useInlineEditor } from '../../hooks';
 import { formatDate } from '../../lib/date';
 import { getTransport } from '../../lib/transport';
+import { getRelatedAtomsFromNeighborhood, type RelatedNeighborhoodAtom } from '../../lib/api';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
 import type {
@@ -641,7 +642,7 @@ function searchResultsToAtomLinkSuggestions(
 }
 
 function SidebarRelatedAtoms({ atomId, onAtomClick }: { atomId: string; onAtomClick: (id: string, opts?: { newTab?: boolean }) => void }) {
-  const [relatedAtoms, setRelatedAtoms] = useState<SimilarAtomResult[]>([]);
+  const [relatedAtoms, setRelatedAtoms] = useState<RelatedNeighborhoodAtom[]>([]);
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -655,7 +656,7 @@ function SidebarRelatedAtoms({ atomId, onAtomClick }: { atomId: string; onAtomCl
   useEffect(() => {
     if (!isCollapsed && !hasLoaded) {
       setIsLoading(true);
-      getTransport().invoke<SimilarAtomResult[]>('find_similar_atoms', { atomId, limit: 5, threshold: 0.7 })
+      getRelatedAtomsFromNeighborhood(atomId, 5, 0.5)
         .then((results) => { setRelatedAtoms(results); setHasLoaded(true); })
         .catch(console.error)
         .finally(() => setIsLoading(false));
@@ -689,7 +690,7 @@ function SidebarRelatedAtoms({ atomId, onAtomClick }: { atomId: string; onAtomCl
                 className="w-full text-left p-2 rounded-md hover:bg-[var(--color-bg-hover)] transition-colors"
               >
                 <p className="text-xs text-[var(--color-text-primary)] line-clamp-2">
-                  {result.title || 'Untitled'}
+                  {result.content || 'Untitled'}
                 </p>
                 <span className="text-[10px] text-[var(--color-accent)]">
                   {Math.round(result.similarity_score * 100)}% similar

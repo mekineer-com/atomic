@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { ChevronDown } from 'lucide-react';
-import { getTransport } from '../../lib/transport';
-import { SimilarAtomResult } from '../../stores/atoms';
+import { getRelatedAtomsFromNeighborhood, type RelatedNeighborhoodAtom } from '../../lib/api';
 import { MiniGraphPreview } from '../canvas/MiniGraphPreview';
 
 // Benchmarking helper
@@ -22,7 +21,7 @@ interface RelatedAtomsProps {
 }
 
 export function RelatedAtoms({ atomId, onAtomClick, onViewGraph }: RelatedAtomsProps) {
-  const [relatedAtoms, setRelatedAtoms] = useState<SimilarAtomResult[]>([]);
+  const [relatedAtoms, setRelatedAtoms] = useState<RelatedNeighborhoodAtom[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [hasLoaded, setHasLoaded] = useState(false);
@@ -35,11 +34,7 @@ export function RelatedAtoms({ atomId, onAtomClick, onViewGraph }: RelatedAtomsP
         perfLog('Fetch similar atoms START');
         setIsLoading(true);
         try {
-          const results = await getTransport().invoke<SimilarAtomResult[]>('find_similar_atoms', {
-            atomId,
-            limit: 5,
-            threshold: 0.7,
-          });
+          const results = await getRelatedAtomsFromNeighborhood(atomId, 5, 0.5);
           perfLog(`Fetch similar atoms COMPLETE (found ${results.length})`, fetchStart);
           setRelatedAtoms(results);
           setHasLoaded(true);
@@ -97,9 +92,7 @@ export function RelatedAtoms({ atomId, onAtomClick, onViewGraph }: RelatedAtomsP
                   className="w-full text-left p-3 bg-[var(--color-bg-panel)] rounded-md hover:bg-[var(--color-bg-card)] transition-colors"
                 >
                   <p className="text-sm text-[var(--color-text-primary)] line-clamp-2">
-                    {result.content.length > 100
-                      ? result.content.slice(0, 100) + '...'
-                      : result.content}
+                    {result.content.length > 100 ? result.content.slice(0, 100) + '...' : result.content}
                   </p>
                   <div className="flex items-center gap-2 mt-2">
                     <span className="text-xs text-[var(--color-accent)]">

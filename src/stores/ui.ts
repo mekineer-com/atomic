@@ -943,30 +943,32 @@ export const useUIStore = create<UIStore>()(
         );
       },
 
-      navigateLocalGraph: (atomId: string) =>
-        set((state) => ({
+      navigateLocalGraph: (atomId: string) => {
+        const state = get();
+        const tab = state.activeTabId ? state.tabs.find((t) => t.id === state.activeTabId) : null;
+        if (!tab || tab.stack[tab.stackIndex]?.type !== 'graph') {
+          get().openLocalGraph(atomId);
+          return;
+        }
+        const entry: TabEntry = { type: 'graph', atomId, tagId: state.selectedTagId };
+        const truncated = tab.stack.slice(0, tab.stackIndex + 1);
+        const nextStack = [...truncated, entry];
+        set((s) => ({
+          tabs: s.tabs.map((t) =>
+            t.id === tab.id ? { ...t, stack: nextStack, stackIndex: nextStack.length - 1 } : t,
+          ),
           localGraph: {
-            ...state.localGraph,
+            ...s.localGraph,
             isOpen: true,
             centerAtomId: atomId,
-            navigationHistory: [...state.localGraph.navigationHistory, atomId],
+            navigationHistory: [...s.localGraph.navigationHistory, atomId],
           },
-        })),
+        }));
+        navigateTo(entryUrl(entry));
+      },
 
       goBackLocalGraph: () =>
-        set((state) => {
-          const history = [...state.localGraph.navigationHistory];
-          history.pop();
-          const previousAtomId = history[history.length - 1] || null;
-          return {
-            localGraph: {
-              ...state.localGraph,
-              centerAtomId: previousAtomId,
-              navigationHistory: history,
-              isOpen: history.length > 0,
-            },
-          };
-        }),
+        get().tabBack(),
 
       closeLocalGraph: () => {
         // closing the graph dismisses the active tab if it's a graph tab.

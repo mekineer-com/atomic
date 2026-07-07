@@ -5,6 +5,7 @@ import EdgeCurveProgram from '@sigma/edge-curve';
 import { getAtomNeighborhood, getCachedAtomNeighborhood, type NeighborhoodGraph, type NeighborhoodEdge } from '../../lib/api';
 import { useUIStore } from '../../stores/ui';
 import { DEFAULT_THEME, type CanvasTheme } from './sigma/themes';
+import { AtomPreviewPopover } from './AtomPreviewPopover';
 
 const RADIUS_DEPTH_1 = 280;
 const RADIUS_DEPTH_2 = 540;
@@ -222,10 +223,13 @@ export function LocalGraphView() {
   const [graph, setGraph] = useState<NeighborhoodGraph | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [previewAtomId, setPreviewAtomId] = useState<string | null>(null);
+  const [previewAnchorRect, setPreviewAnchorRect] = useState<{ top: number; left: number; bottom: number; width: number } | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
+  const labelRectsRef = useRef<{ id: string; x: number; y: number; w: number; h: number }[]>([]);
 
   // Hover state — read by the node/edge reducers (refs so we don't recreate sigma on every change)
   const hoveredNodeRef = useRef<string | null>(null);
@@ -460,6 +464,7 @@ export function LocalGraphView() {
 
       const t = themeRef.current;
       const placed: { x: number; y: number; w: number; h: number }[] = [];
+      labelRectsRef.current = [];
       const collides = (rect: { x: number; y: number; w: number; h: number }, pad: number) => {
         for (const p of placed) {
           if (
@@ -515,6 +520,7 @@ export function LocalGraphView() {
         // Immediate neighbors are the point of this view; depth-2 labels can yield.
         if (c.depth > 1 && collides(rect, 6)) continue;
         placed.push(rect);
+        labelRectsRef.current.push({ id: c.id, ...rect });
 
         // Pill background — slightly more opaque for the center
         ctx.fillStyle = isCenter ? t.labelBg : t.labelBg.replace('rgb', 'rgba').replace(')', ',0.92)');
@@ -584,6 +590,26 @@ export function LocalGraphView() {
     sigma.on('afterRender', drawLabels);
     requestAnimationFrame(drawLabels);
 
+    const handleLabelClick = (event: MouseEvent) => {
+      const bounds = container.getBoundingClientRect();
+      const x = event.clientX - bounds.left;
+      const y = event.clientY - bounds.top;
+      const hit = [...labelRectsRef.current].reverse().find(
+        rect => x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h,
+      );
+      if (!hit) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPreviewAnchorRect({
+        top: bounds.top + hit.y,
+        left: bounds.left + hit.x,
+        bottom: bounds.top + hit.y + hit.h,
+        width: hit.w,
+      });
+      setPreviewAtomId(hit.id);
+    };
+    container.addEventListener('click', handleLabelClick, true);
+
     // No setCustomBBox: with a padded custom bbox, the first render fits to the
     // natural bbox before our setCustomBBox call lands, then the next refresh re-fits
     // to the larger box and the whole graph appears to "zoom out" on first hover.
@@ -645,6 +671,7 @@ export function LocalGraphView() {
 
     return () => {
       if (hoverRaf !== null) cancelAnimationFrame(hoverRaf);
+      container.removeEventListener('click', handleLabelClick, true);
       releaseSigma(sigma, container);
       labelCanvas.remove();
       sigmaRef.current = null;
@@ -683,6 +710,22 @@ export function LocalGraphView() {
 
         <div ref={containerRef} className="w-full h-full" />
       </div>
+
+      {previewAtomId && previewAnchorRect && (
+        <AtomPreviewPopover
+          atomId={previewAtomId}
+          anchorRect={previewAnchorRect}
+          onClose={() => {
+            setPreviewAtomId(null);
+            setPreviewAnchorRect(null);
+          }}
+          onViewAtom={(atomId, opts) => {
+            setPreviewAtomId(null);
+            setPreviewAnchorRect(null);
+            overlayNavigate({ type: 'reader', atomId }, opts);
+          }}
+        />
+      )}
 
       {/* Legend */}
       <div className="px-4 py-2 border-t border-[var(--color-border)] flex items-center gap-6 text-xs text-[var(--color-text-secondary)]">
