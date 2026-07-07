@@ -157,7 +157,11 @@ pub async fn rebuild_canvas(
         Ok(core) => core,
         Err(e) => return HttpResponse::BadRequest().body(format!("Database not found: {}", e)),
     };
-    let projected = match db.project_atom_subset(&requested).await {
+    let (projected_result, data_result) = tokio::join!(
+        db.project_atom_subset(&requested),
+        db.compute_and_get_canvas_data()
+    );
+    let projected = match projected_result {
         Ok(projected) => projected,
         Err(e) => return crate::error::error_response(e),
     };
@@ -165,7 +169,7 @@ pub async fn rebuild_canvas(
         .into_iter()
         .map(|(id, x, y)| (id, (x, y)))
         .collect();
-    let data = match db.compute_and_get_canvas_data().await {
+    let data = match data_result {
         Ok(data) => data,
         Err(e) => return crate::error::error_response(e),
     };
