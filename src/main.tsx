@@ -6,7 +6,6 @@ import './index.css'
 import { initTransport } from './lib/transport'
 
 async function clearStaleServiceWorkers() {
-  if (import.meta.env.VITE_BUILD_TARGET === 'web') return
   if ('serviceWorker' in navigator) {
     await Promise.all((await navigator.serviceWorker.getRegistrations()).map(r => r.unregister()))
   }
