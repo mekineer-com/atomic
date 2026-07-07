@@ -60,6 +60,14 @@ fn atomic_recap_instruction(user_id: &str) -> String {
     format!("This Atomic session is ending. Write a recap of your activity with {user_id}: what you looked at, what you changed (edits you made and why), ideas rejected or deferred, and follow-ups you want to remember. Write it as yourself, for yourself.")
 }
 
+fn atomic_recap_prompt(user_id: &str, rows: &[AtomicTranscriptRow]) -> String {
+    let mut lines = vec![atomic_recap_instruction(user_id), String::new(), "Full Atomic transcript:".to_string()];
+    for row in rows {
+        lines.push(format!("{}: {}", row.role, row.content));
+    }
+    lines.join("\n")
+}
+
 async fn fetch_atomic_snapshot(
     config: &MemuSessionConfig,
     atomic_conversation_id: &str,
@@ -134,16 +142,31 @@ fn hide_system_messages(
 }
 
 fn transcript_rows(conv: &atomic_core::ConversationWithMessages) -> Vec<AtomicTranscriptRow> {
-    conv.messages
-        .iter()
-        .filter(|m| m.message.role != "system")
-        .filter(|m| !m.message.content.trim().is_empty())
-        .map(|m| AtomicTranscriptRow {
-            role: m.message.role.clone(),
-            content: m.message.content.clone(),
-            created_at: m.message.created_at.clone(),
-        })
-        .collect()
+    let mut rows = Vec::new();
+    for m in conv.messages.iter().filter(|m| m.message.role != "system") {
+        if !m.message.content.trim().is_empty() {
+            rows.push(AtomicTranscriptRow {
+                role: m.message.role.clone(),
+                content: m.message.content.clone(),
+                created_at: m.message.created_at.clone(),
+            });
+        }
+        for call in &m.tool_calls {
+            let mut content = format!("{} {}", call.tool_name, call.status);
+            if !call.tool_input.is_null() {
+                content.push_str(&format!("\ninput: {}", call.tool_input));
+            }
+            if let Some(output) = &call.tool_output {
+                content.push_str(&format!("\noutput: {output}"));
+            }
+            rows.push(AtomicTranscriptRow {
+                role: "tool".to_string(),
+                content,
+                created_at: call.completed_at.clone().unwrap_or_else(|| call.created_at.clone()),
+            });
+        }
+    }
+    rows
 }
 
 fn has_user_assistant_interchange(rows: &[AtomicTranscriptRow]) -> bool {
@@ -153,7 +176,7 @@ fn has_user_assistant_interchange(rows: &[AtomicTranscriptRow]) -> bool {
 fn existing_recap(conv: &atomic_core::ConversationWithMessages, recap_instruction: &str) -> Option<String> {
     let messages = &conv.messages;
     for (idx, message) in messages.iter().enumerate().rev() {
-        if message.message.role == "user" && message.message.content.trim() == recap_instruction {
+        if message.message.role == "user" && message.message.content.trim().starts_with(recap_instruction) {
             let assistant_idx = messages
                 .iter()
                 .enumerate()
@@ -453,11 +476,12 @@ pub async fn end_memu_session(
             user_id: memu_session.user_id.clone(),
             soul_id: memu_session.soul_id.clone(),
         };
+        let recap_prompt = atomic_recap_prompt(&memu_session.user_id, &rows);
         if let Err(e) = db
             .0
             .send_chat_message_with_external_settings(
                 conversation_id,
-                &recap_instruction,
+                &recap_prompt,
                 on_event,
                 settings,
                 Some(memu_tools),
