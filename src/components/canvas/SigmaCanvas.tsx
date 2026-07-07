@@ -386,7 +386,13 @@ export function SigmaCanvas({
   // Create Sigma graph when data is loaded
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || !data || data.atoms.length === 0) return;
+    if (!container || !data) return;
+    if (data.atoms.length === 0) {
+      sigmaRef.current?.kill();
+      sigmaRef.current = null;
+      graphRef.current = null;
+      return;
+    }
     const renderData = rebuildData ?? data;
 
     // For an interactive preview, narrow the graph to the seed atoms plus
@@ -444,7 +450,7 @@ export function SigmaCanvas({
       graph.addNode(atom.atom_id, {
         x: 0,
         y: 0,
-        size: (3.5 + connectivity * 5) + (isCategory ? 3 : 0),
+        size: (3.5 + connectivity * 5) + (isCategory && !isPreview ? 3 : 0),
         color: canvasNodeColor(theme, {
           primaryTag: atom.primary_tag,
           tagIds: atom.tag_ids,
