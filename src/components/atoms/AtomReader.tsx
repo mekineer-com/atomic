@@ -14,6 +14,7 @@ import { useUIStore } from '../../stores/ui';
 import { useInlineEditor } from '../../hooks';
 import { formatDate } from '../../lib/date';
 import { getTransport } from '../../lib/transport';
+import { findSimilarAtoms } from '../../lib/api';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
 import type {
@@ -646,21 +647,30 @@ function SidebarRelatedAtoms({ atomId, onAtomClick }: { atomId: string; onAtomCl
   const [hasLoaded, setHasLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Reset when atomId changes so we re-fetch for the new atom
   useEffect(() => {
+    let cancelled = false;
     setRelatedAtoms([]);
     setHasLoaded(false);
+    setIsLoading(true);
+    findSimilarAtoms(atomId, 5, 0.6)
+      .then((results) => {
+        if (cancelled) return;
+        setRelatedAtoms(results);
+        setHasLoaded(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error(error);
+        setRelatedAtoms([]);
+        setHasLoaded(true);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [atomId]);
-
-  useEffect(() => {
-    if (!isCollapsed && !hasLoaded) {
-      setIsLoading(true);
-      getTransport().invoke<SimilarAtomResult[]>('find_similar_atoms', { atomId, limit: 5, threshold: 0.7 })
-        .then((results) => { setRelatedAtoms(results); setHasLoaded(true); })
-        .catch(console.error)
-        .finally(() => setIsLoading(false));
-    }
-  }, [atomId, isCollapsed, hasLoaded]);
 
   return (
     <div className="mt-4">

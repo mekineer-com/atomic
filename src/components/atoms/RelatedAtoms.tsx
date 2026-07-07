@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { ChevronDown } from 'lucide-react';
-import { getTransport } from '../../lib/transport';
+import { findSimilarAtoms } from '../../lib/api';
 import { SimilarAtomResult } from '../../stores/atoms';
 import { MiniGraphPreview } from '../canvas/MiniGraphPreview';
 
@@ -28,33 +28,30 @@ export function RelatedAtoms({ atomId, onAtomClick, onViewGraph }: RelatedAtomsP
   const [hasLoaded, setHasLoaded] = useState(false);
 
   useEffect(() => {
-    // Only fetch when expanded and not yet loaded
-    if (!isCollapsed && !hasLoaded) {
-      const fetchRelated = async () => {
-        const fetchStart = performance.now();
-        perfLog('Fetch similar atoms START');
-        setIsLoading(true);
-        try {
-          const results = await getTransport().invoke<SimilarAtomResult[]>('find_similar_atoms', {
-            atomId,
-            limit: 5,
-            threshold: 0.7,
-          });
-          perfLog(`Fetch similar atoms COMPLETE (found ${results.length})`, fetchStart);
-          setRelatedAtoms(results);
-          setHasLoaded(true);
-        } catch (error) {
-          console.error('Failed to fetch related atoms:', error);
-          perfLog('Fetch similar atoms FAILED', fetchStart);
-          setRelatedAtoms([]);
-        } finally {
-          setIsLoading(false);
-        }
-      };
-
-      fetchRelated();
-    }
-  }, [atomId, isCollapsed, hasLoaded]);
+    let cancelled = false;
+    const fetchStart = performance.now();
+    perfLog('Fetch similar atoms START');
+    setRelatedAtoms([]);
+    setHasLoaded(false);
+    setIsLoading(true);
+    findSimilarAtoms(atomId, 5, 0.6).then((results) => {
+      if (cancelled) return;
+      perfLog(`Fetch similar atoms COMPLETE (found ${results.length})`, fetchStart);
+      setRelatedAtoms(results);
+      setHasLoaded(true);
+    }).catch((error) => {
+      if (cancelled) return;
+      console.error('Failed to fetch related atoms:', error);
+      perfLog('Fetch similar atoms FAILED', fetchStart);
+      setRelatedAtoms([]);
+      setHasLoaded(true);
+    }).finally(() => {
+      if (!cancelled) setIsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [atomId]);
 
   return (
     <div className="border-t border-[var(--color-border)] px-6 py-4">
