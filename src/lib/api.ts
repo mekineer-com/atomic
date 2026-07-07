@@ -326,6 +326,10 @@ export async function getGlobalCanvas(): Promise<GlobalCanvasData> {
   return getTransport().invoke('get_global_canvas', {});
 }
 
+export async function rebuildCanvas(atomIds: string[]): Promise<GlobalCanvasData> {
+  return getTransport().invoke('rebuild_canvas', { atom_ids: atomIds });
+}
+
 // Semantic graph types and commands
 export interface SemanticEdge {
   id: string;

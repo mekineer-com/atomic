@@ -250,6 +250,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     );
     cfg.route("/canvas/level", web::post().to(canvas::get_canvas_level));
     cfg.route("/canvas/global", web::get().to(canvas::get_global_canvas));
+    cfg.route("/canvas/rebuild", web::post().to(canvas::rebuild_canvas));
 
     // Graph
     cfg.route("/graph/edges", web::get().to(graph::get_semantic_edges));

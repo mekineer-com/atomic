@@ -504,6 +504,11 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: '/api/canvas/global',
   },
+  rebuild_canvas: {
+    method: 'POST',
+    path: '/api/canvas/rebuild',
+    argsMode: 'body',
+  },
 
   // ==================== Graph ====================
   get_semantic_edges: {

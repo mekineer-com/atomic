@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 import { CANVAS_NONE_KEY, useUIStore } from '../../stores/ui';
 import { useDatabasesStore } from '../../stores/databases';
-import { getGlobalCanvas, type GlobalCanvasData } from '../../lib/api';
+import { getGlobalCanvas, rebuildCanvas, type GlobalCanvasData } from '../../lib/api';
 import { getTransport } from '../../lib/transport';
 import Graph from 'graphology';
 import Sigma from 'sigma';
@@ -169,9 +169,11 @@ export function SigmaCanvas({
   const canvasCategoryShowDimmed = useUIStore(s => s.canvasCategoryShowDimmed);
   const canvasEntityShowDimmed = useUIStore(s => s.canvasEntityShowDimmed);
   const canvasFilter = useUIStore(s => s.canvasFilter);
+  const canvasRebuildPerView = useUIStore(s => s.canvasRebuildPerView);
   const setCanvasCategoryShowDimmed = useUIStore(s => s.setCanvasCategoryShowDimmed);
   const setCanvasEntityShowDimmed = useUIStore(s => s.setCanvasEntityShowDimmed);
   const setCanvasFilter = useUIStore(s => s.setCanvasFilter);
+  const setCanvasRebuildPerView = useUIStore(s => s.setCanvasRebuildPerView);
   const resetCanvasLayerState = useUIStore(s => s.resetCanvasLayerState);
   const activeDbId = useDatabasesStore(s => s.activeId);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -184,6 +186,7 @@ export function SigmaCanvas({
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
   const [data, setData] = useState<GlobalCanvasData | null>(null);
+  const [rebuildData, setRebuildData] = useState<GlobalCanvasData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<CanvasTheme>(DEFAULT_THEME);
@@ -198,6 +201,7 @@ export function SigmaCanvas({
   const canvasEntityShowDimmedRef = useRef(canvasEntityShowDimmed);
   const canvasFilterRef = useRef(canvasFilter);
   const visibilityRef = useRef<Map<string, NodeVisibility>>(new Map());
+  const rebuildGenRef = useRef(0);
   const edgeAnimProgress = useRef(0); // 0 = invisible, 1 = fully visible
   const themeRef = useRef(theme);
   themeRef.current = theme;
@@ -248,6 +252,7 @@ export function SigmaCanvas({
       .then((result) => {
         if (!cancelled) {
           setData(result);
+          setRebuildData(null);
           setIsLoading(false);
         }
       })
@@ -260,6 +265,69 @@ export function SigmaCanvas({
 
     return () => { cancelled = true; };
   }, [activeDbId]);
+
+  const visibleAtomIds = useMemo(() => {
+    if (!data || isPreview) return [];
+    return data.atoms
+      .filter(atom => resolveNodeVisibility(
+        atom.tag_ids,
+        atom.entity_ids,
+        atom.atom_id.startsWith('category:'),
+        canvasCategoryVisible,
+        canvasEntityVisible,
+        canvasCategoryShowDimmed,
+        canvasEntityShowDimmed,
+        canvasFilter
+      ) !== 'hidden')
+      .map(atom => atom.atom_id)
+      .sort();
+  }, [
+    data,
+    isPreview,
+    canvasCategoryVisible,
+    canvasEntityVisible,
+    canvasCategoryShowDimmed,
+    canvasEntityShowDimmed,
+    canvasFilter,
+  ]);
+  const visibleSetKey = visibleAtomIds.join('\0');
+
+  useEffect(() => {
+    const gen = ++rebuildGenRef.current;
+    if (
+      isPreview ||
+      !data ||
+      !canvasRebuildPerView ||
+      canvasCategoryShowDimmed ||
+      canvasEntityShowDimmed ||
+      visibleAtomIds.length === 0 ||
+      visibleAtomIds.length === data.atoms.length
+    ) {
+      setRebuildData(null);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      rebuildCanvas(visibleAtomIds)
+        .then(result => {
+          if (rebuildGenRef.current === gen) setRebuildData(result);
+        })
+        .catch(err => {
+          if (rebuildGenRef.current !== gen) return;
+          console.warn('Canvas rebuild failed; using full layout', err);
+          setRebuildData(null);
+        });
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    isPreview,
+    data,
+    canvasRebuildPerView,
+    canvasCategoryShowDimmed,
+    canvasEntityShowDimmed,
+    visibleSetKey,
+  ]);
 
   useEffect(() => {
     if (isPreview) return;
@@ -319,23 +387,24 @@ export function SigmaCanvas({
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !data || data.atoms.length === 0) return;
+    const renderData = rebuildData ?? data;
 
     // For an interactive preview, narrow the graph to the seed atoms plus
     // their 1-hop neighbors from the existing edge set. We reuse the global
     // PCA positions so the subset lands in the same region of space the user
     // would see if they zoomed there in the main canvas — the camera then
     // fits-to-bbox over just those nodes.
-    let atoms = data.atoms;
-    let edges = data.edges;
+    let atoms = renderData.atoms;
+    let edges = renderData.edges;
     if (filterAtomIds && filterAtomIds.length > 0) {
       const seeds = new Set(filterAtomIds);
       const included = new Set(seeds);
-      for (const edge of data.edges) {
+      for (const edge of renderData.edges) {
         if (seeds.has(edge.source)) included.add(edge.target);
         else if (seeds.has(edge.target)) included.add(edge.source);
       }
-      atoms = data.atoms.filter(a => included.has(a.atom_id));
-      edges = data.edges.filter(e => included.has(e.source) && included.has(e.target));
+      atoms = renderData.atoms.filter(a => included.has(a.atom_id));
+      edges = renderData.edges.filter(e => included.has(e.source) && included.has(e.target));
     }
     if (atoms.length === 0) return;
 
@@ -359,8 +428,8 @@ export function SigmaCanvas({
 
     // Build atom → cluster index map
     const atomCluster = new Map<string, number>();
-    for (let i = 0; i < data.clusters.length; i++) {
-      for (const atomId of data.clusters[i].atom_ids) {
+    for (let i = 0; i < renderData.clusters.length; i++) {
+      for (const atomId of renderData.clusters[i].atom_ids) {
         atomCluster.set(atomId, i);
       }
     }
@@ -600,7 +669,7 @@ export function SigmaCanvas({
 
       const sortedClusters = isInteractivePreview
         ? []
-        : [...data!.clusters].sort((a, b) => b.atom_count - a.atom_count);
+        : [...renderData.clusters].sort((a, b) => b.atom_count - a.atom_count);
       const maxClusterLabels = Math.max(4, Math.floor((width * height) / 40000));
       const clusterPad = 24;
       let clusterCount = 0;
@@ -1035,7 +1104,7 @@ export function SigmaCanvas({
       sigmaRef.current = null;
       graphRef.current = null;
     };
-  }, [data, isPreview, filterKey]); // intentionally exclude theme — handled below
+  }, [data, rebuildData, isPreview, filterKey]); // intentionally exclude theme — handled below
 
   // Update colors when theme changes (without recreating graph)
   useEffect(() => {
@@ -1284,6 +1353,16 @@ export function SigmaCanvas({
                     className="h-3 w-3 accent-white/70"
                   />
                   <span>dim entities</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[12px] text-white/60">
+                  <input
+                    type="checkbox"
+                    checked={canvasRebuildPerView}
+                    disabled={canvasCategoryShowDimmed || canvasEntityShowDimmed}
+                    onChange={(e) => setCanvasRebuildPerView(e.target.checked)}
+                    className="h-3 w-3 accent-white/70 disabled:opacity-40"
+                  />
+                  <span>rebuild per view</span>
                 </label>
               </div>
             </details>

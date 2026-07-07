@@ -76,7 +76,7 @@ pub use tokens::ApiTokenInfo;
 
 use chrono::Utc;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -2679,6 +2679,17 @@ impl AtomicCore {
         let data = Self::compute_canvas_data_impl(&self.storage).await?;
         self.canvas_cache.set(Arc::clone(&data));
         Ok(data)
+    }
+
+    /// Project only the requested atoms. Used by the canvas "rebuild per view"
+    /// toggle; it reuses Atomic's normal PCA path without touching cached data.
+    pub async fn project_atom_subset(
+        &self,
+        atom_ids: &HashSet<String>,
+    ) -> Result<Vec<(String, f64, f64)>, AtomicCoreError> {
+        let mut embeddings = self.storage.get_all_embedding_pairs_sync().await?;
+        embeddings.retain(|(id, _)| atom_ids.contains(id));
+        Ok(projection::compute_2d_projection(&embeddings))
     }
 
     /// The pure compute path for the global canvas payload. No cache
