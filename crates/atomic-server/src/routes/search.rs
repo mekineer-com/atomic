@@ -136,12 +136,98 @@ pub async fn find_similar(
     query: web::Query<FindSimilarQuery>,
 ) -> HttpResponse {
     let atom_id = path.into_inner();
-    if state.memu_session.is_some() && memu_proxy::is_memu_id(&atom_id) {
-        return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
-    }
     let limit = query.limit.unwrap_or(10);
     let threshold = query.threshold.unwrap_or(0.7);
+    if let Some(config) = state.memu_session.clone() {
+        if !memu_proxy::is_memu_id(&atom_id) {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "memU atom not found"}));
+        }
+        return memu_find_similar(config, &atom_id, limit, threshold).await;
+    }
     ok_or_error(db.0.find_similar(&atom_id, limit, threshold).await)
+}
+
+async fn memu_find_similar(
+    config: crate::state::MemuSessionConfig,
+    atom_id: &str,
+    limit: i32,
+    threshold: f32,
+) -> HttpResponse {
+    let client = match memu_proxy::client() {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let mut params = vec![
+        ("depth", "1".to_string()),
+        ("min_similarity", threshold.to_string()),
+    ];
+    params.extend(
+        memu_proxy::scope_query(&config)
+            .into_iter()
+            .map(|(key, value)| (key, value.to_string())),
+    );
+    let body = match memu_proxy::memu_json(
+        client
+            .get(format!(
+                "{}/integration/atomic/neighborhood/{}",
+                config.base_url, atom_id
+            ))
+            .query(&params),
+        "memU similar atoms",
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let mut scores = std::collections::HashMap::new();
+    for edge in body["edges"].as_array().into_iter().flatten() {
+        let source = edge["source_id"].as_str().unwrap_or_default();
+        let target = edge["target_id"].as_str().unwrap_or_default();
+        let other = if source == atom_id {
+            target
+        } else if target == atom_id {
+            source
+        } else {
+            continue;
+        };
+        scores.insert(
+            other.to_string(),
+            edge["similarity_score"]
+                .as_f64()
+                .or_else(|| edge["strength"].as_f64())
+                .unwrap_or(1.0) as f32,
+        );
+    }
+    let atoms: Vec<serde_json::Value> = body["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|node| node["id"].as_str() != Some(atom_id))
+        .take(limit.max(1) as usize)
+        .map(|node| {
+            let mut atom = memu_proxy::atom_from_node(node);
+            if let Some(map) = atom.as_object_mut() {
+                map.insert(
+                    "similarity_score".to_string(),
+                    serde_json::json!(
+                        scores
+                            .get(node["id"].as_str().unwrap_or_default())
+                            .copied()
+                            .unwrap_or(1.0)
+                    ),
+                );
+                map.insert(
+                    "matching_chunk_content".to_string(),
+                    serde_json::json!(node["summary"].as_str().unwrap_or_default()),
+                );
+                map.insert("matching_chunk_index".to_string(), serde_json::json!(0));
+            }
+            atom
+        })
+        .collect();
+    HttpResponse::Ok().json(atoms)
 }
 
 async fn memu_search(

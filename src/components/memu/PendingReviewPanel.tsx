@@ -98,9 +98,9 @@ function MemoryRow({ item, onDone, onError }: { item: MemoryReview; onDone: () =
       <div className="mb-2 text-xs text-[var(--color-text-tertiary)]">{item.category_names?.join(', ')}</div>
       <textarea className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       <div className="mt-2 flex gap-2">
-        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white" onClick={() => run(() => getTransport().invoke('approve_memory', { id: item.id }))}>Approve</button>
-        <button disabled={busy} className="rounded border border-[var(--color-border)] px-3 py-1 text-sm" onClick={() => run(() => getTransport().invoke('update_memory_summary', { id: item.id, summary }))}>Save + approve</button>
-        <button disabled={busy} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
+        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('approve_memory', { id: item.id }))}>Approve</button>
+        <button disabled={busy} className="rounded border border-[var(--color-border)] px-3 py-1 text-sm transition-colors enabled:hover:border-[var(--color-accent)] enabled:hover:text-[var(--color-accent)] enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('update_memory_summary', { id: item.id, summary }))}>Save + approve</button>
+        <button disabled={busy} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
       </div>
     </article>
   );
@@ -129,8 +129,8 @@ function CategoryRow({ category, onDone, onError }: { category: CategoryReview; 
         <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       <div className="mt-2 flex gap-2">
-        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white" onClick={() => run(() => getTransport().invoke('approve_category', { id: category.id }))}>Approve</button>
-        <button disabled={busy} className="rounded border border-[var(--color-border)] px-3 py-1 text-sm" onClick={() => run(() => getTransport().invoke('update_category_summary', { id: category.id, summary }))}>Save + approve</button>
+        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('approve_category', { id: category.id }))}>Approve</button>
+        <button disabled={busy} className="rounded border border-[var(--color-border)] px-3 py-1 text-sm transition-colors enabled:hover:border-[var(--color-accent)] enabled:hover:text-[var(--color-accent)] enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('update_category_summary', { id: category.id, summary }))}>Save + approve</button>
         <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>
       </div>
     </article>

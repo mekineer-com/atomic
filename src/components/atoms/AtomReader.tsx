@@ -451,14 +451,14 @@ function AtomReaderContent({
                       <button
                         onClick={() => void saveMemuSummary()}
                         disabled={memuStatus !== 'idle' || memuSummary === atom.content}
-                        className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white disabled:cursor-not-allowed disabled:opacity-60"
+                        className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]"
                       >
                         {memuStatus === 'saving' ? 'Saving...' : 'Save + approve'}
                       </button>
                       <button
                         onClick={() => void approveMemuSummary()}
                         disabled={memuStatus !== 'idle' || memuSummary !== atom.content}
-                        className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                        className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm transition-colors enabled:hover:border-[var(--color-accent)] enabled:hover:text-[var(--color-accent)] enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]"
                       >
                         Approve current
                       </button>
@@ -466,7 +466,7 @@ function AtomReaderContent({
                         <button
                           onClick={() => setShowDeleteModal(true)}
                           disabled={memuStatus !== 'idle'}
-                          className="rounded border border-red-500/50 px-3 py-1.5 text-sm text-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                          className="rounded border border-red-500/50 px-3 py-1.5 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]"
                         >
                           Delete
                         </button>
