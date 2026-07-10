@@ -42,9 +42,9 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   const reportError = (err: unknown) => setError(String(err));
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
+    <div className="fixed inset-0 z-50 bg-black" onClick={onClose}>
       <aside
-        className="h-full w-full max-w-2xl overflow-y-auto border-l border-[var(--color-border)] bg-[var(--color-bg-main)] p-4 shadow-2xl"
+        className="h-full w-full overflow-y-auto bg-[var(--color-bg-main)] p-4"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -61,18 +61,21 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
           <p className="text-sm text-[var(--color-text-secondary)]">Nothing pending.</p>
         )}
 
-        <section className="space-y-3">
-          {reviews.items.map((item) => (
-            <MemoryRow key={item.id} item={item} onDone={() => removeMemory(item.id)} onError={reportError} />
-          ))}
-        </section>
+        <div className="grid gap-4 lg:grid-cols-[2fr_3fr]">
+          <section className="space-y-3">
+            <h3 className="font-medium text-[var(--color-text-primary)]">Memories</h3>
+            {reviews.items.map((item) => (
+              <MemoryRow key={item.id} item={item} onDone={() => removeMemory(item.id)} onError={reportError} />
+            ))}
+          </section>
 
-        {reviews.categories.length > 0 && <h3 className="mt-6 mb-3 font-medium text-[var(--color-text-primary)]">Categories</h3>}
-        <section className="space-y-3">
-          {reviews.categories.map((category) => (
-            <CategoryRow key={category.id} category={category} onDone={() => removeCategory(category.id)} onError={reportError} />
-          ))}
-        </section>
+          <section className="space-y-3">
+            <h3 className="font-medium text-[var(--color-text-primary)]">Categories</h3>
+            {reviews.categories.map((category) => (
+              <CategoryRow key={category.id} category={category} onDone={() => removeCategory(category.id)} onError={reportError} />
+            ))}
+          </section>
+        </div>
       </aside>
     </div>
   );
@@ -81,6 +84,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
 function MemoryRow({ item, onDone, onError }: { item: MemoryReview; onDone: () => void; onError: (err: unknown) => void }) {
   const [summary, setSummary] = useState(item.summary);
   const [busy, setBusy] = useState(false);
+  const edited = summary !== item.summary;
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -98,8 +102,7 @@ function MemoryRow({ item, onDone, onError }: { item: MemoryReview; onDone: () =
       <div className="mb-2 text-xs text-[var(--color-text-tertiary)]">{item.category_names?.join(', ')}</div>
       <textarea className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       <div className="mt-2 flex gap-2">
-        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('approve_memory', { id: item.id }))}>Approve</button>
-        <button disabled={busy} className="rounded border border-[var(--color-border)] px-3 py-1 text-sm transition-colors enabled:hover:border-[var(--color-accent)] enabled:hover:text-[var(--color-accent)] enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('update_memory_summary', { id: item.id, summary }))}>Save + approve</button>
+        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary } : { id: item.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
         <button disabled={busy} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
       </div>
     </article>
@@ -109,6 +112,7 @@ function MemoryRow({ item, onDone, onError }: { item: MemoryReview; onDone: () =
 function CategoryRow({ category, onDone, onError }: { category: CategoryReview; onDone: () => void; onError: (err: unknown) => void }) {
   const [summary, setSummary] = useState(category.summary);
   const [busy, setBusy] = useState(false);
+  const edited = summary !== category.summary;
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -129,8 +133,7 @@ function CategoryRow({ category, onDone, onError }: { category: CategoryReview; 
         <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       <div className="mt-2 flex gap-2">
-        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('approve_category', { id: category.id }))}>Approve</button>
-        <button disabled={busy} className="rounded border border-[var(--color-border)] px-3 py-1 text-sm transition-colors enabled:hover:border-[var(--color-accent)] enabled:hover:text-[var(--color-accent)] enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('update_category_summary', { id: category.id, summary }))}>Save + approve</button>
+        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_category_summary' : 'approve_category', edited ? { id: category.id, summary } : { id: category.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
         <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>
       </div>
     </article>
