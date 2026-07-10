@@ -17,7 +17,6 @@ async function clearStaleServiceWorkers() {
 clearStaleServiceWorkers()
   .catch((err) => console.warn('Stale service worker cleanup failed:', err))
   .then(initTransport)
-  .catch((err) => console.error('Transport init failed:', err))
   .then(() => {
     const app = (
       <ErrorBoundary>
@@ -28,4 +27,8 @@ clearStaleServiceWorkers()
     )
 
     ReactDOM.createRoot(document.getElementById('root')!).render(app)
+  })
+  .catch((err) => {
+    console.error('Transport init failed:', err)
+    document.getElementById('root')!.textContent = `Atomic failed to connect: ${String(err)}`
   })

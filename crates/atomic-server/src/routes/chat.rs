@@ -3,6 +3,7 @@
 use crate::db_extractor::Db;
 use crate::error::{ok_or_error, ApiErrorResponse};
 use crate::event_bridge::chat_event_callback;
+use crate::routes::memu_proxy::memu_error_text;
 use crate::state::{AppState, MemuSessionConfig};
 use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
@@ -246,7 +247,7 @@ async fn post_atomic_session_end(
         return Err(HttpResponse::build(
             actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY),
         )
-        .json(serde_json::json!({"error": body})));
+        .json(serde_json::json!({"error": memu_error_text(&body)})));
     }
     response.json::<serde_json::Value>().await.map_err(|e| {
         HttpResponse::BadGateway()
