@@ -186,7 +186,9 @@ fn rows_for_saved_history(rows: &[AtomicTranscriptRow], recap_instruction: &str)
             continue;
         }
         skip_next_assistant = false;
-        if row.role == "user" && row.content.trim().lines().next().unwrap_or("") == recap_instruction {
+        if row.role == "user"
+            && is_atomic_recap_prompt(row.content.trim().lines().next().unwrap_or(""), recap_instruction)
+        {
             skip_next_assistant = true;
             continue;
         }
@@ -195,11 +197,16 @@ fn rows_for_saved_history(rows: &[AtomicTranscriptRow], recap_instruction: &str)
     cleaned
 }
 
+fn is_atomic_recap_prompt(first_line: &str, recap_instruction: &str) -> bool {
+    first_line == recap_instruction
+        || first_line.starts_with("This Atomic session is ending. Write a recap of your activity")
+}
+
 fn existing_recap(conv: &atomic_core::ConversationWithMessages, recap_instruction: &str) -> Option<String> {
     let messages = &conv.messages;
     for (idx, message) in messages.iter().enumerate().rev() {
         let first_line = message.message.content.trim().lines().next().unwrap_or("");
-        if message.message.role == "user" && first_line == recap_instruction {
+        if message.message.role == "user" && is_atomic_recap_prompt(first_line, recap_instruction) {
             let assistant_idx = messages
                 .iter()
                 .enumerate()
