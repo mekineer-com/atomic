@@ -489,7 +489,7 @@ pub async fn end_memu_session(
     let mut recap = existing_recap(&conv, &recap_instruction);
 
     if recap.is_none() && has_user_assistant_interchange(&rows) {
-        let mut transcript_before_recap = std::mem::take(&mut rows);
+        let transcript_before_recap = std::mem::take(&mut rows);
         let settings = match fetch_atomic_chat_profile(&memu_session).await {
             Ok(settings) => settings,
             Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
@@ -517,7 +517,7 @@ pub async fn end_memu_session(
             Err(e) => return crate::error::error_response(e),
         };
         recap = existing_recap(&conv, &recap_instruction);
-        rows = rows_for_saved_history(&transcript_before_recap, &recap_instruction);
+        rows = transcript_before_recap;
     }
     rows = rows_for_saved_history(&rows, &recap_instruction);
 
