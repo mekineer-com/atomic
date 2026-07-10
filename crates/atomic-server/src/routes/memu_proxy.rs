@@ -98,6 +98,8 @@ pub fn atom_from_node(node: &Value) -> Value {
         "published_at": node["happened_at"].as_str(),
         "created_at": node["created_at"].as_str().unwrap_or(timestamp),
         "updated_at": timestamp,
+        "approved_at": node["approved_at"].as_str(),
+        "approved_summary": node["approved_summary"].as_str(),
         "embedding_status": "complete",
         "tagging_status": "skipped",
         "embedding_error": null,

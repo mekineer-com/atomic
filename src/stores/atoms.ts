@@ -14,6 +14,8 @@ export interface Atom {
   published_at: string | null;
   created_at: string;
   updated_at: string;
+  approved_at?: string | null;
+  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   /// Discriminator added in phase-1 of the reports work. `captured`
@@ -43,6 +45,8 @@ export interface AtomSummary {
   published_at: string | null;
   created_at: string;
   updated_at: string;
+  approved_at?: string | null;
+  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
@@ -67,6 +71,8 @@ export interface SemanticSearchResult {
   published_at: string | null;
   created_at: string;
   updated_at: string;
+  approved_at?: string | null;
+  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
@@ -85,6 +91,8 @@ export interface SimilarAtomResult {
   published_at: string | null;
   created_at: string;
   updated_at: string;
+  approved_at?: string | null;
+  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
@@ -186,6 +194,8 @@ function toSummary(atom: AtomWithTags): AtomSummary {
     published_at: atom.published_at,
     created_at: atom.created_at,
     updated_at: atom.updated_at,
+    approved_at: atom.approved_at,
+    approved_summary: atom.approved_summary,
     embedding_status: atom.embedding_status,
     tagging_status: atom.tagging_status,
     tags: atom.tags,

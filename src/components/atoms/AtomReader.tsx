@@ -210,6 +210,14 @@ function AtomReaderContent({
   const [memuSummary, setMemuSummary] = useState(atom.content);
   const [memuStatus, setMemuStatus] = useState<'idle' | 'saving'>('idle');
   const [memuError, setMemuError] = useState<string | null>(null);
+  const memuSummaryEdited = memuSummary !== atom.content;
+  const memuSummaryApproved = isMemuMemory
+    ? Boolean(atom.approved_at)
+    : isMemuCategory && atom.approved_summary === atom.content;
+  const memuPrimaryDisabled = memuStatus !== 'idle' || (memuSummaryApproved && !memuSummaryEdited);
+  const memuPrimaryLabel = memuStatus === 'saving'
+    ? 'Saving...'
+    : (memuSummaryApproved ? 'Save' : (memuSummaryEdited ? 'Save + approve' : 'Approve'));
 
   const {
     editContent, editSourceUrl, editTags, saveStatus,
@@ -237,16 +245,21 @@ function AtomReaderContent({
         isMemuMemory ? 'update_memory_summary' : 'update_category_summary',
         { id: atom.id, summary: memuSummary },
       );
-      const updated = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atom.id });
-      if (updated) {
-        onAtomUpdated?.(updated);
-      }
+      const now = new Date().toISOString();
+      onAtomUpdated?.({
+        ...atom,
+        content: memuSummary,
+        snippet: memuSummary,
+        updated_at: now,
+        approved_at: isMemuMemory ? (atom.approved_at ?? now) : atom.approved_at,
+        approved_summary: isMemuCategory ? memuSummary : atom.approved_summary,
+      });
     } catch (error) {
       setMemuError(String(error));
     } finally {
       setMemuStatus('idle');
     }
-  }, [atom.id, isMemuCategory, isMemuMemory, memuSummary, onAtomUpdated]);
+  }, [atom, isMemuCategory, isMemuMemory, memuSummary, onAtomUpdated]);
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -257,16 +270,17 @@ function AtomReaderContent({
         isMemuMemory ? 'approve_memory' : 'approve_category',
         { id: atom.id },
       );
-      const updated = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atom.id });
-      if (updated) {
-        onAtomUpdated?.(updated);
-      }
+      onAtomUpdated?.({
+        ...atom,
+        approved_at: isMemuMemory ? (atom.approved_at ?? new Date().toISOString()) : atom.approved_at,
+        approved_summary: isMemuCategory ? atom.content : atom.approved_summary,
+      });
     } catch (error) {
       setMemuError(String(error));
     } finally {
       setMemuStatus('idle');
     }
-  }, [atom.id, isMemuCategory, isMemuMemory, onAtomUpdated]);
+  }, [atom, isMemuCategory, isMemuMemory, onAtomUpdated]);
 
   useEffect(() => {
     setReaderEditState(Boolean(initialEditing), saveStatus);
@@ -320,9 +334,7 @@ function AtomReaderContent({
 
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        void (isMemuAtom
-          ? (memuSummary === atom.content ? approveMemuSummary() : saveMemuSummary())
-          : saveNow());
+        void (isMemuAtom ? (memuSummaryEdited ? saveMemuSummary() : (!memuSummaryApproved && approveMemuSummary())) : saveNow());
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
@@ -340,7 +352,7 @@ function AtomReaderContent({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [approveMemuSummary, atom.content, flushDraft, isMemuAtom, memuSummary, onDismiss, saveMemuSummary, saveNow, showDeleteModal]);
+  }, [approveMemuSummary, flushDraft, isMemuAtom, memuSummaryApproved, memuSummaryEdited, onDismiss, saveMemuSummary, saveNow, showDeleteModal]);
 
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {
@@ -450,18 +462,11 @@ function AtomReaderContent({
                     )}
                     <div className="flex flex-wrap gap-2">
                       <button
-                        onClick={() => void saveMemuSummary()}
-                        disabled={memuStatus !== 'idle' || memuSummary === atom.content}
+                        onClick={() => void (memuSummaryEdited ? saveMemuSummary() : approveMemuSummary())}
+                        disabled={memuPrimaryDisabled}
                         className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]"
                       >
-                        {memuStatus === 'saving' ? 'Saving...' : 'Save + approve'}
-                      </button>
-                      <button
-                        onClick={() => void approveMemuSummary()}
-                        disabled={memuStatus !== 'idle' || memuSummary !== atom.content}
-                        className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm transition-colors enabled:hover:border-[var(--color-accent)] enabled:hover:text-[var(--color-accent)] enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]"
-                      >
-                        Approve current
+                        {memuPrimaryLabel}
                       </button>
                       {isMemuMemory ? (
                         <button

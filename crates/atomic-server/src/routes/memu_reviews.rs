@@ -70,14 +70,15 @@ async fn approve(state: web::Data<AppState>, kind: &str, id: &str) -> HttpRespon
 }
 
 fn updated_atom_response(state: &AppState, body: Value) -> HttpResponse {
+    let atom_value = memu_proxy::atom_from_node(&body);
     if memu_proxy::is_memu_id(body["id"].as_str().unwrap_or_default()) {
         if let Ok(atom) =
-            serde_json::from_value::<atomic_core::AtomWithTags>(memu_proxy::atom_from_node(&body))
+            serde_json::from_value::<atomic_core::AtomWithTags>(atom_value.clone())
         {
             let _ = state.event_tx.send(ServerEvent::AtomUpdated { atom });
         }
     }
-    HttpResponse::Ok().json(body)
+    HttpResponse::Ok().json(atom_value)
 }
 
 pub async fn update_memory(
