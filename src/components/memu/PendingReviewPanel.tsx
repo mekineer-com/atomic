@@ -9,10 +9,13 @@ type MemoryReview = {
   similarity?: number;
 };
 
-const CLUSTER_COLORS = ['border-l-amber-500', 'border-l-sky-500'];
+const CLUSTER_COLORS = [
+  { bar: '#f59e0b', badgeBg: 'rgba(245, 158, 11, 0.2)', badgeText: '#fcd34d' },
+  { bar: '#0ea5e9', badgeBg: 'rgba(14, 165, 233, 0.2)', badgeText: '#7dd3fc' },
+];
 
 /** Stable cluster color: same accent for all members of a cluster. */
-function clusterColorClass(item: MemoryReview, items: MemoryReview[]): string | null {
+function clusterColorClass(item: MemoryReview, items: MemoryReview[]): (typeof CLUSTER_COLORS)[number] | null {
   if (!item.similar_to?.length) return null;
   const clusterIds = [item.id, ...item.similar_to].sort();
   const clusterKey = clusterIds[0];
@@ -112,7 +115,7 @@ function MemoryRow({
   onError,
 }: {
   item: MemoryReview;
-  accentClass: string | null;
+  accentClass: (typeof CLUSTER_COLORS)[number] | null;
   onDone: () => Promise<void>;
   onError: (err: unknown) => void;
 }) {
@@ -132,11 +135,17 @@ function MemoryRow({
   };
 
   return (
-    <article className={`rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 ${accentClass ? `border-l-4 ${accentClass}` : ''}`}>
+    <article
+      className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3"
+      style={accentClass ? { borderLeft: `4px solid ${accentClass.bar}` } : undefined}
+    >
       <div className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
         <span>{item.category_names?.join(', ')}</span>
         {item.similarity != null && (
-          <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+          <span
+            className="rounded-full px-2 py-0.5 font-medium"
+            style={accentClass ? { backgroundColor: accentClass.badgeBg, color: accentClass.badgeText } : undefined}
+          >
             ≈ {Math.round(item.similarity * 100)}%
           </span>
         )}
