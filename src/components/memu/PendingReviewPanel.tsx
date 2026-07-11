@@ -60,6 +60,21 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   if (!isOpen) return null;
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
+  // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
+  // mates) and strip dead similar_to references so surviving badges stay honest.
+  const removeMemory = (id: string) =>
+    setReviews((r) => ({
+      ...r,
+      items: r.items
+        .filter((item) => item.id !== id)
+        .map((item) => {
+          if (!item.similar_to?.includes(id)) return item;
+          const rest = item.similar_to.filter((s) => s !== id);
+          return rest.length
+            ? { ...item, similar_to: rest }
+            : { ...item, similar_to: undefined, similarity: undefined };
+        }),
+    }));
   const reportError = (err: unknown) => setError(String(err));
 
   return (
@@ -90,7 +105,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
                 key={item.id}
                 item={item}
                 accentClass={clusterColorClass(item, reviews.items)}
-                onDone={loadReviews}
+                onDone={() => removeMemory(item.id)}
                 onError={reportError}
               />
             ))}
@@ -116,7 +131,7 @@ function MemoryRow({
 }: {
   item: MemoryReview;
   accentClass: (typeof CLUSTER_COLORS)[number] | null;
-  onDone: () => Promise<void>;
+  onDone: () => void;
   onError: (err: unknown) => void;
 }) {
   const [summary, setSummary] = useState(item.summary);
