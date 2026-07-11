@@ -14,13 +14,18 @@ const CLUSTER_COLORS = [
   { bar: '#0ea5e9', badgeBg: 'rgba(14, 165, 233, 0.2)', badgeText: '#7dd3fc' },
 ];
 
-/** Stable cluster color: same accent for all members of a cluster. */
-function clusterColorClass(item: MemoryReview, items: MemoryReview[]): (typeof CLUSTER_COLORS)[number] | null {
-  if (!item.similar_to?.length) return null;
-  const clusterIds = [item.id, ...item.similar_to].sort();
-  const clusterKey = clusterIds[0];
-  const clusterIndex = [...new Set(items.filter((i) => i.similar_to?.length).map((i) => [i.id, ...(i.similar_to ?? [])].sort()[0]))].indexOf(clusterKey);
-  return CLUSTER_COLORS[clusterIndex % CLUSTER_COLORS.length];
+/** Assign each clustered item a color index once per fetch; removals never re-deal colors. */
+function assignClusterColors(items: MemoryReview[]): Record<string, number> {
+  const colorByKey: Record<string, number> = {};
+  const colorByItem: Record<string, number> = {};
+  let next = 0;
+  for (const item of items) {
+    if (!item.similar_to?.length) continue;
+    const clusterKey = [item.id, ...item.similar_to].sort()[0];
+    if (!(clusterKey in colorByKey)) colorByKey[clusterKey] = next++ % CLUSTER_COLORS.length;
+    colorByItem[item.id] = colorByKey[clusterKey];
+  }
+  return colorByItem;
 }
 
 type CategoryReview = {
@@ -37,6 +42,7 @@ type PendingReviews = {
 
 export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
   const [reviews, setReviews] = useState<PendingReviews>({ items: [], categories: [] });
+  const [clusterColors, setClusterColors] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -44,7 +50,9 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
     setLoading(true);
     setError(null);
     try {
-      setReviews(await getTransport().invoke<PendingReviews>('list_pending_memu_reviews'));
+      const fetched = await getTransport().invoke<PendingReviews>('list_pending_memu_reviews');
+      setReviews(fetched);
+      setClusterColors(assignClusterColors(fetched.items));
     } catch (err) {
       setError(String(err));
     } finally {
@@ -61,20 +69,10 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
-  // mates) and strip dead similar_to references so surviving badges stay honest.
+  // mates). Survivors keep their badge/color even when the last cluster mate goes —
+  // consistent visuals beat live-updating cluster membership mid-review.
   const removeMemory = (id: string) =>
-    setReviews((r) => ({
-      ...r,
-      items: r.items
-        .filter((item) => item.id !== id)
-        .map((item) => {
-          if (!item.similar_to?.includes(id)) return item;
-          const rest = item.similar_to.filter((s) => s !== id);
-          return rest.length
-            ? { ...item, similar_to: rest }
-            : { ...item, similar_to: undefined, similarity: undefined };
-        }),
-    }));
+    setReviews((r) => ({ ...r, items: r.items.filter((item) => item.id !== id) }));
   const reportError = (err: unknown) => setError(String(err));
 
   return (
@@ -104,7 +102,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
               <MemoryRow
                 key={item.id}
                 item={item}
-                accentClass={clusterColorClass(item, reviews.items)}
+                accentClass={item.similar_to?.length && clusterColors[item.id] != null ? CLUSTER_COLORS[clusterColors[item.id]] : null}
                 onDone={() => removeMemory(item.id)}
                 onError={reportError}
               />
