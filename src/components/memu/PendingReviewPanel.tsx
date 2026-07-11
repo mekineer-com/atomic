@@ -1,11 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { getTransport } from '../../lib/transport';
 
 type MemoryReview = {
   id: string;
   summary: string;
   category_names?: string[];
+  similar_to?: string[];
+  similarity?: number;
 };
+
+const CLUSTER_COLORS = ['border-l-amber-500', 'border-l-sky-500'];
+
+/** Stable cluster color: same accent for all members of a cluster. */
+function clusterColorClass(item: MemoryReview, items: MemoryReview[]): string | null {
+  if (!item.similar_to?.length) return null;
+  const clusterIds = [item.id, ...item.similar_to].sort();
+  const clusterKey = clusterIds[0];
+  const clusterIndex = [...new Set(items.filter((i) => i.similar_to?.length).map((i) => [i.id, ...(i.similar_to ?? [])].sort()[0]))].indexOf(clusterKey);
+  return CLUSTER_COLORS[clusterIndex % CLUSTER_COLORS.length];
+}
 
 type CategoryReview = {
   id: string;
@@ -24,20 +37,25 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (!isOpen) return;
+  const loadReviews = useCallback(async () => {
     setLoading(true);
     setError(null);
-    getTransport()
-      .invoke<PendingReviews>('list_pending_memu_reviews')
-      .then(setReviews)
-      .catch((err) => setError(String(err)))
-      .finally(() => setLoading(false));
-  }, [isOpen]);
+    try {
+      setReviews(await getTransport().invoke<PendingReviews>('list_pending_memu_reviews'));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    void loadReviews();
+  }, [isOpen, loadReviews]);
 
   if (!isOpen) return null;
 
-  const removeMemory = (id: string) => setReviews((r) => ({ ...r, items: r.items.filter((item) => item.id !== id) }));
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   const reportError = (err: unknown) => setError(String(err));
 
@@ -65,7 +83,13 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
           <section className="space-y-3">
             <h3 className="font-medium text-[var(--color-text-primary)]">Memories</h3>
             {reviews.items.map((item) => (
-              <MemoryRow key={item.id} item={item} onDone={() => removeMemory(item.id)} onError={reportError} />
+              <MemoryRow
+                key={item.id}
+                item={item}
+                accentClass={clusterColorClass(item, reviews.items)}
+                onDone={loadReviews}
+                onError={reportError}
+              />
             ))}
           </section>
 
@@ -81,7 +105,17 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   );
 }
 
-function MemoryRow({ item, onDone, onError }: { item: MemoryReview; onDone: () => void; onError: (err: unknown) => void }) {
+function MemoryRow({
+  item,
+  accentClass,
+  onDone,
+  onError,
+}: {
+  item: MemoryReview;
+  accentClass: string | null;
+  onDone: () => Promise<void>;
+  onError: (err: unknown) => void;
+}) {
   const [summary, setSummary] = useState(item.summary);
   const [busy, setBusy] = useState(false);
   const edited = summary !== item.summary;
@@ -89,7 +123,7 @@ function MemoryRow({ item, onDone, onError }: { item: MemoryReview; onDone: () =
     setBusy(true);
     try {
       await fn();
-      onDone();
+      await onDone();
     } catch (err) {
       onError(err);
     } finally {
@@ -98,8 +132,15 @@ function MemoryRow({ item, onDone, onError }: { item: MemoryReview; onDone: () =
   };
 
   return (
-    <article className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
-      <div className="mb-2 text-xs text-[var(--color-text-tertiary)]">{item.category_names?.join(', ')}</div>
+    <article className={`rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 ${accentClass ? `border-l-4 ${accentClass}` : ''}`}>
+      <div className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+        <span>{item.category_names?.join(', ')}</span>
+        {item.similarity != null && (
+          <span className="rounded-full bg-[var(--color-bg-hover)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+            ≈ {Math.round(item.similarity * 100)}%
+          </span>
+        )}
+      </div>
       <textarea className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       <div className="mt-2 flex gap-2">
         <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary } : { id: item.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
