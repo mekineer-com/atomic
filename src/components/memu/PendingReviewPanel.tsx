@@ -192,7 +192,7 @@ function CategoryRow({ category, onDone, onError }: { category: CategoryReview; 
     <article className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
       <div className="mb-2 text-sm font-medium">{category.label ?? category.id}</div>
       <div className="grid gap-2 md:grid-cols-2">
-        <pre className="min-h-28 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 text-xs text-[var(--color-text-secondary)]">{category.approved_summary ?? ''}</pre>
+        <pre className="min-h-28 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm text-[var(--color-text-secondary)]">{category.approved_summary ?? ''}</pre>
         <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       <div className="mt-2 flex gap-2">
