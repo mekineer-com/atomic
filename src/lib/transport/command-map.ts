@@ -121,6 +121,8 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   approve_category: {
     method: 'POST',
     path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.id as string)}/approve`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ displayed_summary: a.displayed_summary, summaries_revision: a.summaries_revision }),
   },
   update_memory_summary: {
     method: 'PATCH',
@@ -132,7 +134,19 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'PATCH',
     path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.id as string)}`,
     argsMode: 'body',
-    transformArgs: (a) => ({ summary: a.summary }),
+    transformArgs: (a) => ({ summary: a.summary, displayed_summary: a.displayed_summary, summaries_revision: a.summaries_revision }),
+  },
+  approve_soul_summary: {
+    method: 'POST',
+    path: (a) => `/api/memu/reviews/soul-summary/${encodeURIComponent(a.kind as string)}/approve`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ displayed_summary: a.displayed_summary, summaries_revision: a.summaries_revision }),
+  },
+  update_soul_summary: {
+    method: 'PATCH',
+    path: (a) => `/api/memu/reviews/soul-summary/${encodeURIComponent(a.kind as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ summary: a.summary, displayed_summary: a.displayed_summary, summaries_revision: a.summaries_revision }),
   },
   delete_memory: {
     method: 'DELETE',

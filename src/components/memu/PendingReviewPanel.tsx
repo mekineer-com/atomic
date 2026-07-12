@@ -35,16 +35,29 @@ type CategoryReview = {
   label?: string;
 };
 
+type SoulSummaryReview = CategoryReview & {
+  kind: string;
+};
+
+type SummaryMutationResponse = CategoryReview & {
+  kind?: string;
+  summaries_revision: number;
+};
+
 type PendingReviews = {
   items: MemoryReview[];
   categories: CategoryReview[];
+  soul_summaries: SoulSummaryReview[];
+  summaries_revision: number;
 };
 
 export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
-  const [reviews, setReviews] = useState<PendingReviews>({ items: [], categories: [] });
+  const [reviews, setReviews] = useState<PendingReviews>({ items: [], categories: [], soul_summaries: [], summaries_revision: 0 });
   const [clusterColors, setClusterColors] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [summariesStale, setSummariesStale] = useState(false);
 
   const loadReviews = useCallback(async () => {
     setLoading(true);
@@ -53,8 +66,11 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
       const fetched = await getTransport().invoke<PendingReviews>('list_pending_memu_reviews');
       setReviews(fetched);
       setClusterColors(assignClusterColors(fetched.items));
+      setLoadFailed(false);
+      setSummariesStale(false);
     } catch (err) {
       setError(String(err));
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -68,6 +84,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   if (!isOpen) return null;
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
+  const summaryActionsDisabled = loading || loadFailed || summariesStale;
   // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
   // mates). Survivors keep their badge/color even when the last cluster mate goes —
   // consistent visuals beat live-updating cluster membership mid-review.
@@ -91,7 +108,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
 
         {loading && <p className="text-sm text-[var(--color-text-secondary)]">Loading...</p>}
         {error && <p className="mb-3 rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{error}</p>}
-        {!loading && reviews.items.length === 0 && reviews.categories.length === 0 && (
+        {!loading && reviews.items.length === 0 && reviews.categories.length === 0 && reviews.soul_summaries.length === 0 && (
           <p className="text-sm text-[var(--color-text-secondary)]">Nothing pending.</p>
         )}
 
@@ -112,7 +129,37 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
           <section className="space-y-3">
             <h3 className="font-medium text-[var(--color-text-primary)]">Categories</h3>
             {reviews.categories.map((category) => (
-              <CategoryRow key={category.id} category={category} onDone={() => removeCategory(category.id)} onError={reportError} />
+              <GeneratedSummaryRow
+                key={category.id}
+                review={category}
+                kind="category"
+                revision={reviews.summaries_revision}
+                disabled={summaryActionsDisabled}
+                stale={summariesStale}
+                onStale={() => setSummariesStale(true)}
+                onDone={(result) => {
+                  removeCategory(category.id);
+                  setReviews((r) => ({ ...r, summaries_revision: result.summaries_revision }));
+                }}
+                onError={reportError}
+              />
+            ))}
+            {reviews.soul_summaries.map((summary) => (
+              <GeneratedSummaryRow
+                key={summary.id}
+                review={summary}
+                kind="soul"
+                revision={reviews.summaries_revision}
+                disabled={summaryActionsDisabled}
+                stale={summariesStale}
+                onStale={() => setSummariesStale(true)}
+                onDone={(result) => setReviews((r) => ({
+                  ...r,
+                  summaries_revision: result.summaries_revision,
+                  soul_summaries: r.soul_summaries.map((row) => row.kind === summary.kind ? { ...row, ...result, kind: summary.kind } : row),
+                }))}
+                onError={reportError}
+              />
             ))}
           </section>
         </div>
@@ -172,17 +219,45 @@ function MemoryRow({
   );
 }
 
-function CategoryRow({ category, onDone, onError }: { category: CategoryReview; onDone: () => void; onError: (err: unknown) => void }) {
-  const [summary, setSummary] = useState(category.summary);
+function GeneratedSummaryRow({
+  review,
+  kind,
+  revision,
+  disabled,
+  stale,
+  onStale,
+  onDone,
+  onError,
+}: {
+  review: CategoryReview | SoulSummaryReview;
+  kind: 'category' | 'soul';
+  revision: number;
+  disabled: boolean;
+  stale: boolean;
+  onStale: () => void;
+  onDone: (result: SummaryMutationResponse) => void;
+  onError: (err: unknown) => void;
+}) {
+  const [summary, setSummary] = useState(review.summary);
   const [busy, setBusy] = useState(false);
-  const edited = summary !== category.summary;
-  const run = async (fn: () => Promise<unknown>) => {
+  const edited = summary !== review.summary;
+  const run = async () => {
     setBusy(true);
     try {
-      await fn();
-      onDone();
+      const command = kind === 'category'
+        ? (edited ? 'update_category_summary' : 'approve_category')
+        : (edited ? 'update_soul_summary' : 'approve_soul_summary');
+      const target = kind === 'category' ? { id: review.id } : { kind: (review as SoulSummaryReview).kind };
+      const result = await getTransport().invoke<SummaryMutationResponse>(command, {
+        ...target,
+        ...(edited ? { summary } : {}),
+        displayed_summary: review.summary,
+        summaries_revision: revision,
+      });
+      onDone(result);
     } catch (err) {
-      onError(err);
+      if (String(err) === 'summary_snapshot_stale') onStale();
+      else onError(err);
     } finally {
       setBusy(false);
     }
@@ -190,13 +265,14 @@ function CategoryRow({ category, onDone, onError }: { category: CategoryReview; 
 
   return (
     <article className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
-      <div className="mb-2 text-sm font-medium">{category.label ?? category.id}</div>
+      {stale && <p className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-500">Summaries changed during a memorize cycle. Save any edits to another file, then refresh this page.</p>}
+      <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>
       <div className="grid gap-2 md:grid-cols-2">
-        <pre className="min-h-28 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm text-[var(--color-text-secondary)]">{category.approved_summary ?? ''}</pre>
+        <pre className="min-h-28 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm text-[var(--color-text-secondary)]">{review.approved_summary ?? ''}</pre>
         <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       <div className="mt-2 flex gap-2">
-        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_category_summary' : 'approve_category', edited ? { id: category.id, summary } : { id: category.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
+        <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>
         <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>
       </div>
     </article>

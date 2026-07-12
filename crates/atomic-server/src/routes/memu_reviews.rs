@@ -1,12 +1,24 @@
 use crate::routes::memu_proxy::{self, client, memu_json, session};
 use crate::state::{AppState, ServerEvent};
 use actix_web::{HttpResponse, web};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SummaryUpdate {
     pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summaries_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displayed_summary: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct SummaryGuard {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summaries_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displayed_summary: Option<String>,
 }
 
 pub async fn status(state: web::Data<AppState>) -> HttpResponse {
@@ -40,8 +52,19 @@ pub async fn approve_memory(state: web::Data<AppState>, path: web::Path<String>)
     approve(state, "memory", &path.into_inner()).await
 }
 
-pub async fn approve_category(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    approve(state, "category", &path.into_inner()).await
+pub async fn approve_category(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<SummaryGuard>,
+) -> HttpResponse {
+    approve_summary(
+        state,
+        "category",
+        &path.into_inner(),
+        body.into_inner(),
+        true,
+    )
+    .await
 }
 
 async fn approve(state: web::Data<AppState>, kind: &str, id: &str) -> HttpResponse {
@@ -70,13 +93,15 @@ async fn approve(state: web::Data<AppState>, kind: &str, id: &str) -> HttpRespon
 }
 
 fn updated_atom_response(state: &AppState, body: Value) -> HttpResponse {
-    let atom_value = memu_proxy::atom_from_node(&body);
+    let revision = body.get("summaries_revision").cloned();
+    let mut atom_value = memu_proxy::atom_from_node(&body);
     if memu_proxy::is_memu_id(body["id"].as_str().unwrap_or_default()) {
-        if let Ok(atom) =
-            serde_json::from_value::<atomic_core::AtomWithTags>(atom_value.clone())
-        {
+        if let Ok(atom) = serde_json::from_value::<atomic_core::AtomWithTags>(atom_value.clone()) {
             let _ = state.event_tx.send(ServerEvent::AtomUpdated { atom });
         }
+    }
+    if let (Some(revision), Some(response)) = (revision, atom_value.as_object_mut()) {
+        response.insert("summaries_revision".into(), revision);
     }
     HttpResponse::Ok().json(atom_value)
 }
@@ -111,6 +136,17 @@ async fn update(
         Ok(client) => client,
         Err(response) => return response,
     };
+    let mut payload = json!({
+        "summary": body.summary,
+        "approved": true,
+        "edited_by": "atomic:user",
+    });
+    if let Some(revision) = body.summaries_revision {
+        payload["summaries_revision"] = revision.into();
+    }
+    if let Some(displayed) = body.displayed_summary {
+        payload["displayed_summary"] = displayed.into();
+    }
     match memu_json(
         client
             .patch(format!("{}/{}/{}", config.base_url, kind, id))
@@ -118,16 +154,94 @@ async fn update(
                 ("user_id", config.user_id.as_str()),
                 ("soul_id", config.soul_id.as_str()),
             ])
-            .json(&json!({
-                "summary": body.summary,
-                "approved": true,
-                "edited_by": "atomic:user",
-            })),
+            .json(&payload),
         "memU update",
     )
     .await
     {
         Ok(body) => updated_atom_response(&state, body),
+        Err(response) => response,
+    }
+}
+
+pub async fn update_soul_summary(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<SummaryUpdate>,
+) -> HttpResponse {
+    let config = match session(&state) {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    let client = match client() {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    match memu_json(
+        client
+            .patch(format!(
+                "{}/soul-summary/{}",
+                config.base_url,
+                path.into_inner()
+            ))
+            .query(&[
+                ("user_id", config.user_id.as_str()),
+                ("soul_id", config.soul_id.as_str()),
+            ])
+            .json(&body.into_inner()),
+        "memU soul summary update",
+    )
+    .await
+    {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(response) => response,
+    }
+}
+
+pub async fn approve_soul_summary(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<SummaryGuard>,
+) -> HttpResponse {
+    approve_summary(
+        state,
+        "soul-summary",
+        &path.into_inner(),
+        body.into_inner(),
+        false,
+    )
+    .await
+}
+
+async fn approve_summary(
+    state: web::Data<AppState>,
+    kind: &str,
+    id: &str,
+    body: SummaryGuard,
+    atom_response: bool,
+) -> HttpResponse {
+    let config = match session(&state) {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    let client = match client() {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    match memu_json(
+        client
+            .post(format!("{}/{}/{}/approve", config.base_url, kind, id))
+            .query(&[
+                ("user_id", config.user_id.as_str()),
+                ("soul_id", config.soul_id.as_str()),
+            ])
+            .json(&body),
+        "memU summary approve",
+    )
+    .await
+    {
+        Ok(body) if atom_response => updated_atom_response(&state, body),
+        Ok(body) => HttpResponse::Ok().json(body),
         Err(response) => response,
     }
 }
