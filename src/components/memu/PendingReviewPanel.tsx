@@ -58,6 +58,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [summariesStale, setSummariesStale] = useState(false);
+  const [summaryBusy, setSummaryBusy] = useState(false);
 
   const loadReviews = useCallback(async () => {
     setLoading(true);
@@ -84,7 +85,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   if (!isOpen) return null;
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
-  const summaryActionsDisabled = loading || loadFailed || summariesStale;
+  const summaryActionsDisabled = loading || loadFailed || summariesStale || summaryBusy;
   // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
   // mates). Survivors keep their badge/color even when the last cluster mate goes —
   // consistent visuals beat live-updating cluster membership mid-review.
@@ -137,6 +138,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
                 disabled={summaryActionsDisabled}
                 stale={summariesStale}
                 onStale={() => setSummariesStale(true)}
+                onBusyChange={setSummaryBusy}
                 onDone={(result) => {
                   removeCategory(category.id);
                   setReviews((r) => ({ ...r, summaries_revision: result.summaries_revision }));
@@ -153,6 +155,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
                 disabled={summaryActionsDisabled}
                 stale={summariesStale}
                 onStale={() => setSummariesStale(true)}
+                onBusyChange={setSummaryBusy}
                 onDone={(result) => setReviews((r) => ({
                   ...r,
                   summaries_revision: result.summaries_revision,
@@ -226,6 +229,7 @@ function GeneratedSummaryRow({
   disabled,
   stale,
   onStale,
+  onBusyChange,
   onDone,
   onError,
 }: {
@@ -235,14 +239,19 @@ function GeneratedSummaryRow({
   disabled: boolean;
   stale: boolean;
   onStale: () => void;
+  onBusyChange: (busy: boolean) => void;
   onDone: (result: SummaryMutationResponse) => void;
   onError: (err: unknown) => void;
 }) {
   const [summary, setSummary] = useState(review.summary);
   const [busy, setBusy] = useState(false);
   const edited = summary !== review.summary;
+  const actionAvailable = kind === 'category' || edited || review.summary !== (review.approved_summary ?? '');
+  useEffect(() => setSummary(review.summary), [review.summary]);
   const run = async () => {
+    if (disabled) return;
     setBusy(true);
+    onBusyChange(true);
     try {
       const command = kind === 'category'
         ? (edited ? 'update_category_summary' : 'approve_category')
@@ -260,6 +269,7 @@ function GeneratedSummaryRow({
       else onError(err);
     } finally {
       setBusy(false);
+      onBusyChange(false);
     }
   };
 
@@ -272,8 +282,8 @@ function GeneratedSummaryRow({
         <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       <div className="mt-2 flex gap-2">
-        <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>
-        <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>
+        {actionAvailable && <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>}
+        {kind === 'category' && <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>}
       </div>
     </article>
   );
