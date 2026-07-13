@@ -324,6 +324,14 @@ async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
             "tag_count": 1,
             "tag_ids": ["category:c1"],
             "source_url": null
+        }, {
+            "id": "memory:m3",
+            "title": "Memory three",
+            "embedding_f32_le_b64": "zcxMPs3MTD8=",
+            "primary_tag": "Core",
+            "tag_count": 1,
+            "tag_ids": ["category:c1"],
+            "source_url": null
         }],
         "edges": [{
             "source": "memory:m1",
@@ -591,6 +599,7 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let expected_positions = atomic_core::projection::compute_2d_projection(&[
         ("memory:m1".to_string(), vec![1.0, 0.0]),
         ("memory:m2".to_string(), vec![0.9, 0.1]),
+        ("memory:m3".to_string(), vec![0.2, 0.8]),
     ]);
     for (id, expected_x, expected_y) in expected_positions {
         let atom = canvas["atoms"]
