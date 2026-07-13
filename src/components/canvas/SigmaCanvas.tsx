@@ -1151,7 +1151,9 @@ export function SigmaCanvas({
       if (isPreview) {
         store.unregisterPreviewController();
       } else {
-        useUIStore.getState().setCanvasCameraState(controller.getCameraState());
+        if (useDatabasesStore.getState().activeId === activeDbId) {
+          useUIStore.getState().setCanvasCameraState(controller.getCameraState());
+        }
         store.unregisterController();
       }
       sigma.kill();
