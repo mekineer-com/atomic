@@ -166,9 +166,13 @@ const mode = usePostgres ? `Postgres (${databaseUrl})` : 'SQLite';
 console.log(`\n\x1b[1m  Storage: ${mode}\x1b[0m\n`);
 
 // Start atomic-server (postgres feature is always compiled in via atomic-server's Cargo.toml)
-const cargoArgs = ['run', '-p', 'atomic-server', '--', ...serverArgs];
+const serverBin = process.env.ATOMIC_SERVER_BIN;
+const serverCommand = serverBin || 'cargo';
+const serverCommandArgs = serverBin
+  ? serverArgs
+  : ['run', '-p', 'atomic-server', '--', ...serverArgs];
 
-startProcess('api', 'cargo', cargoArgs, { color: '\x1b[36m' });
+startProcess('api', serverCommand, serverCommandArgs, { color: '\x1b[36m' });
 
 // Start Vite dev server in web mode
 startProcess('web', 'npx', ['vite', '--host'], {
