@@ -25,6 +25,7 @@
  */
 
 import { spawn, execSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -167,6 +168,10 @@ console.log(`\n\x1b[1m  Storage: ${mode}\x1b[0m\n`);
 
 // Start atomic-server (postgres feature is always compiled in via atomic-server's Cargo.toml)
 const serverBin = process.env.ATOMIC_SERVER_BIN;
+if (serverBin && !existsSync(serverBin)) {
+  console.error(`Atomic server binary not found: ${serverBin}`);
+  process.exit(1);
+}
 const serverCommand = serverBin || 'cargo';
 const serverCommandArgs = serverBin
   ? serverArgs
