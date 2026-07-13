@@ -311,7 +311,7 @@ async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
         "atoms": [{
             "id": "memory:m1",
             "title": "Memory one",
-            "embedding": [1.0, 0.0],
+            "embedding_f32_le_b64": "AACAPwAAAAA=",
             "primary_tag": "Core",
             "tag_count": 1,
             "tag_ids": ["category:c1"],
@@ -319,7 +319,7 @@ async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
         }, {
             "id": "memory:m2",
             "title": "Memory two",
-            "embedding": [0.9, 0.1],
+            "embedding_f32_le_b64": "ZmZmP83MzD0=",
             "primary_tag": "Core",
             "tag_count": 1,
             "tag_ids": ["category:c1"],

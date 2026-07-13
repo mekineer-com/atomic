@@ -9,7 +9,8 @@ use atomic_core::{
     projection, AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData,
     GlobalCanvasData,
 };
-use serde::{Deserialize, Serialize};
+use base64::{decoded_len_estimate, engine::general_purpose::STANDARD, Engine};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 use utoipa::{IntoParams, ToSchema};
@@ -104,6 +105,10 @@ struct TimedMemuCanvasSource {
 struct MemuCanvasAtom {
     id: String,
     title: String,
+    #[serde(
+        rename = "embedding_f32_le_b64",
+        deserialize_with = "deserialize_embedding"
+    )]
     embedding: Vec<f32>,
     primary_tag: Option<String>,
     tag_count: i32,
@@ -113,6 +118,34 @@ struct MemuCanvasAtom {
     #[serde(default)]
     entity_names: Vec<String>,
     source_url: Option<String>,
+}
+
+fn deserialize_embedding<'de, D>(deserializer: D) -> Result<Vec<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    const MAX_BYTES: usize = 64 * 1024;
+
+    let encoded = String::deserialize(deserializer)?;
+    if decoded_len_estimate(encoded.len()) > MAX_BYTES {
+        return Err(D::Error::custom("packed embedding exceeds 64 KiB"));
+    }
+    let bytes = STANDARD.decode(encoded).map_err(D::Error::custom)?;
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return Err(D::Error::custom(
+            "packed embedding must contain non-empty float32 values",
+        ));
+    }
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let value = f32::from_le_bytes(chunk.try_into().unwrap());
+            value
+                .is_finite()
+                .then_some(value)
+                .ok_or_else(|| D::Error::custom("packed embedding contains a non-finite value"))
+        })
+        .collect()
 }
 
 #[utoipa::path(get, path = "/api/canvas/global", params(GlobalCanvasQuery), responses((status = 200, description = "Global canvas data", body = atomic_core::GlobalCanvasData)), tag = "canvas")]
@@ -434,6 +467,7 @@ fn filter_canvas_by_source_prefix(data: &GlobalCanvasData, prefix: &str) -> Glob
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn atom(id: &str) -> MemuCanvasAtom {
         MemuCanvasAtom {
@@ -457,6 +491,48 @@ mod tests {
             kind: Some(if predicate == "similarity" { predicate } else { "triple" }.to_string()),
             predicate: Some(predicate.to_string()),
         }
+    }
+
+    fn packed_atom(embedding: serde_json::Value) -> serde_json::Value {
+        json!({
+            "id": "memory:a",
+            "title": "a",
+            "embedding_f32_le_b64": embedding,
+            "primary_tag": null,
+            "tag_count": 0,
+            "tag_ids": [],
+            "source_url": null
+        })
+    }
+
+    #[test]
+    fn packed_embedding_decodes_exact_float32_values() {
+        let values = [1.25_f32, -2.5, 0.0];
+        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let atom: MemuCanvasAtom =
+            serde_json::from_value(packed_atom(json!(STANDARD.encode(bytes)))).unwrap();
+
+        assert_eq!(
+            atom.embedding.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            values.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn packed_embedding_rejects_invalid_values() {
+        for value in [
+            json!(""),
+            json!("not base64"),
+            json!(STANDARD.encode([0_u8; 3])),
+            json!(STANDARD.encode(f32::NAN.to_le_bytes())),
+            json!(STANDARD.encode(f32::INFINITY.to_le_bytes())),
+            json!("A".repeat(90_000)),
+        ] {
+            assert!(serde_json::from_value::<MemuCanvasAtom>(packed_atom(value)).is_err());
+        }
+        let mut missing = packed_atom(json!("AACAPw=="));
+        missing.as_object_mut().unwrap().remove("embedding_f32_le_b64");
+        assert!(serde_json::from_value::<MemuCanvasAtom>(missing).is_err());
     }
 
     #[test]
