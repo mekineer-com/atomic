@@ -9,6 +9,7 @@ import { useAtomsStore } from '../stores/atoms';
 import { useTagsStore } from '../stores/tags';
 import { useUIStore } from '../stores/ui';
 import { useEmbeddingProgressStore } from '../stores/embedding-progress';
+import { useCanvasStore } from '../stores/canvas';
 import type { AtomWithTags } from '../stores/atoms';
 
 interface EmbeddingCompletePayload {
@@ -101,11 +102,13 @@ export function useEmbeddingEvents() {
 
       unsubs.push(transport.subscribe<AtomWithTags>('atom-created', (payload) => {
         useAtomsStore.getState().addAtom(payload);
+        useCanvasStore.getState().invalidateCanvasData();
         scheduleStatusReconcile();
       }));
 
       unsubs.push(transport.subscribe<AtomWithTags>('atom-updated', (payload) => {
         useAtomsStore.getState().addAtom(payload);
+        useCanvasStore.getState().invalidateCanvasData();
         scheduleStatusReconcile();
       }));
 
@@ -113,10 +116,12 @@ export function useEmbeddingEvents() {
         transport.invoke('get_atom', { id: payload.atom_id })
           .then((atom) => useAtomsStore.getState().addAtom(atom as AtomWithTags))
           .catch((e: unknown) => console.error('Failed to fetch ingested atom:', e));
+        useCanvasStore.getState().invalidateCanvasData();
         scheduleStatusReconcile();
       }));
 
       unsubs.push(transport.subscribe<EmbeddingCompletePayload>('embedding-complete', (payload) => {
+        useCanvasStore.getState().invalidateCanvasData();
         if (payload.status === 'failed') {
           toast.error('Embedding failed', { id: 'embedding-failure', description: payload.error });
         }
@@ -139,6 +144,7 @@ export function useEmbeddingEvents() {
       }));
 
       unsubs.push(transport.subscribe<TaggingCompletePayload>('tagging-complete', (payload) => {
+        useCanvasStore.getState().invalidateCanvasData();
         if (payload.status === 'failed') {
           console.error(`Tagging failed for atom ${payload.atom_id}:`, payload.error);
           toast.error('Tagging failed', { id: 'tagging-failure', description: payload.error });
@@ -206,6 +212,7 @@ export function useEmbeddingEvents() {
       }
 
       unsubs.push(transport.subscribe<EmbeddingsResetPayload>('embeddings-reset', (payload) => {
+        useCanvasStore.getState().invalidateCanvasData();
         const { addLoadingOperation, removeLoadingOperation } = useUIStore.getState();
         const opId = `fetch-atoms-reset-${Date.now()}`;
         addLoadingOperation(opId, `Re-embedding ${payload.pending_count} atoms...`);

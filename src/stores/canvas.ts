@@ -30,7 +30,9 @@ interface CanvasStore {
 
   // Canvas data (clusters for chat context)
   canvasData: GlobalCanvasData | null;
-  setCanvasData: (data: GlobalCanvasData | null) => void;
+  canvasDataDbId: string | null;
+  setCanvasData: (data: GlobalCanvasData, dbId: string | null) => void;
+  invalidateCanvasData: () => void;
 
   // Camera state to apply to the next-mounted main canvas. Set when the user
   // clicks the dashboard preview so the main view opens at the same framing
@@ -49,6 +51,7 @@ export const useCanvasStore = create<CanvasStore>()((set) => ({
   controller: null,
   previewController: null,
   canvasData: null,
+  canvasDataDbId: null,
   pendingCamera: null,
   pendingFocusAtomId: null,
 
@@ -58,7 +61,8 @@ export const useCanvasStore = create<CanvasStore>()((set) => ({
   registerPreviewController: (ctrl) => set({ previewController: ctrl }),
   unregisterPreviewController: () => set({ previewController: null }),
 
-  setCanvasData: (data) => set({ canvasData: data }),
+  setCanvasData: (data, dbId) => set({ canvasData: data, canvasDataDbId: dbId }),
+  invalidateCanvasData: () => set({ canvasData: null, canvasDataDbId: null }),
 
   setPendingCamera: (state) => set({ pendingCamera: state }),
   setPendingFocusAtomId: (id) => set({ pendingFocusAtomId: id }),

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getTransport } from '../../lib/transport';
+import { useCanvasStore } from '../../stores/canvas';
 
 type MemoryReview = {
   id: string;
@@ -89,8 +90,10 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
   // mates). Survivors keep their badge/color even when the last cluster mate goes —
   // consistent visuals beat live-updating cluster membership mid-review.
-  const removeMemory = (id: string) =>
+  const removeMemory = (id: string) => {
+    useCanvasStore.getState().invalidateCanvasData();
     setReviews((r) => ({ ...r, items: r.items.filter((item) => item.id !== id) }));
+  };
   const reportError = (err: unknown) => setError(String(err));
 
   return (
@@ -246,7 +249,6 @@ function GeneratedSummaryRow({
   const [summary, setSummary] = useState(review.summary);
   const [busy, setBusy] = useState(false);
   const edited = summary !== review.summary;
-  const actionAvailable = kind === 'category' || edited || review.summary !== (review.approved_summary ?? '');
   useEffect(() => setSummary(review.summary), [review.summary]);
   const run = async () => {
     if (disabled) return;
@@ -278,11 +280,11 @@ function GeneratedSummaryRow({
       {stale && <p className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-500">Summaries changed during a memorize cycle. Save any edits to another file, then refresh this page.</p>}
       <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>
       <div className="grid gap-2 md:grid-cols-2">
-        <pre className="min-h-28 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm text-[var(--color-text-secondary)]">{review.approved_summary ?? ''}</pre>
-        <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <pre className="min-h-28 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm leading-5 text-[var(--color-text-secondary)]">{review.approved_summary ?? ''}</pre>
+        <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       <div className="mt-2 flex gap-2">
-        {actionAvailable && <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>}
+        <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>
         {kind === 'category' && <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>}
       </div>
     </article>

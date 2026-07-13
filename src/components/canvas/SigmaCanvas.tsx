@@ -181,11 +181,12 @@ export function SigmaCanvas({
   const canvasEntityShowDimmed = useUIStore(s => s.canvasEntityShowDimmed);
   const canvasFilter = useUIStore(s => s.canvasFilter);
   const canvasRebuildPerView = useUIStore(s => s.canvasRebuildPerView);
+  const canvasRememberView = useUIStore(s => s.canvasRememberView);
   const setCanvasCategoryShowDimmed = useUIStore(s => s.setCanvasCategoryShowDimmed);
   const setCanvasEntityShowDimmed = useUIStore(s => s.setCanvasEntityShowDimmed);
   const setCanvasFilter = useUIStore(s => s.setCanvasFilter);
   const setCanvasRebuildPerView = useUIStore(s => s.setCanvasRebuildPerView);
-  const resetCanvasLayerState = useUIStore(s => s.resetCanvasLayerState);
+  const setCanvasRememberView = useUIStore(s => s.setCanvasRememberView);
   const activeDbId = useDatabasesStore(s => s.activeId);
   const containerRef = useRef<HTMLDivElement>(null);
   // The hover pill renders into this div, which lives outside the
@@ -259,20 +260,26 @@ export function SigmaCanvas({
   // Fetch global canvas data
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
+    const cached = useCanvasStore.getState();
+    const cachedData = cached.canvasDataDbId === activeDbId ? cached.canvasData : null;
+    setData(cachedData);
+    setIsLoading(!cachedData);
     setError(null);
+
+    if (cachedData) return () => { cancelled = true; };
 
     getGlobalCanvas()
       .then((result) => {
         if (!cancelled) {
           setData(result);
+          useCanvasStore.getState().setCanvasData(result, activeDbId);
           setRebuildData(null);
           setIsLoading(false);
         }
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err.message || 'Failed to load canvas');
+          if (!cachedData) setError(err.message || 'Failed to load canvas');
           setIsLoading(false);
         }
       });
@@ -361,14 +368,6 @@ export function SigmaCanvas({
       return same ? prev : next;
     });
   }, [edgeLayerNames, isPreview]);
-
-  useEffect(() => {
-    if (isPreview) return;
-    return () => {
-      useCanvasStore.getState().setCanvasData(null);
-      resetCanvasLayerState();
-    };
-  }, [activeDbId, isPreview, resetCanvasLayerState]);
 
   useEffect(() => {
     visibleEdgeLayersRef.current = visibleEdgeLayers;
@@ -925,22 +924,23 @@ export function SigmaCanvas({
     // Animate nodes outward from center + fade edges in.
     // Preview mode skips the animation and snaps to final state so the thumbnail
     // shows the real layout immediately on mount. The main view also skips the
-    // animation when a pendingCamera or pendingFocusAtomId is set — i.e. the
-    // user came from clicking the dashboard preview, and we want to land on the
-    // chosen framing/atom without the layout-builds-up flourish.
+    // animation when restoring a camera or focusing an atom.
     let cancelledAnim = false;
     const pendingCamera = !isPreview ? useCanvasStore.getState().pendingCamera : null;
     const pendingFocus = !isPreview ? useCanvasStore.getState().pendingFocusAtomId : null;
-    if (isPreview || pendingCamera || pendingFocus) {
+    const restoredCamera = !isPreview && !pendingFocus
+      ? pendingCamera ?? useUIStore.getState().canvasCameraState
+      : pendingCamera;
+    if (isPreview || restoredCamera || pendingFocus) {
       for (const [id, target] of Object.entries(targetPositions)) {
         if (!graph.hasNode(id)) continue;
         graph.setNodeAttribute(id, 'x', target.x);
         graph.setNodeAttribute(id, 'y', target.y);
       }
       edgeAnimProgress.current = 1;
-      if (pendingCamera) {
-        sigma.getCamera().setState(pendingCamera);
-        useCanvasStore.getState().setPendingCamera(null);
+      if (restoredCamera) {
+        sigma.getCamera().setState(restoredCamera);
+        if (pendingCamera) useCanvasStore.getState().setPendingCamera(null);
       }
       sigma.refresh();
     } else {
@@ -1053,6 +1053,16 @@ export function SigmaCanvas({
       },
     };
 
+    let cameraSaveTimer: ReturnType<typeof setTimeout> | null = null;
+    const saveCamera = () => {
+      if (isPreview) return;
+      if (cameraSaveTimer) clearTimeout(cameraSaveTimer);
+      cameraSaveTimer = setTimeout(() => {
+        useUIStore.getState().setCanvasCameraState(controller.getCameraState());
+      }, 150);
+    };
+    sigma.getCamera().on('updated', saveCamera);
+
     // Hover + click handlers run in main mode AND in interactive preview.
     // In interactive preview, clicks bubble up to the parent (which opens the
     // main canvas focused on the chosen atom) instead of opening a popover.
@@ -1102,9 +1112,7 @@ export function SigmaCanvas({
     if (isPreview) {
       useCanvasStore.getState().registerPreviewController(controller);
     } else {
-      const { registerController, setCanvasData } = useCanvasStore.getState();
-      setCanvasData(data);
-      registerController(controller);
+      useCanvasStore.getState().registerController(controller);
 
       // If a node was clicked in the briefing mini-canvas, the main view
       // mounts here. Land directly on that atom (camera + popover) so the
@@ -1122,10 +1130,13 @@ export function SigmaCanvas({
 
     return () => {
       cancelAnim();
+      if (cameraSaveTimer) clearTimeout(cameraSaveTimer);
+      sigma.getCamera().off('updated', saveCamera);
       const store = useCanvasStore.getState();
       if (isPreview) {
         store.unregisterPreviewController();
       } else {
+        useUIStore.getState().setCanvasCameraState(controller.getCameraState());
         store.unregisterController();
       }
       sigma.kill();
@@ -1399,6 +1410,15 @@ export function SigmaCanvas({
                     className="h-3 w-3 accent-white/70 disabled:opacity-40"
                   />
                   <span>rebuild per view</span>
+                </label>
+                <label className="flex items-center gap-1.5 text-[12px] text-white/60">
+                  <input
+                    type="checkbox"
+                    checked={canvasRememberView}
+                    onChange={(e) => setCanvasRememberView(e.target.checked)}
+                    className="h-3 w-3 accent-white/70"
+                  />
+                  <span>remember view</span>
                 </label>
               </div>
             </details>

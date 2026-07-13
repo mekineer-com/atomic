@@ -10,6 +10,7 @@ import { useWikiStore } from './wiki';
 import { useChatStore } from './chat';
 import { useFeaturedReportStore } from './featuredReport';
 import { useUIStore } from './ui';
+import { useCanvasStore } from './canvas';
 
 export interface DatabaseInfo {
   id: string;
@@ -104,6 +105,7 @@ export const useDatabasesStore = create<DatabasesStore>()(
         useChatStore.getState().reset();
         useFeaturedReportStore.getState().reset();
         useUIStore.getState().resetCanvasLayerState();
+        useCanvasStore.getState().invalidateCanvasData();
         useTagsStore.getState().fetchTags();
         useAtomsStore.getState().fetchAtoms();
         useFeaturedReportStore.getState().fetchLatest();
@@ -149,6 +151,7 @@ export const useDatabasesStore = create<DatabasesStore>()(
       useChatStore.getState().reset();
       useFeaturedReportStore.getState().reset();
       useUIStore.getState().resetCanvasLayerState();
+      useCanvasStore.getState().invalidateCanvasData();
       clearAtomNeighborhoodCache();
 
       // Hydrate the new DB's cached data before firing fetches — user sees

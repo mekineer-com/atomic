@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { navigateTo } from '../router/navigate-ref';
 import { viewPath, atomReaderPath, wikiReaderPath, atomGraphPath, reportDetailPath, findingReaderPath } from '../router/routes';
+import type { CanvasCameraState } from './canvas';
 
 export type ViewMode = 'dashboard' | 'atoms' | 'canvas' | 'wiki' | 'reports';
 export type AtomsLayout = 'grid' | 'list';
@@ -117,6 +118,9 @@ interface UIStore {
   canvasEntityShowDimmed: boolean;
   canvasFilter: boolean;
   canvasRebuildPerView: boolean;
+  canvasRememberView: boolean;
+  canvasCameraState: CanvasCameraState | null;
+  canvasEntitiesPanelHeight: number;
   // Server connection state
   serverConnected: boolean;
   // Local graph state (synced from active tab when entry.type === 'graph')
@@ -189,6 +193,9 @@ interface UIStore {
   setCanvasEntityShowDimmed: (show: boolean) => void;
   setCanvasFilter: (enabled: boolean) => void;
   setCanvasRebuildPerView: (enabled: boolean) => void;
+  setCanvasRememberView: (enabled: boolean) => void;
+  setCanvasCameraState: (state: CanvasCameraState | null) => void;
+  setCanvasEntitiesPanelHeight: (height: number) => void;
   resetCanvasLayerState: () => void;
   setViewMode: (mode: ViewMode) => void;
   setAtomsLayout: (layout: AtomsLayout) => void;
@@ -368,6 +375,9 @@ export const useUIStore = create<UIStore>()(
       canvasEntityShowDimmed: false,
       canvasFilter: false,
       canvasRebuildPerView: false,
+      canvasRememberView: false,
+      canvasCameraState: null,
+      canvasEntitiesPanelHeight: 208,
       serverConnected: false,
       commandPaletteOpen: false,
       commandPaletteInitialQuery: '',
@@ -881,6 +891,9 @@ export const useUIStore = create<UIStore>()(
       setCanvasEntityShowDimmed: (show) => set({ canvasEntityShowDimmed: show }),
       setCanvasFilter: (enabled) => set({ canvasFilter: enabled }),
       setCanvasRebuildPerView: (enabled) => set({ canvasRebuildPerView: enabled }),
+      setCanvasRememberView: (enabled) => set({ canvasRememberView: enabled }),
+      setCanvasCameraState: (state) => set({ canvasCameraState: state }),
+      setCanvasEntitiesPanelHeight: (height) => set({ canvasEntitiesPanelHeight: height }),
       resetCanvasLayerState: () => set({
         canvasCategoryVisible: {},
         canvasEntityVisible: {},
@@ -888,6 +901,7 @@ export const useUIStore = create<UIStore>()(
         canvasEntityShowDimmed: false,
         canvasFilter: false,
         canvasRebuildPerView: false,
+        canvasCameraState: null,
       }),
 
       setViewMode: (mode: ViewMode) => {
@@ -1054,6 +1068,17 @@ export const useUIStore = create<UIStore>()(
         tabs: state.tabs,
         activeTabId: state.activeTabId,
         nextTabOrdinal: state.nextTabOrdinal,
+        canvasRememberView: state.canvasRememberView,
+        canvasEntitiesPanelHeight: state.canvasEntitiesPanelHeight,
+        ...(state.canvasRememberView ? {
+          canvasCategoryVisible: state.canvasCategoryVisible,
+          canvasEntityVisible: state.canvasEntityVisible,
+          canvasCategoryShowDimmed: state.canvasCategoryShowDimmed,
+          canvasEntityShowDimmed: state.canvasEntityShowDimmed,
+          canvasFilter: state.canvasFilter,
+          canvasRebuildPerView: state.canvasRebuildPerView,
+          canvasCameraState: state.canvasCameraState,
+        } : {}),
       }),
       // v0 → v1: 'grid' and 'list' were top-level ViewMode values. They're now
       // collapsed into a single 'atoms' view with a separate atomsLayout field.

@@ -13,9 +13,11 @@ export function CanvasEntitiesSection() {
   const canvasEntityVisible = useUIStore(s => s.canvasEntityVisible);
   const setCanvasEntityVisible = useUIStore(s => s.setCanvasEntityVisible);
   const setCanvasEntityVisibleMap = useUIStore(s => s.setCanvasEntityVisibleMap);
+  const savedHeight = useUIStore(s => s.canvasEntitiesPanelHeight);
+  const setSavedHeight = useUIStore(s => s.setCanvasEntitiesPanelHeight);
   const [showSearch, setShowSearch] = useState(false);
   const [query, setQuery] = useState('');
-  const [height, setHeight] = useState(208);
+  const [height, setHeight] = useState(savedHeight);
   const parentRef = useRef<HTMLDivElement>(null);
 
   const entities = useMemo(() => {
@@ -50,10 +52,13 @@ export function CanvasEntitiesSection() {
     e.preventDefault();
     const startY = e.clientY;
     const startHeight = height;
+    let finalHeight = height;
     const onMouseMove = (event: MouseEvent) => {
-      setHeight(Math.min(Math.max(startHeight + startY - event.clientY, 96), window.innerHeight * 0.6));
+      finalHeight = Math.min(Math.max(startHeight + startY - event.clientY, 96), window.innerHeight * 0.6);
+      setHeight(finalHeight);
     };
     const onMouseUp = () => {
+      setSavedHeight(finalHeight);
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
       document.body.style.cursor = '';
