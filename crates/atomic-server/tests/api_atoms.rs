@@ -324,7 +324,15 @@ async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
             "tag_count": 1,
             "tag_ids": ["category:c1"],
             "source_url": null
-        }]
+        }],
+        "edges": [{
+            "source": "memory:m1",
+            "target": "memory:m2",
+            "weight": 0.9,
+            "kind": "similarity",
+            "predicate": "similarity"
+        }],
+        "timing_ms": {"total": 1.25}
     }))
 }
 
@@ -550,7 +558,17 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
         .uri("/api/canvas/global")
         .insert_header(ctx.auth_header())
         .to_request();
-    let canvas: Value = actix_test::call_and_read_body_json(&app, req).await;
+    let response = actix_test::call_service(&app, req).await;
+    let server_timing = response
+        .headers()
+        .get("server-timing")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(server_timing.contains("memu_total;dur=1.25"));
+    assert!(server_timing.contains("atomic_fetch_json;dur="));
+    assert!(server_timing.contains("atomic_project_build;dur="));
+    let canvas: Value = actix_test::read_body_json(response).await;
     assert_eq!(canvas["atoms"][0]["atom_id"], "memory:m1");
     assert_eq!(canvas["atoms"][0]["tag_ids"][0], "category:c1");
     assert_eq!(canvas["edges"][0]["source"], "memory:m1");

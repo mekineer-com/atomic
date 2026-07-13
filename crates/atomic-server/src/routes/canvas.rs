@@ -4,13 +4,14 @@ use crate::db_extractor::Db;
 use crate::error::ok_or_error;
 use crate::routes::memu_proxy;
 use crate::state::{AppState, MemuSessionConfig};
-use actix_web::{HttpRequest, HttpResponse, web};
+use actix_web::{web, HttpRequest, HttpResponse};
 use atomic_core::{
-    AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData, GlobalCanvasData,
-    projection,
+    projection, AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData,
+    GlobalCanvasData,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::time::Instant;
 use utoipa::{IntoParams, ToSchema};
 
 #[utoipa::path(get, path = "/api/canvas/positions", responses((status = 200, description = "All atom positions", body = Vec<AtomPosition>)), tag = "canvas")]
@@ -89,6 +90,14 @@ struct MemuCanvasSource {
     atoms: Vec<MemuCanvasAtom>,
     #[serde(default)]
     edges: Vec<CanvasEdgeData>,
+    #[serde(default)]
+    timing_ms: BTreeMap<String, f64>,
+}
+
+struct TimedMemuCanvasSource {
+    source: MemuCanvasSource,
+    fetch_json_ms: f64,
+    shape_ms: f64,
 }
 
 #[derive(Deserialize)]
@@ -113,11 +122,12 @@ pub async fn get_global_canvas(
     query: web::Query<GlobalCanvasQuery>,
 ) -> HttpResponse {
     if let Some(config) = state.memu_session.clone() {
+        let started = Instant::now();
         let source = match fetch_memu_canvas_source(&config, None).await {
             Ok(source) => source,
             Err(response) => return response,
         };
-        return HttpResponse::Ok().json(memu_canvas_data(source));
+        return memu_canvas_response(source, started);
     }
 
     let source_prefix = query.into_inner().source_prefix;
@@ -146,11 +156,12 @@ pub async fn rebuild_canvas(
         .collect();
 
     if let Some(config) = state.memu_session.clone() {
+        let started = Instant::now();
         let source = match fetch_memu_canvas_source(&config, Some(&requested)).await {
             Ok(source) => source,
             Err(response) => return response,
         };
-        return HttpResponse::Ok().json(memu_canvas_data(source));
+        return memu_canvas_response(source, started);
     }
 
     let db = match state.resolve_core(&req).await {
@@ -202,8 +213,9 @@ pub async fn rebuild_canvas(
 async fn fetch_memu_canvas_source(
     config: &MemuSessionConfig,
     atom_ids: Option<&HashSet<String>>,
-) -> Result<MemuCanvasSource, HttpResponse> {
+) -> Result<TimedMemuCanvasSource, HttpResponse> {
     let client = memu_proxy::client()?;
+    let fetch_started = Instant::now();
     let body = memu_proxy::memu_json(
         if let Some(atom_ids) = atom_ids {
             let mut ids: Vec<&str> = atom_ids.iter().map(String::as_str).collect();
@@ -236,10 +248,67 @@ async fn fetch_memu_canvas_source(
         "memU canvas source",
     )
     .await?;
-    serde_json::from_value::<MemuCanvasSource>(body).map_err(|e| {
+    let fetch_json_ms = fetch_started.elapsed().as_secs_f64() * 1000.0;
+    let shape_started = Instant::now();
+    let source = serde_json::from_value::<MemuCanvasSource>(body).map_err(|e| {
         HttpResponse::BadGateway()
             .json(serde_json::json!({"error": format!("memU canvas source shape failed: {e}")}))
+    })?;
+    Ok(TimedMemuCanvasSource {
+        source,
+        fetch_json_ms,
+        shape_ms: shape_started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+fn memu_canvas_response(source: TimedMemuCanvasSource, started: Instant) -> HttpResponse {
+    let source_timing = source.source.timing_ms.clone();
+    let project_started = Instant::now();
+    let data = memu_canvas_data(source.source);
+    let project_build_ms = project_started.elapsed().as_secs_f64() * 1000.0;
+    let timing = canvas_server_timing(
+        &source_timing,
+        source.fetch_json_ms,
+        source.shape_ms,
+        project_build_ms,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+    HttpResponse::Ok()
+        .insert_header(("Server-Timing", timing))
+        .json(data)
+}
+
+fn canvas_server_timing(
+    source: &BTreeMap<String, f64>,
+    fetch_json_ms: f64,
+    shape_ms: f64,
+    project_build_ms: f64,
+    total_ms: f64,
+) -> String {
+    let mut values = Vec::new();
+    for name in [
+        "store",
+        "taxonomy",
+        "atoms",
+        "graph",
+        "similarity",
+        "finalize",
+        "total",
+    ] {
+        if let Some(value) = source
+            .get(name)
+            .filter(|value| value.is_finite() && **value >= 0.0)
+        {
+            values.push(format!("memu_{name};dur={value:.2}"));
+        }
+    }
+    values.extend([
+        format!("atomic_fetch_json;dur={fetch_json_ms:.2}"),
+        format!("atomic_shape;dur={shape_ms:.2}"),
+        format!("atomic_project_build;dur={project_build_ms:.2}"),
+        format!("atomic_total;dur={total_ms:.2}"),
+    ]);
+    values.join(", ")
 }
 
 fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
@@ -395,6 +464,7 @@ mod tests {
         let data = memu_canvas_data(MemuCanvasSource {
             atoms: vec![atom("memory:a"), atom("memory:b")],
             edges: vec![edge("memory:a", "memory:b", "caused_by")],
+            timing_ms: BTreeMap::new(),
         });
 
         assert_eq!(data.edges.len(), 1);
@@ -409,6 +479,7 @@ mod tests {
                 edge("memory:a", "memory:b", "caused_by"),
                 edge("memory:a", "memory:b", "similarity"),
             ],
+            timing_ms: BTreeMap::new(),
         });
 
         let layers: HashSet<_> = data
@@ -427,6 +498,7 @@ mod tests {
                 edge("memory:a", "memory:b", "similarity"),
                 edge("memory:b", "memory:a", "similarity"),
             ],
+            timing_ms: BTreeMap::new(),
         });
 
         let similarity_count = data
@@ -445,6 +517,7 @@ mod tests {
                 edge("memory:a", "memory:b", "caused_by"),
                 edge("memory:b", "memory:a", "caused_by"),
             ],
+            timing_ms: BTreeMap::new(),
         });
 
         let caused_by_count = data
