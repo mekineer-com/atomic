@@ -31,7 +31,10 @@ interface CanvasStore {
   // Canvas data (clusters for chat context)
   canvasData: GlobalCanvasData | null;
   canvasDataDbId: string | null;
+  canvasRebuildData: GlobalCanvasData | null;
+  canvasRebuildKey: string | null;
   setCanvasData: (data: GlobalCanvasData, dbId: string | null) => void;
+  setCanvasRebuildData: (data: GlobalCanvasData, key: string) => void;
   invalidateCanvasData: () => void;
 
   // Camera state to apply to the next-mounted main canvas. Set when the user
@@ -52,6 +55,8 @@ export const useCanvasStore = create<CanvasStore>()((set) => ({
   previewController: null,
   canvasData: null,
   canvasDataDbId: null,
+  canvasRebuildData: null,
+  canvasRebuildKey: null,
   pendingCamera: null,
   pendingFocusAtomId: null,
 
@@ -62,7 +67,13 @@ export const useCanvasStore = create<CanvasStore>()((set) => ({
   unregisterPreviewController: () => set({ previewController: null }),
 
   setCanvasData: (data, dbId) => set({ canvasData: data, canvasDataDbId: dbId }),
-  invalidateCanvasData: () => set({ canvasData: null, canvasDataDbId: null }),
+  setCanvasRebuildData: (data, key) => set({ canvasRebuildData: data, canvasRebuildKey: key }),
+  invalidateCanvasData: () => set({
+    canvasData: null,
+    canvasDataDbId: null,
+    canvasRebuildData: null,
+    canvasRebuildKey: null,
+  }),
 
   setPendingCamera: (state) => set({ pendingCamera: state }),
   setPendingFocusAtomId: (id) => set({ pendingFocusAtomId: id }),

@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { getTransport } from '../lib/transport';
 import { cacheKey, readCache, writeCache } from '../lib/cache/idb';
 import { useDatabasesStore } from './databases';
+import { useCanvasStore } from './canvas';
 
 export interface Atom {
   id: string;
@@ -472,6 +473,7 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
     set({ error: null });
     try {
       await getTransport().invoke('delete_atom', { id });
+      useCanvasStore.getState().invalidateCanvasData();
       set((state) => ({
         atoms: state.atoms.filter((a) => a.id !== id),
         totalCount: Math.max(0, state.totalCount - 1),

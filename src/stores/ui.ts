@@ -120,6 +120,8 @@ interface UIStore {
   canvasRebuildPerView: boolean;
   canvasRememberView: boolean;
   canvasCameraState: CanvasCameraState | null;
+  canvasEdgeThreshold: number;
+  canvasVisibleEdgeLayers: Record<string, boolean>;
   canvasEntitiesPanelHeight: number;
   // Server connection state
   serverConnected: boolean;
@@ -195,6 +197,8 @@ interface UIStore {
   setCanvasRebuildPerView: (enabled: boolean) => void;
   setCanvasRememberView: (enabled: boolean) => void;
   setCanvasCameraState: (state: CanvasCameraState | null) => void;
+  setCanvasEdgeThreshold: (threshold: number) => void;
+  setCanvasVisibleEdgeLayers: (layers: Record<string, boolean>) => void;
   setCanvasEntitiesPanelHeight: (height: number) => void;
   resetCanvasLayerState: () => void;
   setViewMode: (mode: ViewMode) => void;
@@ -377,6 +381,8 @@ export const useUIStore = create<UIStore>()(
       canvasRebuildPerView: false,
       canvasRememberView: false,
       canvasCameraState: null,
+      canvasEdgeThreshold: 0,
+      canvasVisibleEdgeLayers: {},
       canvasEntitiesPanelHeight: 208,
       serverConnected: false,
       commandPaletteOpen: false,
@@ -893,6 +899,8 @@ export const useUIStore = create<UIStore>()(
       setCanvasRebuildPerView: (enabled) => set({ canvasRebuildPerView: enabled }),
       setCanvasRememberView: (enabled) => set({ canvasRememberView: enabled }),
       setCanvasCameraState: (state) => set({ canvasCameraState: state }),
+      setCanvasEdgeThreshold: (threshold) => set({ canvasEdgeThreshold: threshold }),
+      setCanvasVisibleEdgeLayers: (layers) => set({ canvasVisibleEdgeLayers: layers }),
       setCanvasEntitiesPanelHeight: (height) => set({ canvasEntitiesPanelHeight: height }),
       resetCanvasLayerState: () => set({
         canvasCategoryVisible: {},
@@ -902,6 +910,8 @@ export const useUIStore = create<UIStore>()(
         canvasFilter: false,
         canvasRebuildPerView: false,
         canvasCameraState: null,
+        canvasEdgeThreshold: 0,
+        canvasVisibleEdgeLayers: {},
       }),
 
       setViewMode: (mode: ViewMode) => {
@@ -1078,6 +1088,8 @@ export const useUIStore = create<UIStore>()(
           canvasFilter: state.canvasFilter,
           canvasRebuildPerView: state.canvasRebuildPerView,
           canvasCameraState: state.canvasCameraState,
+          canvasEdgeThreshold: state.canvasEdgeThreshold,
+          canvasVisibleEdgeLayers: state.canvasVisibleEdgeLayers,
         } : {}),
       }),
       // v0 → v1: 'grid' and 'list' were top-level ViewMode values. They're now

@@ -143,6 +143,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
                 onStale={() => setSummariesStale(true)}
                 onBusyChange={setSummaryBusy}
                 onDone={(result) => {
+                  useCanvasStore.getState().invalidateCanvasData();
                   removeCategory(category.id);
                   setReviews((r) => ({ ...r, summaries_revision: result.summaries_revision }));
                 }}

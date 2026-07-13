@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, RefreshCw } from 'lucide-react';
 import { CANVAS_NONE_KEY, useUIStore } from '../../stores/ui';
 import { useDatabasesStore } from '../../stores/databases';
 import { getGlobalCanvas, rebuildCanvas, type GlobalCanvasData } from '../../lib/api';
@@ -182,12 +182,17 @@ export function SigmaCanvas({
   const canvasFilter = useUIStore(s => s.canvasFilter);
   const canvasRebuildPerView = useUIStore(s => s.canvasRebuildPerView);
   const canvasRememberView = useUIStore(s => s.canvasRememberView);
+  const canvasEdgeThreshold = useUIStore(s => s.canvasEdgeThreshold);
+  const visibleEdgeLayers = useUIStore(s => s.canvasVisibleEdgeLayers);
   const setCanvasCategoryShowDimmed = useUIStore(s => s.setCanvasCategoryShowDimmed);
   const setCanvasEntityShowDimmed = useUIStore(s => s.setCanvasEntityShowDimmed);
   const setCanvasFilter = useUIStore(s => s.setCanvasFilter);
   const setCanvasRebuildPerView = useUIStore(s => s.setCanvasRebuildPerView);
   const setCanvasRememberView = useUIStore(s => s.setCanvasRememberView);
+  const setEdgeThreshold = useUIStore(s => s.setCanvasEdgeThreshold);
+  const setVisibleEdgeLayers = useUIStore(s => s.setCanvasVisibleEdgeLayers);
   const activeDbId = useDatabasesStore(s => s.activeId);
+  const edgeThreshold = isPreview ? 0 : canvasEdgeThreshold;
   const containerRef = useRef<HTMLDivElement>(null);
   // The hover pill renders into this div, which lives outside the
   // overflow-hidden Sigma container. That lets long titles spill past the
@@ -201,12 +206,11 @@ export function SigmaCanvas({
   const [rebuildData, setRebuildData] = useState<GlobalCanvasData | null>(null);
   const [isRebuilding, setIsRebuilding] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<CanvasTheme>(DEFAULT_THEME);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
-  const [edgeThreshold, setEdgeThreshold] = useState(0);
-  const [visibleEdgeLayers, setVisibleEdgeLayers] = useState<Record<string, boolean>>({});
-  const edgeThresholdRef = useRef(0);
+  const edgeThresholdRef = useRef(edgeThreshold);
   const visibleEdgeLayersRef = useRef<Record<string, boolean>>({});
   const canvasCategoryVisibleRef = useRef(canvasCategoryVisible);
   const canvasEntityVisibleRef = useRef(canvasEntityVisible);
@@ -285,7 +289,7 @@ export function SigmaCanvas({
       });
 
     return () => { cancelled = true; };
-  }, [activeDbId]);
+  }, [activeDbId, refreshNonce]);
 
   const visibleAtomIds = useMemo(() => {
     if (!data || isPreview) return [];
@@ -327,12 +331,23 @@ export function SigmaCanvas({
       return;
     }
 
+    const rebuildKey = `${activeDbId ?? ''}:${visibleAtomIds.join(',')}`;
+    const cached = useCanvasStore.getState();
+    if (cached.canvasRebuildKey === rebuildKey && cached.canvasRebuildData) {
+      setRebuildData(cached.canvasRebuildData);
+      setIsRebuilding(false);
+      return;
+    }
+    setRebuildData(null);
+
     const timer = window.setTimeout(() => {
       setIsRebuilding(true);
       rebuildCanvas(visibleAtomIds)
         .then(result => {
           if (rebuildGenRef.current === gen) {
-            setRebuildData(result.atoms.length > 0 ? result : null);
+            const next = result.atoms.length > 0 ? result : null;
+            setRebuildData(next);
+            if (next) useCanvasStore.getState().setCanvasRebuildData(next, rebuildKey);
             setIsRebuilding(false);
           }
         })
@@ -355,19 +370,19 @@ export function SigmaCanvas({
     canvasCategoryShowDimmed,
     canvasEntityShowDimmed,
     visibleAtomIds,
+    activeDbId,
   ]);
 
   useEffect(() => {
     if (isPreview) return;
-    setVisibleEdgeLayers(prev => {
-      const next: Record<string, boolean> = {};
-      for (const layer of edgeLayerNames) next[layer] = prev[layer] ?? false;
-      const same =
-        Object.keys(prev).length === Object.keys(next).length &&
-        Object.keys(next).every(layer => prev[layer] === next[layer]);
-      return same ? prev : next;
-    });
-  }, [edgeLayerNames, isPreview]);
+    const prev = useUIStore.getState().canvasVisibleEdgeLayers;
+    const next: Record<string, boolean> = {};
+    for (const layer of edgeLayerNames) next[layer] = prev[layer] ?? false;
+    const same =
+      Object.keys(prev).length === Object.keys(next).length &&
+      Object.keys(next).every(layer => prev[layer] === next[layer]);
+    if (!same) setVisibleEdgeLayers(next);
+  }, [edgeLayerNames, isPreview, setVisibleEdgeLayers]);
 
   useEffect(() => {
     visibleEdgeLayersRef.current = visibleEdgeLayers;
@@ -1306,6 +1321,18 @@ export function SigmaCanvas({
         {/* Theme picker + edge slider — main view only */}
         {!isPreview && !isLoading && data && data.atoms.length > 0 && (
           <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                useCanvasStore.getState().invalidateCanvasData();
+                setRefreshNonce(value => value + 1);
+              }}
+              title="Refresh canvas"
+              aria-label="Refresh canvas"
+              className="flex h-6 w-6 items-center justify-center rounded-full border border-white/20 bg-transparent text-white/60 transition-all hover:border-white/40 hover:text-white"
+            >
+              <RefreshCw className="h-3.5 w-3.5" strokeWidth={2} />
+            </button>
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() => setThemePickerOpen(!themePickerOpen)}
@@ -1358,7 +1385,7 @@ export function SigmaCanvas({
                       <input
                         type="checkbox"
                         checked={visibleEdgeLayers[layer] === true}
-                        onChange={(e) => setVisibleEdgeLayers(prev => ({ ...prev, [layer]: e.target.checked }))}
+                        onChange={(e) => setVisibleEdgeLayers({ ...visibleEdgeLayers, [layer]: e.target.checked })}
                         className="h-3 w-3 accent-white/70"
                       />
                       <span

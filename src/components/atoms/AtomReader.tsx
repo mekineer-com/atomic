@@ -11,6 +11,7 @@ import { MiniGraphPreview } from '../canvas/MiniGraphPreview';
 import { useAtomsStore, type AtomWithTags, type SemanticSearchResult, type SimilarAtomResult } from '../../stores/atoms';
 import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
+import { useCanvasStore } from '../../stores/canvas';
 import { useInlineEditor } from '../../hooks';
 import { formatDate } from '../../lib/date';
 import { getTransport } from '../../lib/transport';
@@ -245,6 +246,7 @@ function AtomReaderContent({
         isMemuMemory ? 'update_memory_summary' : 'update_category_summary',
         { id: atom.id, summary: memuSummary },
       );
+      useCanvasStore.getState().invalidateCanvasData();
       const now = new Date().toISOString();
       onAtomUpdated?.({
         ...atom,
@@ -270,6 +272,7 @@ function AtomReaderContent({
         isMemuMemory ? 'approve_memory' : 'approve_category',
         { id: atom.id },
       );
+      useCanvasStore.getState().invalidateCanvasData();
       onAtomUpdated?.({
         ...atom,
         approved_at: isMemuMemory ? (atom.approved_at ?? new Date().toISOString()) : atom.approved_at,
