@@ -336,6 +336,17 @@ async fn memu_canvas_source(req: HttpRequest) -> HttpResponse {
     }))
 }
 
+async fn memu_bad_canvas_source() -> HttpResponse {
+    HttpResponse::Ok().json(json!({
+        "atoms": [{
+            "id": "memory:bad",
+            "title": "Bad memory",
+            "embedding_f32_le_b64": "not base64"
+        }],
+        "edges": []
+    }))
+}
+
 async fn memu_neighborhood(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
     assert_eq!(path.as_str(), "memory:m1");
     assert!(req.query_string().contains("user_id="));
@@ -366,6 +377,10 @@ fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
             .route(
                 "/integration/atomic/canvas-source",
                 web::get().to(memu_canvas_source),
+            )
+            .route(
+                "/integration/atomic/canvas-source",
+                web::post().to(memu_bad_canvas_source),
             )
             .route(
                 "/integration/atomic/neighborhood/{id}",
@@ -573,6 +588,33 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     assert_eq!(canvas["atoms"][0]["tag_ids"][0], "category:c1");
     assert_eq!(canvas["edges"][0]["source"], "memory:m1");
     assert_eq!(canvas["edges"][0]["target"], "memory:m2");
+    let expected_positions = atomic_core::projection::compute_2d_projection(&[
+        ("memory:m1".to_string(), vec![1.0, 0.0]),
+        ("memory:m2".to_string(), vec![0.9, 0.1]),
+    ]);
+    for (id, expected_x, expected_y) in expected_positions {
+        let atom = canvas["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|atom| atom["atom_id"] == id)
+            .unwrap();
+        assert_eq!(atom["x"].as_f64().unwrap(), expected_x);
+        assert_eq!(atom["y"].as_f64().unwrap(), expected_y);
+    }
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/canvas/rebuild")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"atom_ids": ["memory:bad"]}))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+    assert_eq!(response.status(), 502);
+    let error: Value = actix_test::read_body_json(response).await;
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .contains("memU canvas source shape failed"));
 
     let req = actix_test::TestRequest::get()
         .uri("/api/graph/neighborhood/memory:m1")
