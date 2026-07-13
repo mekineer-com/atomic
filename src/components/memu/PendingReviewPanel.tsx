@@ -282,7 +282,7 @@ function GeneratedSummaryRow({
       <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>
       <div className="grid gap-2 md:grid-cols-2">
         <pre className="min-h-28 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm leading-5 text-[var(--color-text-secondary)]">{review.approved_summary ?? ''}</pre>
-        <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5" value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <textarea className="min-h-28 rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       <div className="mt-2 flex gap-2">
         <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>
