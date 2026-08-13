@@ -256,12 +256,23 @@ function AtomReaderContent({
       ...(memuCategoryEdited && memuDescription !== (atom.description ?? '') ? { description: memuDescription } : {}),
     };
     if (Object.keys(changes).length === 0) return;
+    if (isMemuCategory && atom.summaries_revision == null) {
+      setMemuError('Category changed or its revision is unavailable. Reload and try again.');
+      return;
+    }
     setMemuStatus('saving');
     setMemuError(null);
     try {
       const updated = await getTransport().invoke<AtomWithTags>(
         isMemuMemory ? 'update_memory_summary' : 'update_category_summary',
-        { id: atom.id, ...changes },
+        {
+          id: atom.id,
+          ...changes,
+          ...(isMemuCategory ? {
+            displayed_summary: atom.content,
+            summaries_revision: atom.summaries_revision,
+          } : {}),
+        },
       );
       useCanvasStore.getState().invalidateCanvasData();
       onAtomUpdated?.(updated);
@@ -275,12 +286,22 @@ function AtomReaderContent({
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
+    if (isMemuCategory && atom.summaries_revision == null) {
+      setMemuError('Category changed or its revision is unavailable. Reload and try again.');
+      return;
+    }
     setMemuStatus('saving');
     setMemuError(null);
     try {
       const updated = await getTransport().invoke<AtomWithTags>(
         isMemuMemory ? 'approve_memory' : 'approve_category',
-        { id: atom.id },
+        {
+          id: atom.id,
+          ...(isMemuCategory ? {
+            displayed_summary: atom.content,
+            summaries_revision: atom.summaries_revision,
+          } : {}),
+        },
       );
       useCanvasStore.getState().invalidateCanvasData();
       onAtomUpdated?.(updated);

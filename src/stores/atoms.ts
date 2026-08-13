@@ -22,6 +22,7 @@ export interface DossierFields {
   last_evidence_at?: string | null;
   last_revised_at?: string | null;
   citations?: MemoryCitation[];
+  summaries_revision?: number;
 }
 
 export interface Atom extends DossierFields {
@@ -224,6 +225,7 @@ function toSummary(atom: AtomWithTags): AtomSummary {
     last_evidence_at: atom.last_evidence_at,
     last_revised_at: atom.last_revised_at,
     citations: atom.citations,
+    summaries_revision: atom.summaries_revision,
     embedding_status: atom.embedding_status,
     tagging_status: atom.tagging_status,
     tags: atom.tags,
