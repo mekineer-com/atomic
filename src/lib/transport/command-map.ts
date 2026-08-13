@@ -134,7 +134,13 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'PATCH',
     path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.id as string)}`,
     argsMode: 'body',
-    transformArgs: (a) => ({ summary: a.summary, displayed_summary: a.displayed_summary, summaries_revision: a.summaries_revision }),
+    transformArgs: (a) => ({
+      summary: a.summary,
+      title: a.title,
+      description: a.description,
+      displayed_summary: a.displayed_summary,
+      summaries_revision: a.summaries_revision,
+    }),
   },
   approve_soul_summary: {
     method: 'POST',

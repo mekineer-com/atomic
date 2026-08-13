@@ -10,6 +10,9 @@ export interface Tag {
   created_at: string;
   is_autotag_target: boolean;
   autotag_description: string;
+  category_kind?: 'lore' | 'topic' | 'goal' | null;
+  anchor_role?: 'soul' | 'user' | null;
+  active?: boolean;
 }
 
 export interface TagWithCount extends Tag {

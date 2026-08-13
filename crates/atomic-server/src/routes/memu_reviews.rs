@@ -6,7 +6,12 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize, Serialize)]
 pub struct SummaryUpdate {
-    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summaries_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +133,14 @@ async fn update(
     id: &str,
     body: SummaryUpdate,
 ) -> HttpResponse {
+    if (kind == "memory" && body.summary.is_none())
+        || (kind == "category"
+            && body.summary.is_none()
+            && body.title.is_none()
+            && body.description.is_none())
+    {
+        return HttpResponse::BadRequest().json(json!({"error": "no changes supplied"}));
+    }
     let config = match session(&state) {
         Ok(config) => config,
         Err(response) => return response,
@@ -137,10 +150,18 @@ async fn update(
         Err(response) => return response,
     };
     let mut payload = json!({
-        "summary": body.summary,
         "approved": true,
         "edited_by": "atomic:user",
     });
+    if let Some(summary) = body.summary {
+        payload["summary"] = summary.into();
+    }
+    if let Some(title) = body.title {
+        payload["title"] = title.into();
+    }
+    if let Some(description) = body.description {
+        payload["description"] = description.into();
+    }
     if let Some(revision) = body.summaries_revision {
         payload["summaries_revision"] = revision.into();
     }
@@ -169,6 +190,10 @@ pub async fn update_soul_summary(
     path: web::Path<String>,
     body: web::Json<SummaryUpdate>,
 ) -> HttpResponse {
+    let body = body.into_inner();
+    if body.summary.is_none() {
+        return HttpResponse::BadRequest().json(json!({"error": "summary is required"}));
+    }
     let config = match session(&state) {
         Ok(config) => config,
         Err(response) => return response,
@@ -188,7 +213,7 @@ pub async fn update_soul_summary(
                 ("user_id", config.user_id.as_str()),
                 ("soul_id", config.soul_id.as_str()),
             ])
-            .json(&body.into_inner()),
+            .json(&body),
         "memU soul summary update",
     )
     .await

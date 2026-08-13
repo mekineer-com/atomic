@@ -5,7 +5,26 @@ import { cacheKey, readCache, writeCache } from '../lib/cache/idb';
 import { useDatabasesStore } from './databases';
 import { useCanvasStore } from './canvas';
 
-export interface Atom {
+export interface MemoryCitation {
+  ref: string;
+  memory_id: string;
+  summary: string;
+}
+
+export interface DossierFields {
+  description?: string | null;
+  approved_description?: string | null;
+  approved_summary?: string | null;
+  category_kind?: 'lore' | 'topic' | 'goal' | null;
+  lore_subtype?: string | null;
+  anchor_role?: 'soul' | 'user' | null;
+  active?: boolean;
+  last_evidence_at?: string | null;
+  last_revised_at?: string | null;
+  citations?: MemoryCitation[];
+}
+
+export interface Atom extends DossierFields {
   id: string;
   content: string;
   title: string;
@@ -16,7 +35,6 @@ export interface Atom {
   created_at: string;
   updated_at: string;
   approved_at?: string | null;
-  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   /// Discriminator added in phase-1 of the reports work. `captured`
@@ -31,13 +49,16 @@ export interface Tag {
   name: string;
   parent_id: string | null;
   created_at: string;
+  category_kind?: 'lore' | 'topic' | 'goal' | null;
+  anchor_role?: 'soul' | 'user' | null;
+  active?: boolean;
 }
 
 export interface AtomWithTags extends Atom {
   tags: Tag[];
 }
 
-export interface AtomSummary {
+export interface AtomSummary extends DossierFields {
   id: string;
   title: string;
   snippet: string;
@@ -47,7 +68,6 @@ export interface AtomSummary {
   created_at: string;
   updated_at: string;
   approved_at?: string | null;
-  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
@@ -62,7 +82,7 @@ export interface PaginatedAtoms {
   next_cursor_id?: string;
 }
 
-export interface SemanticSearchResult {
+export interface SemanticSearchResult extends DossierFields {
   id: string;
   content: string;
   title: string;
@@ -73,7 +93,6 @@ export interface SemanticSearchResult {
   created_at: string;
   updated_at: string;
   approved_at?: string | null;
-  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
@@ -82,7 +101,7 @@ export interface SemanticSearchResult {
   matching_chunk_index: number;
 }
 
-export interface SimilarAtomResult {
+export interface SimilarAtomResult extends DossierFields {
   id: string;
   content: string;
   title: string;
@@ -93,7 +112,6 @@ export interface SimilarAtomResult {
   created_at: string;
   updated_at: string;
   approved_at?: string | null;
-  approved_summary?: string | null;
   embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
   tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
   tags: Tag[];
@@ -196,7 +214,16 @@ function toSummary(atom: AtomWithTags): AtomSummary {
     created_at: atom.created_at,
     updated_at: atom.updated_at,
     approved_at: atom.approved_at,
+    description: atom.description,
+    approved_description: atom.approved_description,
     approved_summary: atom.approved_summary,
+    category_kind: atom.category_kind,
+    lore_subtype: atom.lore_subtype,
+    anchor_role: atom.anchor_role,
+    active: atom.active,
+    last_evidence_at: atom.last_evidence_at,
+    last_revised_at: atom.last_revised_at,
+    citations: atom.citations,
     embedding_status: atom.embedding_status,
     tagging_status: atom.tagging_status,
     tags: atom.tags,
