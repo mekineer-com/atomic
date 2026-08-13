@@ -278,17 +278,12 @@ function AtomReaderContent({
     setMemuStatus('saving');
     setMemuError(null);
     try {
-      await getTransport().invoke(
+      const updated = await getTransport().invoke<AtomWithTags>(
         isMemuMemory ? 'approve_memory' : 'approve_category',
         { id: atom.id },
       );
       useCanvasStore.getState().invalidateCanvasData();
-      onAtomUpdated?.({
-        ...atom,
-        approved_at: isMemuMemory ? (atom.approved_at ?? new Date().toISOString()) : atom.approved_at,
-        approved_summary: isMemuCategory ? atom.content : atom.approved_summary,
-        approved_description: isMemuCategory ? atom.description : atom.approved_description,
-      });
+      onAtomUpdated?.(updated);
     } catch (error) {
       setMemuError(String(error));
     } finally {
