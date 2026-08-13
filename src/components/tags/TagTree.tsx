@@ -9,6 +9,31 @@ import { useTagsStore, TagWithCount } from '../../stores/tags';
 import { CANVAS_NONE_KEY, useUIStore } from '../../stores/ui';
 import { useAtomsStore } from '../../stores/atoms';
 
+const MEMU_GROUPS = [
+  ['lore', 'Lore'],
+  ['topic', 'Topics'],
+  ['goal', 'Goals'],
+] as const;
+
+export function groupMemuTags(tags: TagWithCount[]): TagWithCount[] {
+  if (!tags.some((tag) => tag.id.startsWith('category:'))) return tags;
+  return MEMU_GROUPS.map(([kind, name]) => {
+    const children = tags.filter((tag) => (tag.category_kind ?? 'topic') === kind);
+    return {
+      id: `memu:group:${kind}`,
+      name,
+      parent_id: null,
+      created_at: '1970-01-01T00:00:00Z',
+      is_autotag_target: false,
+      autotag_description: '',
+      atom_count: children.reduce((total, tag) => total + tag.atom_count, 0),
+      children_total: children.length,
+      children,
+      active: true,
+    };
+  });
+}
+
 interface FlattenedTag {
   tag: TagWithCount;
   level: number;
@@ -60,6 +85,7 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
   const setSelectedTag = useUIStore(s => s.setSelectedTag);
   const openSearchPalette = useUIStore(s => s.openSearchPalette);
   const expandedTagIds = useUIStore(s => s.expandedTagIds);
+  const expandTagPath = useUIStore(s => s.expandTagPath);
   const viewMode = useUIStore(s => s.viewMode);
   const canvasCategoryVisible = useUIStore(s => s.canvasCategoryVisible);
   const setCanvasCategoryVisible = useUIStore(s => s.setCanvasCategoryVisible);
@@ -69,13 +95,15 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
+  const memuMode = tags.some((tag) => tag.id.startsWith('category:'));
+  const displayedTags = useMemo(() => groupMemuTags(tags), [tags]);
   const flatTags = useMemo(
-    () => flattenVisibleTags(tags, expandedTagIds),
-    [tags, expandedTagIds]
+    () => flattenVisibleTags(displayedTags, expandedTagIds),
+    [displayedTags, expandedTagIds]
   );
   const canvasCategoryIds = useMemo(
-    () => [CANVAS_NONE_KEY, ...flatTags.filter(item => item.level === 0 && !item.loadMoreParentId).map(item => item.tag.id)],
-    [flatTags]
+    () => [CANVAS_NONE_KEY, ...tags.filter((tag) => tag.id.startsWith('category:')).map((tag) => tag.id)],
+    [tags]
   );
   const showCanvasControls = viewMode === 'canvas';
 
@@ -99,6 +127,10 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
   useEffect(() => {
     virtualizer.measure();
   }, [flatTags, virtualizer]);
+
+  useEffect(() => {
+    if (memuMode) expandTagPath(MEMU_GROUPS.map(([kind]) => `memu:group:${kind}`));
+  }, [expandTagPath, memuMode]);
 
   // Scroll to selected tag when the selection changes, or when an initially
   // empty async-loaded tree later receives that selected tag. Once a selection
@@ -154,6 +186,7 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
   };
 
   const handleContextMenu = (e: MouseEvent, tag: TagWithCount) => {
+    if (tag.id.startsWith('category:') || tag.id.startsWith('memu:group:')) return;
     setContextMenu({
       position: { x: e.clientX, y: e.clientY },
       tag,
@@ -248,15 +281,17 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
       <div className="flex items-center justify-between px-3 py-2 shrink-0">
         <div className="flex items-center gap-1">
           <span className="text-xs font-semibold text-[var(--color-text-tertiary)] uppercase tracking-wider">
-            Tags
+            {memuMode ? 'Categories' : 'Tags'}
           </span>
-          <button
-            onClick={() => setNewTagModal({ isOpen: true, parentId: null, name: '' })}
-            className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
-            title="New tag"
-          >
-            <Plus className="w-4 h-4" strokeWidth={2} />
-          </button>
+          {!memuMode && (
+            <button
+              onClick={() => setNewTagModal({ isOpen: true, parentId: null, name: '' })}
+              className="p-1 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+              title="New tag"
+            >
+              <Plus className="w-4 h-4" strokeWidth={2} />
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {showCanvasControls && (
@@ -363,7 +398,7 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
                       selectedTagId={selectedTagId}
                       onSelect={handleSelectTag}
                       onContextMenu={handleContextMenu}
-                      showCanvasCheckbox={showCanvasControls && level === 0}
+                      showCanvasCheckbox={showCanvasControls && tag.id.startsWith('category:')}
                       canvasChecked={canvasCategoryVisible[tag.id] ?? true}
                       onCanvasCheck={setCanvasCategoryVisible}
                     />

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getTransport } from '../../lib/transport';
 import { useCanvasStore } from '../../stores/canvas';
+import type { MemoryCitation } from '../../stores/atoms';
+import { formatDate } from '../../lib/date';
+import { DossierMarkdown } from './DossierMarkdown';
 
 type MemoryReview = {
   id: string;
@@ -34,6 +37,13 @@ type CategoryReview = {
   summary: string;
   approved_summary?: string | null;
   label?: string;
+  description?: string | null;
+  approved_description?: string | null;
+  category_kind?: 'lore' | 'topic' | 'goal' | null;
+  active?: boolean;
+  last_evidence_at?: string | null;
+  last_revised_at?: string | null;
+  citations?: MemoryCitation[];
 };
 
 type SoulSummaryReview = CategoryReview & {
@@ -248,9 +258,17 @@ function GeneratedSummaryRow({
   onError: (err: unknown) => void;
 }) {
   const [summary, setSummary] = useState(review.summary);
+  const [title, setTitle] = useState(review.label ?? '');
+  const [description, setDescription] = useState(review.description ?? '');
   const [busy, setBusy] = useState(false);
-  const edited = summary !== review.summary;
-  useEffect(() => setSummary(review.summary), [review.summary]);
+  const edited = summary !== review.summary
+    || (kind === 'category' && title !== (review.label ?? ''))
+    || (kind === 'category' && description !== (review.description ?? ''));
+  useEffect(() => {
+    setSummary(review.summary);
+    setTitle(review.label ?? '');
+    setDescription(review.description ?? '');
+  }, [review]);
   const run = async () => {
     if (disabled) return;
     setBusy(true);
@@ -260,9 +278,14 @@ function GeneratedSummaryRow({
         ? (edited ? 'update_category_summary' : 'approve_category')
         : (edited ? 'update_soul_summary' : 'approve_soul_summary');
       const target = kind === 'category' ? { id: review.id } : { kind: (review as SoulSummaryReview).kind };
+      const changes = kind === 'category' ? {
+        ...(summary !== review.summary ? { summary } : {}),
+        ...(title !== (review.label ?? '') ? { title } : {}),
+        ...(description !== (review.description ?? '') ? { description } : {}),
+      } : { summary };
       const result = await getTransport().invoke<SummaryMutationResponse>(command, {
         ...target,
-        ...(edited ? { summary } : {}),
+        ...(edited ? changes : {}),
         displayed_summary: review.summary,
         summaries_revision: revision,
       });
@@ -279,11 +302,34 @@ function GeneratedSummaryRow({
   return (
     <article className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
       {stale && <p className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-500">Summaries changed during a memorize cycle. Save any edits to another file, then refresh this page.</p>}
-      <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>
+      {kind === 'category' ? (
+        <div className="mb-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+            <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 capitalize">{review.category_kind ?? 'topic'}</span>
+            <span>{review.active === false ? 'Inactive' : 'Active'}</span>
+            {review.last_evidence_at && <span>Evidence: {formatDate(review.last_evidence_at)}</span>}
+            {review.last_revised_at && <span>Revised: {formatDate(review.last_revised_at)}</span>}
+          </div>
+          <input className="w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm font-medium" value={title} onChange={(e) => setTitle(e.target.value)} />
+          <div className="grid gap-2 md:grid-cols-2">
+            <p className="min-h-20 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 text-sm text-[var(--color-text-secondary)]">{review.approved_description ?? ''}</p>
+            <textarea className="min-h-20 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={description} onChange={(e) => setDescription(e.target.value)} />
+          </div>
+        </div>
+      ) : <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>}
       <div className="grid gap-2 md:grid-cols-2">
-        <pre className="min-h-28 overflow-y-auto whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)]">{review.approved_summary ?? ''}</pre>
+        <div className="prose prose-invert min-h-28 max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)]">
+          <DossierMarkdown citations={review.citations}>{review.approved_summary ?? ''}</DossierMarkdown>
+        </div>
         <textarea className="min-h-28 overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable]" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
+      {kind === 'category' && Boolean(review.citations?.length) && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {review.citations?.map((citation) => (
+            <span key={citation.ref} title={citation.summary} className="cursor-help rounded border border-[var(--color-border)] px-1.5 py-0.5 text-xs underline decoration-dotted">{citation.ref}</span>
+          ))}
+        </div>
+      )}
       <div className="mt-2 flex gap-2">
         <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>
         {kind === 'category' && <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>}

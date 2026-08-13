@@ -1,7 +1,5 @@
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { ChevronDown, Trash2 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { openExternalUrl } from '../../lib/platform';
 import { Modal } from '../ui/Modal';
 import { Input } from '../ui/Input';
@@ -17,6 +15,7 @@ import { formatDate } from '../../lib/date';
 import { getTransport } from '../../lib/transport';
 import { findSimilarAtoms } from '../../lib/api';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
+import { DossierMarkdown } from '../memu/DossierMarkdown';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
 import type {
   AtomicCodeMirrorEditorHandle,
@@ -208,17 +207,26 @@ function AtomReaderContent({
   const isMemuCategory = atom.id.startsWith('category:');
   const isMemuEntity = atom.id.startsWith('entity:');
   const isMemuAtom = isMemuMemory || isMemuCategory || isMemuEntity;
+  const [memuTitle, setMemuTitle] = useState(atom.title);
+  const [memuDescription, setMemuDescription] = useState(atom.description ?? '');
   const [memuSummary, setMemuSummary] = useState(atom.content);
+  const [memuEditing, setMemuEditing] = useState(Boolean(initialEditing));
   const [memuStatus, setMemuStatus] = useState<'idle' | 'saving'>('idle');
   const [memuError, setMemuError] = useState<string | null>(null);
   const memuSummaryEdited = memuSummary !== atom.content;
+  const memuCategoryEdited = isMemuCategory && (
+    memuTitle !== atom.title || memuDescription !== (atom.description ?? '')
+  );
+  const memuEdited = memuSummaryEdited || memuCategoryEdited;
   const memuSummaryApproved = isMemuMemory
     ? Boolean(atom.approved_at)
-    : isMemuCategory && atom.approved_summary === atom.content;
-  const memuPrimaryDisabled = memuStatus !== 'idle' || (memuSummaryApproved && !memuSummaryEdited);
+    : isMemuCategory
+      && atom.approved_summary === atom.content
+      && atom.approved_description === (atom.description ?? '');
+  const memuPrimaryDisabled = memuStatus !== 'idle' || (memuSummaryApproved && !memuEdited);
   const memuPrimaryLabel = memuStatus === 'saving'
     ? 'Saving...'
-    : (memuSummaryApproved ? 'Save' : (memuSummaryEdited ? 'Save + approve' : 'Approve'));
+    : (memuSummaryApproved ? 'Save' : (memuEdited ? 'Save + approve' : 'Approve'));
 
   const {
     editContent, editSourceUrl, editTags, saveStatus,
@@ -228,9 +236,12 @@ function AtomReaderContent({
   const isTaggingInFlight = atom.tagging_status === 'pending' || atom.tagging_status === 'processing';
 
   useEffect(() => {
+    setMemuTitle(atom.title);
+    setMemuDescription(atom.description ?? '');
     setMemuSummary(atom.content);
+    setMemuEditing(Boolean(initialEditing));
     setMemuError(null);
-  }, [atom.id, atom.content]);
+  }, [atom.id, atom.title, atom.description, atom.content, initialEditing]);
 
   const handleAutoTag = useCallback(async () => {
     await retryTagging(atom.id);
@@ -239,21 +250,28 @@ function AtomReaderContent({
 
   const saveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
+    const changes = {
+      ...(memuSummaryEdited ? { summary: memuSummary } : {}),
+      ...(memuCategoryEdited && memuTitle !== atom.title ? { title: memuTitle } : {}),
+      ...(memuCategoryEdited && memuDescription !== (atom.description ?? '') ? { description: memuDescription } : {}),
+    };
+    if (Object.keys(changes).length === 0) return;
     setMemuStatus('saving');
     setMemuError(null);
     try {
       const updated = await getTransport().invoke<AtomWithTags>(
         isMemuMemory ? 'update_memory_summary' : 'update_category_summary',
-        { id: atom.id, summary: memuSummary },
+        { id: atom.id, ...changes },
       );
       useCanvasStore.getState().invalidateCanvasData();
       onAtomUpdated?.(updated);
+      if (isMemuCategory) setMemuEditing(false);
     } catch (error) {
       setMemuError(String(error));
     } finally {
       setMemuStatus('idle');
     }
-  }, [atom, isMemuCategory, isMemuMemory, memuSummary, onAtomUpdated]);
+  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated]);
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -269,6 +287,7 @@ function AtomReaderContent({
         ...atom,
         approved_at: isMemuMemory ? (atom.approved_at ?? new Date().toISOString()) : atom.approved_at,
         approved_summary: isMemuCategory ? atom.content : atom.approved_summary,
+        approved_description: isMemuCategory ? atom.description : atom.approved_description,
       });
     } catch (error) {
       setMemuError(String(error));
@@ -329,7 +348,7 @@ function AtomReaderContent({
 
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        void (isMemuAtom ? (memuSummaryEdited ? saveMemuSummary() : (!memuSummaryApproved && approveMemuSummary())) : saveNow());
+        void (isMemuAtom ? (memuEdited ? saveMemuSummary() : (!memuSummaryApproved && approveMemuSummary())) : saveNow());
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
@@ -347,7 +366,7 @@ function AtomReaderContent({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [approveMemuSummary, flushDraft, isMemuAtom, memuSummaryApproved, memuSummaryEdited, onDismiss, saveMemuSummary, saveNow, showDeleteModal]);
+  }, [approveMemuSummary, flushDraft, isMemuAtom, memuEdited, memuSummaryApproved, onDismiss, saveMemuSummary, saveNow, showDeleteModal]);
 
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {
@@ -447,22 +466,74 @@ function AtomReaderContent({
               <div className="space-y-4">
                 {isMemuMemory || isMemuCategory ? (
                   <>
-                    <textarea
-                      value={memuSummary}
-                      onChange={(e) => setMemuSummary(e.target.value)}
-                      className="min-h-[24rem] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
-                    />
+                    {isMemuCategory && (
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+                        <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5 capitalize">{atom.category_kind ?? 'topic'}</span>
+                        <span>{atom.active === false ? 'Inactive' : 'Active'}</span>
+                        {atom.last_evidence_at && <span title={formatDate(atom.last_evidence_at)}>Evidence: {formatDate(atom.last_evidence_at)}</span>}
+                        {atom.last_revised_at && <span title={formatDate(atom.last_revised_at)}>Revised: {formatDate(atom.last_revised_at)}</span>}
+                      </div>
+                    )}
+                    {isMemuMemory || memuEditing ? (
+                      <div className="space-y-3">
+                        {isMemuCategory && (
+                          <>
+                            <Input value={memuTitle} onChange={(e) => setMemuTitle(e.target.value)} placeholder="Category title" />
+                            <textarea
+                              value={memuDescription}
+                              onChange={(e) => setMemuDescription(e.target.value)}
+                              className="min-h-24 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+                              placeholder="Description"
+                            />
+                          </>
+                        )}
+                        <textarea
+                          value={memuSummary}
+                          onChange={(e) => setMemuSummary(e.target.value)}
+                          className="min-h-[24rem] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">{atom.title}</h1>
+                        {atom.description && <p className="text-sm leading-6 text-[var(--color-text-secondary)]">{atom.description}</p>}
+                        <div className="prose prose-invert max-w-none prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-strong:text-[var(--color-text-primary)] prose-li:text-[var(--color-text-primary)]">
+                          <DossierMarkdown citations={atom.citations}>{atom.content}</DossierMarkdown>
+                        </div>
+                      </>
+                    )}
                     {memuError && (
                       <p className="rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{memuError}</p>
                     )}
                     <div className="flex flex-wrap gap-2">
                       <button
-                        onClick={() => void (memuSummaryEdited ? saveMemuSummary() : approveMemuSummary())}
+                        onClick={() => void (memuEdited ? saveMemuSummary() : approveMemuSummary())}
                         disabled={memuPrimaryDisabled}
                         className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]"
                       >
                         {memuPrimaryLabel}
                       </button>
+                      {isMemuCategory && (memuEditing ? (
+                        <button
+                          onClick={() => {
+                            setMemuTitle(atom.title);
+                            setMemuDescription(atom.description ?? '');
+                            setMemuSummary(atom.content);
+                            setMemuEditing(false);
+                          }}
+                          disabled={memuStatus !== 'idle'}
+                          className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm"
+                        >
+                          Cancel
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => setMemuEditing(true)}
+                          className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm"
+                        >
+                          Edit
+                        </button>
+                      ))}
                       {isMemuMemory ? (
                         <button
                           onClick={() => setShowDeleteModal(true)}
@@ -480,9 +551,7 @@ function AtomReaderContent({
                   </>
                 ) : (
                   <div className="prose prose-invert max-w-none prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-a:text-[var(--color-text-primary)] prose-a:underline prose-a:decoration-[var(--color-border-hover)] prose-strong:text-[var(--color-text-primary)] prose-code:text-[var(--color-accent-light)] prose-code:bg-[var(--color-bg-card)] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[var(--color-bg-card)] prose-pre:border prose-pre:border-[var(--color-border)] prose-blockquote:border-l-[var(--color-accent)] prose-blockquote:text-[var(--color-text-secondary)] prose-li:text-[var(--color-text-primary)]">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {atom.content}
-                    </ReactMarkdown>
+                    <DossierMarkdown>{atom.content}</DossierMarkdown>
                   </div>
                 )}
               </div>

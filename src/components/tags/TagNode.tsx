@@ -30,6 +30,8 @@ export const TagNode = memo(function TagNode({
   const fetchTagChildren = useTagsStore(s => s.fetchTagChildren);
   const hasChildren = (tag.children && tag.children.length > 0) || tag.children_total > 0;
   const isSelected = selectedTagId === tag.id;
+  const isMemuGroup = tag.id.startsWith('memu:group:');
+  const isMemuCategory = tag.id.startsWith('category:');
 
   const handleToggle = useCallback(async (e: MouseEvent) => {
     e.stopPropagation();
@@ -42,6 +44,7 @@ export const TagNode = memo(function TagNode({
 
   const handleContextMenu = (e: MouseEvent) => {
     e.preventDefault();
+    if (isMemuGroup || isMemuCategory) return;
     onContextMenu(e, tag);
   };
 
@@ -63,9 +66,9 @@ export const TagNode = memo(function TagNode({
         isSelected
           ? 'bg-[var(--color-accent)]/20 text-[var(--color-text-primary)]'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card)] hover:text-[var(--color-text-primary)]'
-      }`}
+      } ${isMemuCategory && tag.active === false ? 'opacity-55' : ''}`}
       style={{ paddingLeft: `${8 + level * 16}px` }}
-      onClick={(e) => hasChildren ? handleToggle(e) : onSelect(tag.id)}
+      onClick={(e) => (isMemuGroup || hasChildren) ? handleToggle(e) : onSelect(tag.id)}
       onContextMenu={handleContextMenu}
     >
       {showCanvasCheckbox && (
@@ -91,8 +94,11 @@ export const TagNode = memo(function TagNode({
       ) : (
         <span className="w-4" />
       )}
-      <span className="flex-1 truncate text-sm">{tag.name}</span>
-      {!hasChildren && (
+      <span className={`flex-1 truncate text-sm ${isMemuGroup ? 'font-semibold' : ''}`}>{tag.name}</span>
+      {isMemuCategory && tag.active === false && (
+        <span className="text-[10px] text-[var(--color-text-tertiary)]">inactive</span>
+      )}
+      {!hasChildren && !isMemuGroup && (
         <>
           {/* Chat icon - visible on hover */}
           <button
@@ -112,7 +118,7 @@ export const TagNode = memo(function TagNode({
           </button>
         </>
       )}
-      {!hasChildren && <span className="text-xs text-[var(--color-text-tertiary)] tabular-nums">{tag.atom_count}</span>}
+      {!hasChildren && !isMemuGroup && <span className="text-xs text-[var(--color-text-tertiary)] tabular-nums">{tag.atom_count}</span>}
     </div>
   );
 });
