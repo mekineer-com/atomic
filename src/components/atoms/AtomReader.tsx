@@ -15,7 +15,7 @@ import { formatDate } from '../../lib/date';
 import { getTransport } from '../../lib/transport';
 import { findSimilarAtoms } from '../../lib/api';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
-import { DossierMarkdown } from '../memu/DossierMarkdown';
+import { DossierMarkdown, MemoryCitationLinks } from '../memu/DossierMarkdown';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
 import type {
   AtomicCodeMirrorEditorHandle,
@@ -521,6 +521,7 @@ function AtomReaderContent({
                     {memuError && (
                       <p className="rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{memuError}</p>
                     )}
+                    {isMemuCategory && memuEditing && <MemoryCitationLinks citations={atom.citations} />}
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() => void (memuEdited ? saveMemuSummary() : approveMemuSummary())}

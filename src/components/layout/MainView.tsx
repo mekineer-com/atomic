@@ -64,6 +64,7 @@ export function MainView() {
     }))
   );
   const leftPanelOpen = useUIStore(s => s.leftPanelOpen);
+  const setLeftPanelOpen = useUIStore(s => s.setLeftPanelOpen);
   const toggleLeftPanel = useUIStore(s => s.toggleLeftPanel);
   const setViewMode = useUIStore(s => s.setViewMode);
   const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
@@ -107,6 +108,10 @@ export function MainView() {
       ignore = true;
     };
   }, []);
+
+  useEffect(() => {
+    setReviewPanelOpen(false);
+  }, [activeTabId]);
 
   // Debounced server-side search when searchQuery changes
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -296,7 +301,10 @@ export function MainView() {
                 return (
                   <button
                     key={mode}
-                    onClick={() => setViewMode(mode)}
+                    onClick={() => {
+                      setReviewPanelOpen(false);
+                      setViewMode(mode);
+                    }}
                     className={`relative p-1.5 rounded-md ${
                       isActiveNav
                         ? 'text-white'
@@ -404,7 +412,10 @@ export function MainView() {
 
         {memuReviewsEnabled && (
           <button
-            onClick={() => setReviewPanelOpen(true)}
+            onClick={() => {
+              setLeftPanelOpen(false);
+              setReviewPanelOpen(true);
+            }}
             className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
             title="Review memU changes"
           >
@@ -453,7 +464,9 @@ export function MainView() {
 
       {/* Content */}
       <div className="flex-1 overflow-hidden relative">
-        {localGraph.isOpen && localGraph.centerAtomId ? (
+        {reviewPanelOpen ? (
+          <PendingReviewPanel isOpen onClose={() => setReviewPanelOpen(false)} />
+        ) : localGraph.isOpen && localGraph.centerAtomId ? (
           <LocalGraphView />
         ) : readerState.atomId ? (
           <AtomReader atomId={readerState.atomId} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
@@ -536,7 +549,6 @@ export function MainView() {
         <ChatViewer />
       </div>
     </div>
-    {memuReviewsEnabled && <PendingReviewPanel isOpen={reviewPanelOpen} onClose={() => setReviewPanelOpen(false)} />}
     </>
   );
 }

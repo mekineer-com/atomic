@@ -26,7 +26,10 @@ export function DossierMarkdown({
               type="button"
               className="cursor-pointer bg-transparent p-0 [font:inherit] text-inherit underline decoration-dotted"
               title={citation.summary}
-              onClick={(event) => openReader(`memory:${citation.memory_id}`, undefined, { newTab: event.metaKey || event.ctrlKey })}
+              onClick={(event) => openReader(`memory:${citation.memory_id}`, undefined, {
+                newTab: event.metaKey || event.ctrlKey,
+                background: event.metaKey || event.ctrlKey,
+              })}
             >
               {label}
             </button>
@@ -36,6 +39,30 @@ export function DossierMarkdown({
     >
       {markdown}
     </ReactMarkdown>
+  );
+}
+
+export function MemoryCitationLinks({ citations = [] }: { citations?: MemoryCitation[] }) {
+  const openReader = useUIStore(s => s.openReader);
+
+  if (citations.length === 0) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {citations.map((citation) => (
+        <button
+          key={citation.ref}
+          type="button"
+          title={citation.summary}
+          className="cursor-pointer rounded border border-[var(--color-border)] px-1.5 py-0.5 text-xs underline decoration-dotted"
+          onClick={(event) => openReader(`memory:${citation.memory_id}`, undefined, {
+            newTab: event.metaKey || event.ctrlKey,
+            background: event.metaKey || event.ctrlKey,
+          })}
+        >
+          {citation.ref}
+        </button>
+      ))}
+    </div>
   );
 }
 

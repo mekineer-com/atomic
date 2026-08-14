@@ -3,7 +3,7 @@ import { getTransport } from '../../lib/transport';
 import { useCanvasStore } from '../../stores/canvas';
 import type { MemoryCitation } from '../../stores/atoms';
 import { formatDate } from '../../lib/date';
-import { DossierMarkdown } from './DossierMarkdown';
+import { DossierMarkdown, MemoryCitationLinks } from './DossierMarkdown';
 
 type MemoryReview = {
   id: string;
@@ -107,11 +107,7 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   const reportError = (err: unknown) => setError(String(err));
 
   return (
-    <div className="fixed inset-0 z-50 bg-black" onClick={onClose}>
-      <aside
-        className="h-full w-full overflow-y-auto bg-[var(--color-bg-main)] p-4"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="h-full overflow-y-auto bg-[var(--color-bg-main)] p-4">
         <div className="mb-4 flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
@@ -180,7 +176,6 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
             ))}
           </section>
         </div>
-      </aside>
     </div>
   );
 }
@@ -324,10 +319,8 @@ function GeneratedSummaryRow({
         <textarea className={`overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       {kind === 'category' && Boolean(review.citations?.length) && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {review.citations?.map((citation) => (
-            <span key={citation.ref} title={citation.summary} className="cursor-help rounded border border-[var(--color-border)] px-1.5 py-0.5 text-xs underline decoration-dotted">{citation.ref}</span>
-          ))}
+        <div className="mt-2">
+          <MemoryCitationLinks citations={review.citations} />
         </div>
       )}
       <div className="mt-2 flex gap-2">

@@ -145,7 +145,7 @@ interface UIStore {
   expandTagPath: (tagIds: string[]) => void;
   toggleTagExpanded: (tagId: string) => void;
   // Tab actions
-  openEntry: (entry: TabEntry, opts?: { newTab?: boolean }) => void;
+  openEntry: (entry: TabEntry, opts?: { newTab?: boolean; background?: boolean }) => void;
   switchToTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
@@ -154,7 +154,7 @@ interface UIStore {
   deactivateTabs: () => void;
   removeAtomFromTabs: (atomId: string) => void;
   // Legacy public openers (delegate to openEntry)
-  openReader: (atomId: string, highlightText?: string, opts?: { newTab?: boolean }) => void;
+  openReader: (atomId: string, highlightText?: string, opts?: { newTab?: boolean; background?: boolean }) => void;
   openReaderEditing: (atomId: string, opts?: { newTab?: boolean }) => void;
   setReaderEditState: (editing: boolean, saveStatus?: 'idle' | 'saving' | 'saved' | 'error') => void;
   closeReader: () => void;
@@ -441,12 +441,20 @@ export const useUIStore = create<UIStore>()(
       ///      already shows this entry, switch to it; otherwise new tab.
       openEntry: (entry, opts) => {
         const newTab = !!opts?.newTab;
+        const background = !!opts?.background;
         const state = get();
 
         // Cmd/ctrl+click: always new tab.
         if (newTab) {
           const id = generateTabId();
           const tab: Tab = { id, stack: [entry], stackIndex: 0, ordinal: state.nextTabOrdinal };
+          if (background) {
+            set((s) => ({
+              tabs: [...s.tabs, tab],
+              nextTabOrdinal: s.nextTabOrdinal + 1,
+            }));
+            return;
+          }
           set((s) => {
             const projected = projectActiveEntry(entry);
             return {
