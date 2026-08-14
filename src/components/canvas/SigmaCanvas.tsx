@@ -378,7 +378,7 @@ export function SigmaCanvas({
   ]);
 
   useEffect(() => {
-    if (isPreview) return;
+    if (isPreview || edgeLayerNames.length === 0) return;
     const prev = useUIStore.getState().canvasVisibleEdgeLayers;
     const next: Record<string, boolean> = {};
     for (const layer of edgeLayerNames) next[layer] = prev[layer] ?? false;
@@ -1343,13 +1343,14 @@ export function SigmaCanvas({
           <div
             ref={selectedCategoryOrbitRef}
             aria-hidden="true"
-            className="pointer-events-none absolute z-[11] rounded-full border animate-spin motion-reduce:animate-none"
-            style={{ display: 'none', animationDuration: '2.4s', borderColor: '#fff', borderRightColor: 'transparent' }}
+            className="pointer-events-none absolute z-[11] animate-spin motion-reduce:animate-none"
+            style={{ display: 'none', animationDuration: '2.4s' }}
           >
-            <span
-              className="absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full"
-              style={{ backgroundColor: '#fff', boxShadow: '0 0 8px 2px rgba(255,255,255,0.9)' }}
-            />
+            <svg viewBox="0 0 100 100" className="h-full w-full overflow-visible">
+              <circle cx="50" cy="50" r="46" fill="none" stroke="#fff" strokeWidth="3" />
+              <circle cx="50" cy="4" r="6" fill="#fff" style={{ filter: 'drop-shadow(0 0 6px #fff)' }} />
+              <circle cx="50" cy="50" r="7" fill="#fff" style={{ filter: 'drop-shadow(0 0 5px #fff)' }} />
+            </svg>
           </div>
         )}
 

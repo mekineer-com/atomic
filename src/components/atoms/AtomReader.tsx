@@ -513,7 +513,7 @@ function AtomReaderContent({
                       <>
                         <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">{atom.title}</h1>
                         {atom.description && <p className="text-sm leading-6 text-[var(--color-text-secondary)]">{atom.description}</p>}
-                        <div className="prose prose-invert max-w-none prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-strong:text-[var(--color-text-primary)] prose-li:text-[var(--color-text-primary)]">
+                        <div className="prose prose-sm prose-invert max-w-none leading-6 prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-strong:text-[var(--color-text-primary)] prose-li:text-[var(--color-text-primary)]">
                           <DossierMarkdown citations={atom.citations}>{atom.content}</DossierMarkdown>
                         </div>
                       </>
