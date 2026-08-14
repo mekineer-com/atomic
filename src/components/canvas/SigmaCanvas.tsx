@@ -1343,10 +1343,13 @@ export function SigmaCanvas({
           <div
             ref={selectedCategoryOrbitRef}
             aria-hidden="true"
-            className="pointer-events-none absolute z-[11] rounded-full border border-white/70 border-r-transparent animate-spin motion-reduce:animate-none"
-            style={{ display: 'none', animationDuration: '2.4s' }}
+            className="pointer-events-none absolute z-[11] rounded-full border animate-spin motion-reduce:animate-none"
+            style={{ display: 'none', animationDuration: '2.4s', borderColor: '#fff', borderRightColor: 'transparent' }}
           >
-            <span className="absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-white shadow-[0_0_8px_2px_rgba(255,255,255,0.75)]" />
+            <span
+              className="absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full"
+              style={{ backgroundColor: '#fff', boxShadow: '0 0 8px 2px rgba(255,255,255,0.9)' }}
+            />
           </div>
         )}
 

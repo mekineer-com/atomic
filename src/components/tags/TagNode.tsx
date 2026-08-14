@@ -68,7 +68,7 @@ export const TagNode = memo(function TagNode({
 
   return (
     <div
-      className={`group flex items-center gap-1 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${
+      className={`group relative flex items-center gap-1 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${
         isSelected
           ? 'bg-[var(--color-accent)]/20 text-[var(--color-text-primary)]'
           : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-card)] hover:text-[var(--color-text-primary)]'
@@ -105,11 +105,11 @@ export const TagNode = memo(function TagNode({
         <span className="text-[10px] text-[var(--color-text-tertiary)]">inactive</span>
       )}
       {!hasChildren && !isMemuGroup && (
-        <>
+        <div className="pointer-events-none absolute right-1 flex items-center rounded-md bg-[var(--color-bg-card)] opacity-0 shadow-sm transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
           {/* Chat icon - visible on hover */}
           <button
             onClick={handleChatClick}
-            className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
+            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-colors"
             title="Chat with this tag"
           >
             <MessageCircle className="w-3.5 h-3.5" strokeWidth={2} />
@@ -117,7 +117,7 @@ export const TagNode = memo(function TagNode({
           {/* Article icon - visible on hover */}
           <button
             onClick={handleWikiClick}
-            className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
+            className="w-5 h-5 flex items-center justify-center text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-colors"
             title="View wiki article"
           >
             <FileText className="w-3.5 h-3.5" strokeWidth={2} />
@@ -125,13 +125,13 @@ export const TagNode = memo(function TagNode({
           {isMemuCategory && (
             <button
               onClick={handleReaderClick}
-              className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
+              className="w-5 h-5 flex items-center justify-center text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-colors"
               title="Open in reader"
             >
               <BookOpen className="w-3.5 h-3.5" strokeWidth={2} />
             </button>
           )}
-        </>
+        </div>
       )}
       {!hasChildren && !isMemuGroup && <span className="text-xs text-[var(--color-text-tertiary)] tabular-nums">{tag.atom_count}</span>}
     </div>

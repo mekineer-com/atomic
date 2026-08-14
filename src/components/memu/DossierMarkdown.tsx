@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { MemoryCitation } from '../../stores/atoms';
+import { useUIStore } from '../../stores/ui';
 
 export function DossierMarkdown({
   children,
@@ -9,6 +10,7 @@ export function DossierMarkdown({
   children: string;
   citations?: MemoryCitation[];
 }) {
+  const openReader = useUIStore(s => s.openReader);
   const byRef = new Map(citations.map((citation) => [citation.ref, citation]));
   const markdown = linkMemoryCitations(children, byRef);
 
@@ -20,7 +22,14 @@ export function DossierMarkdown({
           const ref = href?.match(/^#memu-citation-(\d+)$/)?.[1];
           const citation = ref ? byRef.get(`[M${ref}]`) : undefined;
           return citation ? (
-            <span className="cursor-help underline decoration-dotted" title={citation.summary}>{label}</span>
+            <button
+              type="button"
+              className="cursor-pointer bg-transparent p-0 [font:inherit] text-inherit underline decoration-dotted"
+              title={citation.summary}
+              onClick={(event) => openReader(`memory:${citation.memory_id}`, undefined, { newTab: event.metaKey || event.ctrlKey })}
+            >
+              {label}
+            </button>
           ) : <a href={href}>{label}</a>;
         },
       }}
