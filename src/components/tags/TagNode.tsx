@@ -1,5 +1,5 @@
 import { memo, MouseEvent, useCallback } from 'react';
-import { ChevronRight, MessageCircle, FileText } from 'lucide-react';
+import { BookOpen, ChevronRight, MessageCircle, FileText } from 'lucide-react';
 import { TagWithCount, useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 
@@ -49,10 +49,16 @@ export const TagNode = memo(function TagNode({
   };
 
   const openWikiReader = useUIStore(s => s.openWikiReader);
+  const openReader = useUIStore(s => s.openReader);
 
   const handleWikiClick = (e: MouseEvent) => {
     e.stopPropagation();
     openWikiReader(tag.id, tag.name, undefined, { newTab: e.metaKey || e.ctrlKey });
+  };
+
+  const handleReaderClick = (e: MouseEvent) => {
+    e.stopPropagation();
+    openReader(tag.id, undefined, { newTab: e.metaKey || e.ctrlKey });
   };
 
   const handleChatClick = (e: MouseEvent) => {
@@ -116,6 +122,15 @@ export const TagNode = memo(function TagNode({
           >
             <FileText className="w-3.5 h-3.5" strokeWidth={2} />
           </button>
+          {isMemuCategory && (
+            <button
+              onClick={handleReaderClick}
+              className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
+              title="Open in reader"
+            >
+              <BookOpen className="w-3.5 h-3.5" strokeWidth={2} />
+            </button>
+          )}
         </>
       )}
       {!hasChildren && !isMemuGroup && <span className="text-xs text-[var(--color-text-tertiary)] tabular-nums">{tag.atom_count}</span>}

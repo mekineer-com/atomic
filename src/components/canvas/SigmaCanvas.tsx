@@ -175,6 +175,7 @@ export function SigmaCanvas({
   const onPreviewNodeClickRef = useRef(onPreviewNodeClick);
   onPreviewNodeClickRef.current = onPreviewNodeClick;
   const openReader = useUIStore(s => s.openReader);
+  const selectedTagId = useUIStore(s => s.selectedTagId);
   const canvasCategoryVisible = useUIStore(s => s.canvasCategoryVisible);
   const canvasEntityVisible = useUIStore(s => s.canvasEntityVisible);
   const canvasCategoryShowDimmed = useUIStore(s => s.canvasCategoryShowDimmed);
@@ -200,6 +201,9 @@ export function SigmaCanvas({
   // is exactly the panel size — flipping sides only helps when the label
   // is narrower than the longer-side gap).
   const hoverPillRef = useRef<HTMLDivElement>(null);
+  const selectedCategoryOrbitRef = useRef<HTMLDivElement>(null);
+  const selectedCategoryIdRef = useRef(selectedTagId);
+  selectedCategoryIdRef.current = selectedTagId;
   const sigmaRef = useRef<Sigma | null>(null);
   const graphRef = useRef<Graph | null>(null);
   const [data, setData] = useState<GlobalCanvasData | null>(null);
@@ -838,6 +842,27 @@ export function SigmaCanvas({
         ctx.stroke();
       });
 
+      const selectedCategoryId = selectedCategoryIdRef.current;
+      const orbit = selectedCategoryOrbitRef.current;
+      if (
+        !isPreview
+        && orbit
+        && selectedCategoryId?.startsWith('category:')
+        && graph!.hasNode(selectedCategoryId)
+        && visibilityRef.current.get(selectedCategoryId) !== 'hidden'
+      ) {
+        const attrs = graph!.getNodeAttributes(selectedCategoryId);
+        const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
+        const radius = sigma!.scaleSize(attrs.size as number) + 11;
+        orbit.style.display = 'block';
+        orbit.style.left = `${pos.x - radius}px`;
+        orbit.style.top = `${pos.y - radius}px`;
+        orbit.style.width = `${radius * 2}px`;
+        orbit.style.height = `${radius * 2}px`;
+      } else if (orbit) {
+        orbit.style.display = 'none';
+      }
+
       if (pinnedId && graph!.hasNode(pinnedId)) {
         if (!isPreview && visibilityRef.current.get(pinnedId) === 'hidden') {
           pinnedNodeRef.current = null;
@@ -1158,10 +1183,15 @@ export function SigmaCanvas({
       }
       sigma.kill();
       labelCanvas.remove();
+      if (selectedCategoryOrbitRef.current) selectedCategoryOrbitRef.current.style.display = 'none';
       sigmaRef.current = null;
       graphRef.current = null;
     };
   }, [data, rebuildData, isPreview, filterKey]); // intentionally exclude theme — handled below
+
+  useEffect(() => {
+    sigmaRef.current?.refresh();
+  }, [selectedTagId]);
 
   // Update colors when theme changes (without recreating graph)
   useEffect(() => {
@@ -1308,6 +1338,17 @@ export function SigmaCanvas({
           className={`w-full h-full ${isPreview && !isInteractivePreview ? 'pointer-events-none' : ''}`}
           style={isPreview ? undefined : { minHeight: 200 }}
         />
+
+        {!isPreview && (
+          <div
+            ref={selectedCategoryOrbitRef}
+            aria-hidden="true"
+            className="pointer-events-none absolute z-[11] rounded-full border border-white/70 border-r-transparent animate-spin motion-reduce:animate-none"
+            style={{ display: 'none', animationDuration: '2.4s' }}
+          >
+            <span className="absolute -top-1 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-white shadow-[0_0_8px_2px_rgba(255,255,255,0.75)]" />
+          </div>
+        )}
 
         {/* Click-through overlay only for the static thumbnail preview.
             Interactive preview handles its own clicks via clickNode. */}

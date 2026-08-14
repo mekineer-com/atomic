@@ -318,10 +318,10 @@ function GeneratedSummaryRow({
         </div>
       ) : <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>}
       <div className="grid gap-2 md:grid-cols-2">
-        <div className="prose prose-invert min-h-28 max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)]">
+        <div className={`prose prose-invert max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`}>
           <DossierMarkdown citations={review.citations}>{review.approved_summary ?? ''}</DossierMarkdown>
         </div>
-        <textarea className="min-h-28 overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable]" value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <textarea className={`overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       {kind === 'category' && Boolean(review.citations?.length) && (
         <div className="mt-2 flex flex-wrap gap-1">
