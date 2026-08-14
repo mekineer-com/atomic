@@ -66,6 +66,7 @@ export function MainView() {
   const leftPanelOpen = useUIStore(s => s.leftPanelOpen);
   const setLeftPanelOpen = useUIStore(s => s.setLeftPanelOpen);
   const toggleLeftPanel = useUIStore(s => s.toggleLeftPanel);
+  const deactivateTabs = useUIStore(s => s.deactivateTabs);
   const setViewMode = useUIStore(s => s.setViewMode);
   const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
   const openReader = useUIStore(s => s.openReader);
@@ -110,8 +111,8 @@ export function MainView() {
   }, []);
 
   useEffect(() => {
-    setReviewPanelOpen(false);
-  }, [activeTabId]);
+    if (reviewPanelOpen && activeTabId !== null) setReviewPanelOpen(false);
+  }, [activeTabId, reviewPanelOpen]);
 
   // Debounced server-side search when searchQuery changes
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -413,6 +414,7 @@ export function MainView() {
         {memuReviewsEnabled && (
           <button
             onClick={() => {
+              deactivateTabs();
               setLeftPanelOpen(false);
               setReviewPanelOpen(true);
             }}
@@ -465,7 +467,7 @@ export function MainView() {
       {/* Content */}
       <div className="flex-1 overflow-hidden relative">
         {reviewPanelOpen ? (
-          <PendingReviewPanel isOpen onClose={() => setReviewPanelOpen(false)} />
+          <PendingReviewPanel />
         ) : localGraph.isOpen && localGraph.centerAtomId ? (
           <LocalGraphView />
         ) : readerState.atomId ? (

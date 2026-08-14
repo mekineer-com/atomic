@@ -62,7 +62,7 @@ type PendingReviews = {
   summaries_revision: number;
 };
 
-export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+export function PendingReviewPanel() {
   const [reviews, setReviews] = useState<PendingReviews>({ items: [], categories: [], soul_summaries: [], summaries_revision: 0 });
   const [clusterColors, setClusterColors] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
@@ -89,11 +89,8 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
   }, []);
 
   useEffect(() => {
-    if (!isOpen) return;
     void loadReviews();
-  }, [isOpen, loadReviews]);
-
-  if (!isOpen) return null;
+  }, [loadReviews]);
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   const summaryActionsDisabled = loading || loadFailed || summariesStale || summaryBusy;
@@ -108,12 +105,9 @@ export function PendingReviewPanel({ isOpen, onClose }: { isOpen: boolean; onClo
 
   return (
     <div className="h-full overflow-y-auto bg-[var(--color-bg-main)] p-4">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
-            <p className="text-sm text-[var(--color-text-secondary)]">Approve agent edits and pending memories.</p>
-          </div>
-          <button className="rounded px-3 py-1 text-sm hover:bg-[var(--color-bg-hover)]" onClick={onClose}>Close</button>
+        <div className="mb-4">
+          <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
+          <p className="text-sm text-[var(--color-text-secondary)]">Approve agent edits and pending memories.</p>
         </div>
 
         {loading && <p className="text-sm text-[var(--color-text-secondary)]">Loading...</p>}
