@@ -78,7 +78,7 @@ export function MemoryEntityControls({
   const [error, setError] = useState<string | null>(null);
   const openReader = useUIStore(s => s.openReader);
   const attached = new Set(entityIds.map(id => id.replace(/^entity:/, '')));
-  const matches = entities.filter(entity => !attached.has(entity.id) && (
+  const matches = entities.filter(entity => !entity.ignored && !attached.has(entity.id) && (
     entity.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) ||
     (entity.properties.aliases ?? []).some(alias => alias.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
   )).slice(0, 8);
@@ -139,7 +139,7 @@ export function MemoryEntityControls({
   );
 }
 
-export function EntityReader({ entityId, onChanged }: { entityId: string; onChanged?: () => void }) {
+export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: string; onChanged?: () => void; onDeleted?: () => void }) {
   const [entity, setEntity] = useState<EntityDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -227,6 +227,39 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
     }
   };
 
+  const setIgnored = async (ignored: boolean) => {
+    if (!entity) return;
+    setSaving(true);
+    setError(null);
+    try {
+      display(await getTransport().invoke<EntityDetail>(
+        ignored ? 'ignore_memu_entity' : 'restore_memu_entity', { id: entity.id },
+      ));
+      useCanvasStore.getState().invalidateCanvasData();
+      onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteEntity = async () => {
+    if (!entity || !window.confirm(`Delete ${entity.name}? It may be created again later.`)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await getTransport().invoke('delete_memu_entity', { id: entity.id });
+      removeAtomFromTabs(`entity:${entity.id}`);
+      useCanvasStore.getState().invalidateCanvasData();
+      onDeleted?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const beginPromotion = () => {
     setPromoting(true);
     setEditing(true);
@@ -236,7 +269,7 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
     setError(null);
     try {
       const result = await getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities');
-      const candidates = result.entities.filter(candidate => candidate.id !== entityId);
+      const candidates = result.entities.filter(candidate => candidate.id !== entityId && candidate.ignored === entity?.ignored);
       setMergeCandidates(candidates);
       setDuplicateId(candidates[0]?.id ?? '');
       setMergePreview(null);
@@ -327,12 +360,14 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
             {entity.ignored && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Ignored</span>}
             <button type="button" onClick={toggleEdit} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)]">{editing ? 'Cancel' : 'Edit'}</button>
             <button type="button" onClick={() => void openMerge()} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)]">Merge duplicate</button>
-            <button
+            {!entity.is_relationship && <button type="button" disabled={saving} onClick={() => void setIgnored(!entity.ignored)} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)] disabled:opacity-50">{entity.ignored ? 'Restore' : 'Ignore'}</button>}
+            {!entity.is_relationship && entity.orphan && <button type="button" disabled={saving} onClick={() => void deleteEntity()} className="rounded border border-red-500/50 px-2 py-1 text-red-400 hover:bg-red-500/10 disabled:opacity-50">Delete</button>}
+            {!entity.ignored && <button
               type="button"
               disabled={saving}
               onClick={() => activeRelationship ? void deactivateRelationship() : beginPromotion()}
               className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
-            >{activeRelationship ? 'Deactivate relationship' : 'Make relationship'}</button>
+            >{activeRelationship ? 'Deactivate relationship' : 'Make relationship'}</button>}
           </div>
         </div>
 
@@ -411,11 +446,11 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
             ))}
           </div>
         )}
-        <form onSubmit={searchMemories} className="mt-4 flex gap-2">
+        {!entity.ignored && <form onSubmit={searchMemories} className="mt-4 flex gap-2">
           <input value={memoryQuery} onChange={event => setMemoryQuery(event.target.value)} placeholder="Find a memory to attach" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]" />
           <button type="submit" className="rounded border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)]">Search</button>
-        </form>
-        {memoryResults.length > 0 && <div className="mt-2 space-y-1">{memoryResults.map(memory => <button key={memory.id} type="button" onClick={() => void setMemoryEntity(memory.id, true)} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]">{memory.title || memory.snippet}</button>)}</div>}
+        </form>}
+        {!entity.ignored && memoryResults.length > 0 && <div className="mt-2 space-y-1">{memoryResults.map(memory => <button key={memory.id} type="button" onClick={() => void setMemoryEntity(memory.id, true)} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]">{memory.title || memory.snippet}</button>)}</div>}
       </div>
     </article>
   );
@@ -427,7 +462,7 @@ export function EntityManager() {
   const [query, setQuery] = useState('');
   const [type, setType] = useState('all');
   const [relationshipOnly, setRelationshipOnly] = useState(false);
-  const [ignoredOnly, setIgnoredOnly] = useState(false);
+  const [showIgnored, setShowIgnored] = useState(false);
   const [orphanOnly, setOrphanOnly] = useState(false);
   const [sort, setSort] = useState<SortMode>('name');
   const [error, setError] = useState<string | null>(null);
@@ -439,7 +474,7 @@ export function EntityManager() {
   const loadEntities = useCallback(async () => {
     const result = await getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities');
     setEntities(result.entities);
-    setSelectedId(current => current ?? result.entities[0]?.id ?? null);
+    setSelectedId(current => current ?? result.entities.find(entity => !entity.ignored)?.id ?? null);
   }, []);
 
   useEffect(() => {
@@ -475,7 +510,7 @@ export function EntityManager() {
         (entity.properties.aliases ?? []).some(alias => alias.toLocaleLowerCase().includes(needle)))
       .filter(entity => type === 'all' || entity.entity_type === type)
       .filter(entity => !relationshipOnly || entity.is_relationship)
-      .filter(entity => !ignoredOnly || entity.ignored)
+      .filter(entity => showIgnored || !entity.ignored)
       .filter(entity => !orphanOnly || entity.orphan)
       .sort((left, right) => {
         if (sort === 'links') return right.linked_memory_count - left.linked_memory_count || left.name.localeCompare(right.name);
@@ -483,7 +518,7 @@ export function EntityManager() {
         if (sort === 'created') return (right.created_at ?? '').localeCompare(left.created_at ?? '') || left.name.localeCompare(right.name);
         return left.name.localeCompare(right.name);
       });
-  }, [entities, ignoredOnly, orphanOnly, query, relationshipOnly, sort, type]);
+  }, [entities, orphanOnly, query, relationshipOnly, showIgnored, sort, type]);
 
   if (error && entities.length === 0) return <div className="p-6 text-sm text-red-400">{error}</div>;
 
@@ -524,7 +559,7 @@ export function EntityManager() {
           </div>
           <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--color-text-secondary)]">
             <label><input type="checkbox" checked={relationshipOnly} onChange={event => setRelationshipOnly(event.target.checked)} className="mr-1" />Relationships</label>
-            <label><input type="checkbox" checked={ignoredOnly} onChange={event => setIgnoredOnly(event.target.checked)} className="mr-1" />Ignored</label>
+            <label><input type="checkbox" checked={showIgnored} onChange={event => setShowIgnored(event.target.checked)} className="mr-1" />Show ignored ({entities.filter(entity => entity.ignored).length})</label>
             <label><input type="checkbox" checked={orphanOnly} onChange={event => setOrphanOnly(event.target.checked)} className="mr-1" />Orphans</label>
           </div>
         </div>
@@ -544,7 +579,7 @@ export function EntityManager() {
         </div>
       </aside>
       <main className="min-h-[30rem] md:min-h-0 md:overflow-hidden">
-        {selectedId ? <EntityReader entityId={selectedId} onChanged={() => void loadEntities()} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
+        {selectedId ? <EntityReader entityId={selectedId} onChanged={() => void loadEntities()} onDeleted={() => { setSelectedId(null); void loadEntities(); }} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
       </main>
     </div>
   );

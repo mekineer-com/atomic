@@ -102,6 +102,55 @@ pub async fn update(
     }
 }
 
+async fn entity_action(
+    state: web::Data<AppState>,
+    entity_id: String,
+    action: Option<&str>,
+) -> HttpResponse {
+    let config = match session(&state) {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    let client = match client() {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let mut segments = vec!["integration", "atomic", "entities", &entity_id];
+    if let Some(action) = action {
+        segments.push(action);
+    }
+    let url = match memu_url(&config.base_url, &segments) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
+    let request = if action.is_some() {
+        client.post(url)
+    } else {
+        client.delete(url)
+    };
+    match memu_json(
+        request.query(&scope_query(&config)),
+        "memU entity action",
+    )
+    .await
+    {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(response) => response,
+    }
+}
+
+pub async fn ignore(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    entity_action(state, path.into_inner(), Some("ignore")).await
+}
+
+pub async fn restore(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    entity_action(state, path.into_inner(), Some("restore")).await
+}
+
+pub async fn delete(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    entity_action(state, path.into_inner(), None).await
+}
+
 pub async fn merge_preview(
     state: web::Data<AppState>,
     path: web::Path<String>,
