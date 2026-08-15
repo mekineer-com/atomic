@@ -1,11 +1,38 @@
-use crate::routes::memu_proxy::{client, memu_json, scope_query, session};
+use crate::routes::memu_proxy::{client, memu_json, memu_url, scope_query, session};
 use crate::routes::memu_reviews::updated_atom_response;
 use crate::state::AppState;
-use actix_web::{HttpResponse, web};
-use serde_json::{Value, json};
+use actix_web::{web, HttpResponse};
+use serde_json::{json, Value};
 
 pub async fn list(state: web::Data<AppState>) -> HttpResponse {
     proxy(state, None).await
+}
+
+pub async fn create(state: web::Data<AppState>, body: web::Json<Value>) -> HttpResponse {
+    let config = match session(&state) {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    let client = match client() {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let url = match memu_url(&config.base_url, &["integration", "atomic", "entities"]) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
+    match memu_json(
+        client
+            .post(url)
+            .query(&scope_query(&config))
+            .json(&body.into_inner()),
+        "memU entity create",
+    )
+    .await
+    {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(response) => response,
+    }
 }
 
 pub async fn detail(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
@@ -21,11 +48,14 @@ async fn proxy(state: web::Data<AppState>, entity_id: Option<String>) -> HttpRes
         Ok(client) => client,
         Err(response) => return response,
     };
-    let mut url = format!("{}/integration/atomic/entities", config.base_url);
-    if let Some(entity_id) = entity_id {
-        url.push('/');
-        url.push_str(&entity_id);
+    let mut segments = vec!["integration", "atomic", "entities"];
+    if let Some(ref entity_id) = entity_id {
+        segments.push(entity_id);
     }
+    let url = match memu_url(&config.base_url, &segments) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     match memu_json(
         client.get(url).query(&scope_query(&config)),
         "memU entities",
@@ -50,13 +80,17 @@ pub async fn update(
         Ok(client) => client,
         Err(response) => return response,
     };
+    let entity_id = path.into_inner();
+    let url = match memu_url(
+        &config.base_url,
+        &["integration", "atomic", "entities", &entity_id],
+    ) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     match memu_json(
         client
-            .patch(format!(
-                "{}/integration/atomic/entities/{}",
-                config.base_url,
-                path.into_inner()
-            ))
+            .patch(url)
             .query(&scope_query(&config))
             .json(&body.into_inner()),
         "memU entity update",
@@ -82,10 +116,20 @@ async fn set_memory_entity(
         Err(response) => return response,
     };
     let (memory_id, entity_id) = path.into_inner();
-    let url = format!(
-        "{}/integration/atomic/memories/{memory_id}/entities/{entity_id}",
-        config.base_url
-    );
+    let url = match memu_url(
+        &config.base_url,
+        &[
+            "integration",
+            "atomic",
+            "memories",
+            &memory_id,
+            "entities",
+            &entity_id,
+        ],
+    ) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     let request = if attached {
         client.put(url)
     } else {
@@ -143,13 +187,21 @@ async fn relationship_write(
         Ok(client) => client,
         Err(response) => return response,
     };
+    let speaker_id = format!("entity:{entity_id}");
     let url = if update {
-        format!(
-            "{}/souls/{}/relationships/entity:{}",
-            config.base_url, config.soul_id, entity_id
+        memu_url(
+            &config.base_url,
+            &["souls", &config.soul_id, "relationships", &speaker_id],
         )
     } else {
-        format!("{}/souls/{}/relationships", config.base_url, config.soul_id)
+        memu_url(
+            &config.base_url,
+            &["souls", &config.soul_id, "relationships"],
+        )
+    };
+    let url = match url {
+        Ok(url) => url,
+        Err(response) => return response,
     };
     let request = if update {
         client.patch(url).json(&body)
@@ -174,14 +226,17 @@ pub async fn deactivate_relationship(
         Ok(client) => client,
         Err(response) => return response,
     };
+    let speaker_id = format!("entity:{}", path.into_inner());
+    let url = match memu_url(
+        &config.base_url,
+        &["souls", &config.soul_id, "relationships", &speaker_id],
+    ) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     match memu_json(
         client
-            .delete(format!(
-                "{}/souls/{}/relationships/entity:{}",
-                config.base_url,
-                config.soul_id,
-                path.into_inner()
-            ))
+            .delete(url)
             .query(&[("user_id", config.user_id.as_str())]),
         "memU relationship deactivate",
     )

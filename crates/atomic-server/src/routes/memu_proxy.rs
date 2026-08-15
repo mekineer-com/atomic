@@ -1,6 +1,6 @@
 use crate::state::{AppState, MemuSessionConfig};
-use actix_web::{HttpResponse, http::StatusCode};
-use serde_json::{Value, json};
+use actix_web::{http::StatusCode, HttpResponse};
+use serde_json::{json, Value};
 use std::time::Duration;
 
 pub fn session(state: &AppState) -> Result<MemuSessionConfig, HttpResponse> {
@@ -39,6 +39,21 @@ pub async fn memu_json(
         HttpResponse::BadGateway()
             .json(json!({"error": format!("{error_prefix} returned invalid JSON: {e}")}))
     })
+}
+
+pub fn memu_url(base_url: &str, segments: &[&str]) -> Result<reqwest::Url, HttpResponse> {
+    let mut url = reqwest::Url::parse(base_url).map_err(|e| {
+        HttpResponse::InternalServerError()
+            .json(json!({"error": format!("invalid memU server URL: {e}")}))
+    })?;
+    let mut path = url.path_segments_mut().map_err(|_| {
+        HttpResponse::InternalServerError()
+            .json(json!({"error": "memU server URL cannot be a base"}))
+    })?;
+    path.pop_if_empty();
+    path.extend(segments);
+    drop(path);
+    Ok(url)
 }
 
 pub fn memu_error_text(body: &str) -> String {
@@ -88,6 +103,16 @@ pub fn atom_from_node(node: &Value) -> Value {
             })
         })
         .collect();
+    let entity_ids = node
+        .get("entity_ids")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let entity_names = node
+        .get("entity_names")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     json!({
         "id": id,
         "title": node["label"].as_str().unwrap_or(id),
@@ -109,8 +134,8 @@ pub fn atom_from_node(node: &Value) -> Value {
         "last_evidence_at": node["last_evidence_at"].clone(),
         "last_revised_at": node["last_revised_at"].clone(),
         "citations": node["citations"].clone(),
-        "entity_ids": node["entity_ids"].clone(),
-        "entity_names": node["entity_names"].clone(),
+        "entity_ids": entity_ids,
+        "entity_names": entity_names,
         "summaries_revision": node["summaries_revision"].clone(),
         "embedding_status": "complete",
         "tagging_status": "skipped",
@@ -123,4 +148,21 @@ pub fn atom_from_node(node: &Value) -> Value {
 
 pub fn readonly() -> HttpResponse {
     HttpResponse::Conflict().json(json!({"error": "local Atomic writes are disabled in memU mode"}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memu_boundary_encodes_segments_and_normalizes_entity_arrays() {
+        let Ok(url) = memu_url("http://localhost:8099/root/", &["entity:a/b?c"]) else {
+            panic!("valid base URL rejected");
+        };
+        assert_eq!(url.path(), "/root/entity:a%2Fb%3Fc");
+
+        let atom = atom_from_node(&json!({"id": "memory:m1", "entity_ids": null}));
+        assert_eq!(atom["entity_ids"], json!([]));
+        assert_eq!(atom["entity_names"], json!([]));
+    }
 }

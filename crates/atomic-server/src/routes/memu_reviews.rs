@@ -1,8 +1,8 @@
-use crate::routes::memu_proxy::{self, client, memu_json, session};
+use crate::routes::memu_proxy::{self, client, memu_json, memu_url, session};
 use crate::state::{AppState, ServerEvent};
-use actix_web::{HttpResponse, web};
+use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 #[derive(Deserialize, Serialize)]
 pub struct SummaryUpdate {
@@ -81,13 +81,15 @@ async fn approve(state: web::Data<AppState>, kind: &str, id: &str) -> HttpRespon
         Ok(client) => client,
         Err(response) => return response,
     };
+    let url = match memu_url(&config.base_url, &[kind, id, "approve"]) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     match memu_json(
-        client
-            .post(format!("{}/{}/{}/approve", config.base_url, kind, id))
-            .query(&[
-                ("user_id", config.user_id.as_str()),
-                ("soul_id", config.soul_id.as_str()),
-            ]),
+        client.post(url).query(&[
+            ("user_id", config.user_id.as_str()),
+            ("soul_id", config.soul_id.as_str()),
+        ]),
         "memU approve",
     )
     .await
@@ -149,6 +151,10 @@ async fn update(
         Ok(client) => client,
         Err(response) => return response,
     };
+    let url = match memu_url(&config.base_url, &[kind, id]) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     let mut payload = json!({
         "approved": true,
         "edited_by": "atomic:user",
@@ -170,7 +176,7 @@ async fn update(
     }
     match memu_json(
         client
-            .patch(format!("{}/{}/{}", config.base_url, kind, id))
+            .patch(url)
             .query(&[
                 ("user_id", config.user_id.as_str()),
                 ("soul_id", config.soul_id.as_str()),
@@ -202,13 +208,14 @@ pub async fn update_soul_summary(
         Ok(client) => client,
         Err(response) => return response,
     };
+    let summary_id = path.into_inner();
+    let url = match memu_url(&config.base_url, &["soul-summary", &summary_id]) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     match memu_json(
         client
-            .patch(format!(
-                "{}/soul-summary/{}",
-                config.base_url,
-                path.into_inner()
-            ))
+            .patch(url)
             .query(&[
                 ("user_id", config.user_id.as_str()),
                 ("soul_id", config.soul_id.as_str()),
@@ -253,9 +260,13 @@ async fn approve_summary(
         Ok(client) => client,
         Err(response) => return response,
     };
+    let url = match memu_url(&config.base_url, &[kind, id, "approve"]) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     match memu_json(
         client
-            .post(format!("{}/{}/{}/approve", config.base_url, kind, id))
+            .post(url)
             .query(&[
                 ("user_id", config.user_id.as_str()),
                 ("soul_id", config.soul_id.as_str()),
@@ -280,13 +291,16 @@ pub async fn delete_memory(state: web::Data<AppState>, path: web::Path<String>) 
         Ok(client) => client,
         Err(response) => return response,
     };
+    let memory_id = path.into_inner();
+    let url = match memu_url(&config.base_url, &["memory", &memory_id]) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
     match memu_json(
-        client
-            .delete(format!("{}/memory/{}", config.base_url, path.into_inner()))
-            .query(&[
-                ("user_id", config.user_id.as_str()),
-                ("soul_id", config.soul_id.as_str()),
-            ]),
+        client.delete(url).query(&[
+            ("user_id", config.user_id.as_str()),
+            ("soul_id", config.soul_id.as_str()),
+        ]),
         "memU delete",
     )
     .await

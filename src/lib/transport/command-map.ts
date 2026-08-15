@@ -162,6 +162,12 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: '/api/memu/entities',
   },
+  create_memu_entity: {
+    method: 'POST',
+    path: '/api/memu/entities',
+    argsMode: 'body',
+    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType }),
+  },
   get_memu_entity: {
     method: 'GET',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}`,
@@ -176,13 +182,13 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'POST',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/relationship`,
     argsMode: 'body',
-    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, relationship: a.relationship }),
+    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases, relationship: a.relationship }),
   },
   update_memu_relationship: {
     method: 'PATCH',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/relationship`,
     argsMode: 'body',
-    transformArgs: (a) => ({ name: a.name, relationship: a.relationship }),
+    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases, relationship: a.relationship }),
   },
   deactivate_memu_relationship: {
     method: 'DELETE',
