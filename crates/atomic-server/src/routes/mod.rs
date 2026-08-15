@@ -308,6 +308,30 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     // memU entity proxy
     cfg.route("/memu/entities", web::get().to(memu_entities::list));
     cfg.route("/memu/entities/{id}", web::get().to(memu_entities::detail));
+    cfg.route(
+        "/memu/entities/{id}",
+        web::patch().to(memu_entities::update),
+    );
+    cfg.route(
+        "/memu/entities/{id}/relationship",
+        web::post().to(memu_entities::promote_relationship),
+    );
+    cfg.route(
+        "/memu/entities/{id}/relationship",
+        web::patch().to(memu_entities::update_relationship),
+    );
+    cfg.route(
+        "/memu/entities/{id}/relationship",
+        web::delete().to(memu_entities::deactivate_relationship),
+    );
+    cfg.route(
+        "/memu/memories/{memory_id}/entities/{entity_id}",
+        web::put().to(memu_entities::attach),
+    );
+    cfg.route(
+        "/memu/memories/{memory_id}/entities/{entity_id}",
+        web::delete().to(memu_entities::detach),
+    );
 
     // memU review proxy
     cfg.route("/memu/reviews/status", web::get().to(memu_reviews::status));

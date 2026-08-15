@@ -166,6 +166,36 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}`,
   },
+  update_memu_entity: {
+    method: 'PATCH',
+    path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases }),
+  },
+  promote_memu_relationship: {
+    method: 'POST',
+    path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/relationship`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, relationship: a.relationship }),
+  },
+  update_memu_relationship: {
+    method: 'PATCH',
+    path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/relationship`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ name: a.name, relationship: a.relationship }),
+  },
+  deactivate_memu_relationship: {
+    method: 'DELETE',
+    path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/relationship`,
+  },
+  attach_memu_entity: {
+    method: 'PUT',
+    path: (a) => `/api/memu/memories/${encodeURIComponent(a.memoryId as string)}/entities/${encodeURIComponent(a.entityId as string)}`,
+  },
+  detach_memu_entity: {
+    method: 'DELETE',
+    path: (a) => `/api/memu/memories/${encodeURIComponent(a.memoryId as string)}/entities/${encodeURIComponent(a.entityId as string)}`,
+  },
   end_memu_session: {
     method: 'POST',
     path: '/api/memu/session/end',

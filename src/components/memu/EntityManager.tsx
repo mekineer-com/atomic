@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Search, Users } from 'lucide-react';
 import { getTransport } from '../../lib/transport';
+import type { AtomWithTags, SemanticSearchResult } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
 
 interface EntityProperties {
   relationship?: string;
   aliases?: string[];
   ignored?: boolean;
+  active?: boolean;
 }
 
 interface EntitySummary {
@@ -44,22 +46,196 @@ function shortDate(value: string | null) {
   return value ? new Date(value).toLocaleDateString() : 'Never';
 }
 
-export function EntityReader({ entityId }: { entityId: string }) {
-  const [entity, setEntity] = useState<EntityDetail | null>(null);
+export function MemoryEntityControls({
+  memoryId,
+  entityIds = [],
+  entityNames = [],
+  onUpdated,
+}: {
+  memoryId: string;
+  entityIds?: string[];
+  entityNames?: string[];
+  onUpdated: (atom: AtomWithTags) => void;
+}) {
+  const [entities, setEntities] = useState<EntitySummary[]>([]);
+  const [query, setQuery] = useState('');
   const [error, setError] = useState<string | null>(null);
   const openReader = useUIStore(s => s.openReader);
+  const attached = new Set(entityIds.map(id => id.replace(/^entity:/, '')));
+  const matches = entities.filter(entity => !attached.has(entity.id) && (
+    entity.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) ||
+    (entity.properties.aliases ?? []).some(alias => alias.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+  )).slice(0, 8);
+
+  useEffect(() => {
+    getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities')
+      .then(result => setEntities(result.entities))
+      .catch(err => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  const change = async (entityId: string, attach: boolean) => {
+    setError(null);
+    try {
+      const updated = await getTransport().invoke<AtomWithTags>(
+        attach ? 'attach_memu_entity' : 'detach_memu_entity',
+        {
+          memoryId: memoryId.replace(/^memory:/, ''),
+          entityId: entityId.replace(/^entity:/, ''),
+        },
+      );
+      onUpdated(updated);
+      if (attach) setQuery('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <section className="mt-4 border-t border-[var(--color-border)] pt-4">
+      <h3 className="mb-2 text-xs font-medium text-[var(--color-text-secondary)]">Entities</h3>
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {entityIds.map((id, index) => (
+          <span key={id} className="flex items-center gap-1 rounded-full border border-[var(--color-border)] px-2 py-1 text-xs">
+            <button type="button" onClick={() => openReader(id)}>{entityNames[index] ?? 'Entity'}</button>
+            <button type="button" aria-label={`Detach ${entityNames[index] ?? 'entity'}`} onClick={() => void change(id, false)} className="text-[var(--color-text-tertiary)] hover:text-red-400">×</button>
+          </span>
+        ))}
+        {entityIds.length === 0 && <span className="text-xs text-[var(--color-text-tertiary)]">None</span>}
+      </div>
+      <input
+        value={query}
+        onChange={event => setQuery(event.target.value)}
+        placeholder="Find an entity to attach"
+        className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]"
+      />
+      {query.trim() && (
+        <div className="mt-1 space-y-1">
+          {matches.map(entity => (
+            <button key={entity.id} type="button" onClick={() => void change(entity.id, true)} className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[var(--color-bg-hover)]">
+              {entity.name} <span className="capitalize text-[var(--color-text-tertiary)]">{entity.entity_type}</span>
+            </button>
+          ))}
+          {matches.length === 0 && <p className="px-2 py-1 text-xs text-[var(--color-text-tertiary)]">No matches.</p>}
+        </div>
+      )}
+      {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
+    </section>
+  );
+}
+
+export function EntityReader({ entityId, onChanged }: { entityId: string; onChanged?: () => void }) {
+  const [entity, setEntity] = useState<EntityDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState('');
+  const [entityType, setEntityType] = useState('person');
+  const [aliasesText, setAliasesText] = useState('');
+  const [relationship, setRelationship] = useState('');
+  const [memoryQuery, setMemoryQuery] = useState('');
+  const [memoryResults, setMemoryResults] = useState<SemanticSearchResult[]>([]);
+  const openReader = useUIStore(s => s.openReader);
+
+  const display = useCallback((value: EntityDetail) => {
+    setEntity(value);
+    setName(value.name);
+    setEntityType(value.entity_type);
+    setAliasesText((value.properties.aliases ?? []).join(', '));
+    setRelationship(value.properties.relationship ?? '');
+  }, []);
+  const load = useCallback(async () => {
+    return getTransport().invoke<EntityDetail>('get_memu_entity', { id: entityId });
+  }, [entityId]);
 
   useEffect(() => {
     let cancelled = false;
     setEntity(null);
     setError(null);
-    getTransport().invoke<EntityDetail>('get_memu_entity', { id: entityId })
-      .then(value => { if (!cancelled) setEntity(value); })
+    load()
+      .then(value => { if (!cancelled) display(value); })
       .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
     return () => { cancelled = true; };
-  }, [entityId]);
+  }, [display, load]);
 
-  if (error) return <div className="p-6 text-sm text-red-400">{error}</div>;
+  const activeRelationship = Boolean(entity?.is_relationship && entity.properties.active !== false);
+
+  const refresh = async () => {
+    display(await load());
+    onChanged?.();
+  };
+
+  const save = async () => {
+    if (!entity) return;
+    setSaving(true);
+    setError(null);
+    const aliases = aliasesText.split(',').map(alias => alias.trim()).filter(Boolean);
+    try {
+      if (activeRelationship) {
+        await getTransport().invoke('update_memu_relationship', { id: entity.id, name, relationship });
+        await getTransport().invoke('update_memu_entity', { id: entity.id, entityType, aliases });
+      } else {
+        await getTransport().invoke('update_memu_entity', { id: entity.id, name, entityType, aliases });
+      }
+      await refresh();
+      setEditing(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleRelationship = async () => {
+    if (!entity) return;
+    setSaving(true);
+    setError(null);
+    try {
+      if (activeRelationship) {
+        await getTransport().invoke('deactivate_memu_relationship', { id: entity.id });
+      } else {
+        await getTransport().invoke('promote_memu_relationship', {
+          id: entity.id,
+          name: entity.name,
+          entityType: entity.entity_type,
+          relationship,
+        });
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const setMemoryEntity = async (memoryId: string, attach: boolean) => {
+    setError(null);
+    try {
+      await getTransport().invoke(attach ? 'attach_memu_entity' : 'detach_memu_entity', {
+        memoryId: memoryId.replace(/^memory:/, ''),
+        entityId,
+      });
+      await refresh();
+      setMemoryResults([]);
+      setMemoryQuery('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const searchMemories = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!memoryQuery.trim()) return;
+    try {
+      const results = await getTransport().invoke<SemanticSearchResult[]>('search_atoms_hybrid', { query: memoryQuery, limit: 8 });
+      const linked = new Set(entity?.memories.map(memory => memory.id));
+      setMemoryResults(results.filter(result => result.id.startsWith('memory:') && !linked.has(result.id)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  if (error && !entity) return <div className="p-6 text-sm text-red-400">{error}</div>;
   if (!entity) return <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Loading entity...</div>;
 
   const aliases = entity.properties.aliases ?? [];
@@ -71,19 +247,31 @@ export function EntityReader({ entityId }: { entityId: string }) {
             <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">{entity.name}</h1>
             <p className="mt-1 text-sm capitalize text-[var(--color-text-tertiary)]">{entity.entity_type}</p>
           </div>
-          <div className="flex gap-2 text-xs text-[var(--color-text-secondary)]">
-            {entity.is_relationship && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Relationship</span>}
+          <div className="flex flex-wrap gap-2 text-xs text-[var(--color-text-secondary)]">
+            {entity.is_relationship && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">{activeRelationship ? 'Relationship' : 'Inactive relationship'}</span>}
             {entity.orphan && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Orphan</span>}
             {entity.ignored && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Ignored</span>}
+            <button type="button" onClick={() => setEditing(value => !value)} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)]">{editing ? 'Cancel' : 'Edit'}</button>
+            <button type="button" disabled={saving} onClick={() => void toggleRelationship()} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)] disabled:opacity-50">{activeRelationship ? 'Deactivate relationship' : 'Make relationship'}</button>
           </div>
         </div>
 
-        {entity.properties.relationship && (
+        {editing ? (
+          <section className="mb-6 space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
+            <label className="block text-xs text-[var(--color-text-tertiary)]">Name<input value={name} onChange={event => setName(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
+            <label className="block text-xs text-[var(--color-text-tertiary)]">Type<select value={entityType} onChange={event => setEntityType(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]"><option value="person">Person</option><option value="place">Place</option><option value="topic">Topic</option><option value="project">Project</option></select></label>
+            <label className="block text-xs text-[var(--color-text-tertiary)]">Aliases<input value={aliasesText} onChange={event => setAliasesText(event.target.value)} placeholder="Comma separated" className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
+            {activeRelationship && <label className="block text-xs text-[var(--color-text-tertiary)]">Relationship<textarea value={relationship} onChange={event => setRelationship(event.target.value)} className="mt-1 min-h-24 w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>}
+            <button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50">{saving ? 'Saving...' : 'Save'}</button>
+          </section>
+        ) : entity.properties.relationship ? (
           <section className="mb-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
             <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">Relationship</h2>
             <p className="leading-relaxed text-[var(--color-text-primary)]">{entity.properties.relationship}</p>
           </section>
-        )}
+        ) : null}
+
+        {error && <p className="mb-4 rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-400">{error}</p>}
 
         <dl className="mb-7 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
           <div><dt className="text-[var(--color-text-tertiary)]">Memories</dt><dd>{entity.linked_memory_count}</dd></div>
@@ -98,25 +286,32 @@ export function EntityReader({ entityId }: { entityId: string }) {
         ) : (
           <div className="space-y-2">
             {entity.memories.map(memory => (
-              <button
-                key={memory.id}
-                type="button"
-                className="block w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-left hover:bg-[var(--color-bg-hover)]"
-                onClick={event => openReader(memory.id, undefined, {
-                  newTab: event.metaKey || event.ctrlKey,
-                  background: event.metaKey || event.ctrlKey,
-                })}
-              >
-                <div className="mb-1 flex gap-2 text-xs text-[var(--color-text-tertiary)]">
-                  {memory.memory_ref && <span>{memory.memory_ref}</span>}
-                  <span>{memory.memory_type}</span>
-                  <span>{shortDate(memory.happened_at ?? memory.created_at)}</span>
-                </div>
-                <p className="text-sm leading-relaxed text-[var(--color-text-primary)]">{memory.summary}</p>
-              </button>
+              <div key={memory.id} className="flex rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] hover:bg-[var(--color-bg-hover)]">
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 p-3 text-left"
+                  onClick={event => openReader(memory.id, undefined, {
+                    newTab: event.metaKey || event.ctrlKey,
+                    background: event.metaKey || event.ctrlKey,
+                  })}
+                >
+                  <div className="mb-1 flex gap-2 text-xs text-[var(--color-text-tertiary)]">
+                    {memory.memory_ref && <span>{memory.memory_ref}</span>}
+                    <span>{memory.memory_type}</span>
+                    <span>{shortDate(memory.happened_at ?? memory.created_at)}</span>
+                  </div>
+                  <p className="text-sm leading-relaxed text-[var(--color-text-primary)]">{memory.summary}</p>
+                </button>
+                <button type="button" aria-label="Detach memory" onClick={() => void setMemoryEntity(memory.id, false)} className="px-3 text-[var(--color-text-tertiary)] hover:text-red-400">×</button>
+              </div>
             ))}
           </div>
         )}
+        <form onSubmit={searchMemories} className="mt-4 flex gap-2">
+          <input value={memoryQuery} onChange={event => setMemoryQuery(event.target.value)} placeholder="Find a memory to attach" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]" />
+          <button type="submit" className="rounded border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)]">Search</button>
+        </form>
+        {memoryResults.length > 0 && <div className="mt-2 space-y-1">{memoryResults.map(memory => <button key={memory.id} type="button" onClick={() => void setMemoryEntity(memory.id, true)} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]">{memory.title || memory.snippet}</button>)}</div>}
       </div>
     </article>
   );
@@ -133,14 +328,15 @@ export function EntityManager() {
   const [sort, setSort] = useState<SortMode>('name');
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities')
-      .then(result => {
-        setEntities(result.entities);
-        setSelectedId(current => current ?? result.entities[0]?.id ?? null);
-      })
-      .catch(err => setError(err instanceof Error ? err.message : String(err)));
+  const loadEntities = useCallback(async () => {
+    const result = await getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities');
+    setEntities(result.entities);
+    setSelectedId(current => current ?? result.entities[0]?.id ?? null);
   }, []);
+
+  useEffect(() => {
+    loadEntities().catch(err => setError(err instanceof Error ? err.message : String(err)));
+  }, [loadEntities]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -209,7 +405,7 @@ export function EntityManager() {
         </div>
       </aside>
       <main className="min-h-[30rem] md:min-h-0 md:overflow-hidden">
-        {selectedId ? <EntityReader entityId={selectedId} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
+        {selectedId ? <EntityReader entityId={selectedId} onChanged={() => void loadEntities()} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
       </main>
     </div>
   );

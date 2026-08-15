@@ -43,6 +43,8 @@ export interface Atom extends DossierFields {
   /// output. The atom list view filters to `captured` by default, but
   /// API responses (and the reader) carry the field on every atom.
   kind: 'captured' | 'report';
+  entity_ids?: string[];
+  entity_names?: string[];
 }
 
 export interface Tag {

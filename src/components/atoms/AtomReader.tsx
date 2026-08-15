@@ -16,6 +16,7 @@ import { getTransport } from '../../lib/transport';
 import { findSimilarAtoms } from '../../lib/api';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
 import { DossierMarkdown, MemoryCitationLinks } from '../memu/DossierMarkdown';
+import { MemoryEntityControls } from '../memu/EntityManager';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
 import type {
   AtomicCodeMirrorEditorHandle,
@@ -671,6 +672,18 @@ function AtomReaderContent({
                   </button>
                 </div>
               </div>
+            )}
+
+            {isMemuMemory && (
+              <MemoryEntityControls
+                memoryId={atom.id}
+                entityIds={atom.entity_ids}
+                entityNames={atom.entity_names}
+                onUpdated={updated => {
+                  useCanvasStore.getState().invalidateCanvasData();
+                  onAtomUpdated?.(updated);
+                }}
+              />
             )}
 
             {/* Dates */}

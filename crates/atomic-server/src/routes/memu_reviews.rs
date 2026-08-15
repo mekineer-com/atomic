@@ -97,7 +97,7 @@ async fn approve(state: web::Data<AppState>, kind: &str, id: &str) -> HttpRespon
     }
 }
 
-fn updated_atom_response(state: &AppState, body: Value) -> HttpResponse {
+pub(super) fn updated_atom_response(state: &AppState, body: Value) -> HttpResponse {
     let revision = body.get("summaries_revision").cloned();
     let mut atom_value = memu_proxy::atom_from_node(&body);
     if memu_proxy::is_memu_id(body["id"].as_str().unwrap_or_default()) {

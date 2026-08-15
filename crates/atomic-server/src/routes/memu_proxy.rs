@@ -109,6 +109,8 @@ pub fn atom_from_node(node: &Value) -> Value {
         "last_evidence_at": node["last_evidence_at"].clone(),
         "last_revised_at": node["last_revised_at"].clone(),
         "citations": node["citations"].clone(),
+        "entity_ids": node["entity_ids"].clone(),
+        "entity_names": node["entity_names"].clone(),
         "summaries_revision": node["summaries_revision"].clone(),
         "embedding_status": "complete",
         "tagging_status": "skipped",
