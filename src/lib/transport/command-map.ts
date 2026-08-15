@@ -178,6 +178,16 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     argsMode: 'body',
     transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases }),
   },
+  preview_memu_entity_merge: {
+    method: 'GET',
+    path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/merge-preview?duplicate_entity_id=${encodeURIComponent(a.duplicateId as string)}`,
+  },
+  merge_memu_entities: {
+    method: 'POST',
+    path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/merge`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ duplicate_entity_id: a.duplicateId }),
+  },
   promote_memu_relationship: {
     method: 'POST',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/relationship`,

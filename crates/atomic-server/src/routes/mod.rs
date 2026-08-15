@@ -314,6 +314,14 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::patch().to(memu_entities::update),
     );
     cfg.route(
+        "/memu/entities/{id}/merge-preview",
+        web::get().to(memu_entities::merge_preview),
+    );
+    cfg.route(
+        "/memu/entities/{id}/merge",
+        web::post().to(memu_entities::merge),
+    );
+    cfg.route(
         "/memu/entities/{id}/relationship",
         web::post().to(memu_entities::promote_relationship),
     );

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 import { Plus, Search, Users } from 'lucide-react';
 import { getTransport } from '../../lib/transport';
 import type { AtomWithTags, SemanticSearchResult } from '../../stores/atoms';
+import { useCanvasStore } from '../../stores/canvas';
 import { useUIStore } from '../../stores/ui';
 
 interface EntityProperties {
@@ -38,6 +39,21 @@ interface EntityMemory {
 
 interface EntityDetail extends EntitySummary {
   memories: EntityMemory[];
+}
+
+interface EntityMergePreview {
+  impact: {
+    memory_count: number;
+    category_titles: string[];
+    current_triple_count: number;
+    historical_triple_count: number;
+    speaker_memory_count: number;
+    aliases: string[];
+    source_refs: string[];
+  };
+  conflicts: string[];
+  warnings: string[];
+  can_merge: boolean;
 }
 
 type SortMode = 'name' | 'links' | 'recent' | 'created';
@@ -135,7 +151,12 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
   const [relationship, setRelationship] = useState('');
   const [memoryQuery, setMemoryQuery] = useState('');
   const [memoryResults, setMemoryResults] = useState<SemanticSearchResult[]>([]);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeCandidates, setMergeCandidates] = useState<EntitySummary[]>([]);
+  const [duplicateId, setDuplicateId] = useState('');
+  const [mergePreview, setMergePreview] = useState<EntityMergePreview | null>(null);
   const openReader = useUIStore(s => s.openReader);
+  const removeAtomFromTabs = useUIStore(s => s.removeAtomFromTabs);
 
   const display = useCallback((value: EntityDetail) => {
     setEntity(value);
@@ -211,6 +232,52 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
     setEditing(true);
   };
 
+  const openMerge = async () => {
+    setError(null);
+    try {
+      const result = await getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities');
+      const candidates = result.entities.filter(candidate => candidate.id !== entityId);
+      setMergeCandidates(candidates);
+      setDuplicateId(candidates[0]?.id ?? '');
+      setMergePreview(null);
+      setMergeOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const previewMerge = async () => {
+    if (!duplicateId) return;
+    setError(null);
+    try {
+      setMergePreview(await getTransport().invoke<EntityMergePreview>(
+        'preview_memu_entity_merge', { id: entityId, duplicateId },
+      ));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const mergeEntity = async () => {
+    if (!duplicateId) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const merged = await getTransport().invoke<EntityDetail>(
+        'merge_memu_entities', { id: entityId, duplicateId },
+      );
+      removeAtomFromTabs(`entity:${duplicateId}`);
+      useCanvasStore.getState().invalidateCanvasData();
+      display(merged);
+      setMergeOpen(false);
+      onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const setMemoryEntity = async (memoryId: string, attach: boolean) => {
     setError(null);
     try {
@@ -259,6 +326,7 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
             {entity.orphan && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Orphan</span>}
             {entity.ignored && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Ignored</span>}
             <button type="button" onClick={toggleEdit} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)]">{editing ? 'Cancel' : 'Edit'}</button>
+            <button type="button" onClick={() => void openMerge()} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)]">Merge duplicate</button>
             <button
               type="button"
               disabled={saving}
@@ -267,6 +335,30 @@ export function EntityReader({ entityId, onChanged }: { entityId: string; onChan
             >{activeRelationship ? 'Deactivate relationship' : 'Make relationship'}</button>
           </div>
         </div>
+
+        {mergeOpen && (
+          <section className="mb-6 space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="font-semibold">Keep {entity.name}, merge another entity into it</h2>
+              <button type="button" onClick={() => setMergeOpen(false)} className="text-[var(--color-text-tertiary)]">×</button>
+            </div>
+            <select value={duplicateId} onChange={event => { setDuplicateId(event.target.value); setMergePreview(null); }} className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2">
+              {mergeCandidates.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name} ({candidate.entity_type})</option>)}
+            </select>
+            <button type="button" disabled={!duplicateId} onClick={() => void previewMerge()} className="rounded border border-[var(--color-border)] px-3 py-1.5 hover:bg-[var(--color-bg-hover)] disabled:opacity-50">Preview merge</button>
+            {mergePreview && (
+              <div className="space-y-2 rounded border border-[var(--color-border)] p-3">
+                <p>{mergePreview.impact.memory_count} linked memories, {mergePreview.impact.speaker_memory_count} speaker memories, {mergePreview.impact.current_triple_count} current and {mergePreview.impact.historical_triple_count} historical edges.</p>
+                {mergePreview.impact.category_titles.length > 0 && <p>Dossiers: {mergePreview.impact.category_titles.join(', ')}</p>}
+                {mergePreview.impact.aliases.length > 0 && <p>Aliases: {mergePreview.impact.aliases.join(', ')}</p>}
+                {mergePreview.impact.source_refs.length > 0 && <p>Source references: {mergePreview.impact.source_refs.join(', ')}</p>}
+                {mergePreview.warnings.map(warning => <p key={warning} className="text-amber-400">{warning}</p>)}
+                {mergePreview.conflicts.map(conflict => <p key={conflict} className="text-red-400">{conflict}</p>)}
+                <button type="button" disabled={saving || !mergePreview.can_merge} onClick={() => void mergeEntity()} className="rounded bg-red-600 px-3 py-1.5 text-white disabled:opacity-50">{saving ? 'Merging...' : `Keep ${entity.name} and merge selected`}</button>
+              </div>
+            )}
+          </section>
+        )}
 
         {editing ? (
           <section className="mb-6 space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">

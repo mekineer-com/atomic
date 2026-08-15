@@ -102,6 +102,75 @@ pub async fn update(
     }
 }
 
+pub async fn merge_preview(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let Some(duplicate_id) = query.get("duplicate_entity_id") else {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "duplicate_entity_id is required"}));
+    };
+    merge_proxy(state, path.into_inner(), duplicate_id.clone(), false).await
+}
+
+pub async fn merge(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<Value>,
+) -> HttpResponse {
+    let duplicate_id = body
+        .get("duplicate_entity_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if duplicate_id.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "duplicate_entity_id is required"}));
+    }
+    merge_proxy(state, path.into_inner(), duplicate_id.to_owned(), true).await
+}
+
+async fn merge_proxy(
+    state: web::Data<AppState>,
+    entity_id: String,
+    duplicate_id: String,
+    commit: bool,
+) -> HttpResponse {
+    let config = match session(&state) {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    let client = match client() {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let action = if commit { "merge" } else { "merge-preview" };
+    let url = match memu_url(
+        &config.base_url,
+        &["integration", "atomic", "entities", &entity_id, action],
+    ) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
+    let request = if commit {
+        client
+            .post(url)
+            .query(&scope_query(&config))
+            .json(&json!({"duplicate_entity_id": duplicate_id}))
+    } else {
+        client.get(url).query(&[
+            ("user_id", config.user_id.as_str()),
+            ("soul_id", config.soul_id.as_str()),
+            ("duplicate_entity_id", duplicate_id.as_str()),
+        ])
+    };
+    match memu_json(request, "memU entity merge").await {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(response) => response,
+    }
+}
+
 async fn set_memory_entity(
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
