@@ -13,6 +13,7 @@ import {
   Filter,
   Telescope,
   ClipboardCheck,
+  Users,
 } from 'lucide-react';
 import { motion, LayoutGroup } from 'motion/react';
 import { AtomGrid } from '../atoms/AtomGrid';
@@ -29,6 +30,7 @@ import { WikiReader } from '../wiki/WikiReader';
 import { ReportsFullView, ReportDetailView, FindingReader } from '../reports';
 import { ChatViewer } from '../chat/ChatViewer';
 import { PendingReviewPanel } from '../memu/PendingReviewPanel';
+import { EntityManager, EntityReader } from '../memu/EntityManager';
 import { TabStrip } from './TabStrip';
 import { useAtomsStore } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
@@ -87,6 +89,7 @@ export function MainView() {
   const [filterBarOpen, setFilterBarOpen] = useState(false);
   const [memuReviewsEnabled, setMemuReviewsEnabled] = useState(false);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
+  const [entityPanelOpen, setEntityPanelOpen] = useState(false);
   const isMobile = useIsMobile();
   const hasActiveFilter = sourceFilter !== 'all' || !!sourceValue || sortBy !== 'updated' || sortOrder !== 'desc';
 
@@ -111,8 +114,11 @@ export function MainView() {
   }, []);
 
   useEffect(() => {
-    if (reviewPanelOpen && activeTabId !== null) setReviewPanelOpen(false);
-  }, [activeTabId, reviewPanelOpen]);
+    if (activeTabId !== null) {
+      setReviewPanelOpen(false);
+      setEntityPanelOpen(false);
+    }
+  }, [activeTabId]);
 
   // Debounced server-side search when searchQuery changes
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -304,6 +310,7 @@ export function MainView() {
                     key={mode}
                     onClick={() => {
                       setReviewPanelOpen(false);
+                      setEntityPanelOpen(false);
                       setViewMode(mode);
                     }}
                     className={`relative p-1.5 rounded-md ${
@@ -357,7 +364,7 @@ export function MainView() {
         )}
 
         {/* Filter toggle + atom count — base view + atoms only. */}
-        {onBaseView && (isMobile || viewMode === 'atoms') && (
+        {!reviewPanelOpen && !entityPanelOpen && onBaseView && (isMobile || viewMode === 'atoms') && (
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setFilterBarOpen(!filterBarOpen)}
@@ -384,7 +391,7 @@ export function MainView() {
         {/* Atoms layout sub-toggle — sits right-aligned next to the chat
             button so the cluster of left-side nav stays stable when
             switching views. Desktop atoms-base-view only. */}
-        {!isMobile && onBaseView && viewMode === 'atoms' && (
+        {!reviewPanelOpen && !entityPanelOpen && !isMobile && onBaseView && viewMode === 'atoms' && (
           <div className="flex items-center bg-[var(--color-bg-card)] rounded-md border border-[var(--color-border)] shrink-0">
             <button
               onClick={() => setAtomsLayout('grid')}
@@ -416,12 +423,28 @@ export function MainView() {
             onClick={() => {
               deactivateTabs();
               setLeftPanelOpen(false);
+              setEntityPanelOpen(false);
               setReviewPanelOpen(true);
             }}
             className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
             title="Review memU changes"
           >
             <ClipboardCheck className="w-4 h-4" strokeWidth={2} />
+          </button>
+        )}
+
+        {memuReviewsEnabled && (
+          <button
+            onClick={() => {
+              deactivateTabs();
+              setLeftPanelOpen(false);
+              setReviewPanelOpen(false);
+              setEntityPanelOpen(true);
+            }}
+            className={`p-1.5 rounded-md transition-colors shrink-0 ${entityPanelOpen ? 'text-white bg-[var(--color-accent)]' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'}`}
+            title="Entities"
+          >
+            <Users className="w-4 h-4" strokeWidth={2} />
           </button>
         )}
 
@@ -440,7 +463,7 @@ export function MainView() {
       </div>
 
       {/* Search results header - only show in atoms view */}
-      {isSemanticSearch && viewMode === 'atoms' && (
+      {!reviewPanelOpen && !entityPanelOpen && isSemanticSearch && viewMode === 'atoms' && (
         <div className="px-4 py-2 text-sm text-[var(--color-text-secondary)] border-b border-[var(--color-border)]">
           {semanticSearchResults.length > 0 ? (
             <span>
@@ -453,10 +476,10 @@ export function MainView() {
       )}
 
       {/* Filter bar — desktop inline strip, atoms view only */}
-      {!isMobile && !isSemanticSearch && viewMode === 'atoms' && filterBarOpen && <FilterBar />}
+      {!reviewPanelOpen && !entityPanelOpen && !isMobile && !isSemanticSearch && viewMode === 'atoms' && filterBarOpen && <FilterBar />}
 
       {/* Filter sheet — mobile bottom sheet hosts view mode + filter + sort */}
-      {isMobile && (
+      {!reviewPanelOpen && !entityPanelOpen && isMobile && (
         <FilterSheet
           isOpen={filterBarOpen}
           onClose={() => setFilterBarOpen(false)}
@@ -468,10 +491,14 @@ export function MainView() {
       <div className="flex-1 overflow-hidden relative">
         {reviewPanelOpen ? (
           <PendingReviewPanel />
+        ) : entityPanelOpen ? (
+          <EntityManager />
         ) : localGraph.isOpen && localGraph.centerAtomId ? (
           <LocalGraphView />
         ) : readerState.atomId ? (
-          <AtomReader atomId={readerState.atomId} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
+          readerState.atomId.startsWith('entity:')
+            ? <EntityReader entityId={readerState.atomId.slice('entity:'.length)} />
+            : <AtomReader atomId={readerState.atomId} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
         ) : wikiReaderState.tagId && wikiReaderState.tagName ? (
           <WikiReader
             tagId={wikiReaderState.tagId}
@@ -516,7 +543,7 @@ export function MainView() {
       </div>
 
       {/* FAB — on atoms + dashboard base views only (no active tab) */}
-      {onBaseView && (viewMode === 'atoms' || viewMode === 'dashboard') && <FAB onClick={handleNewAtom} title="Create new atom" />}
+      {!reviewPanelOpen && !entityPanelOpen && onBaseView && (viewMode === 'atoms' || viewMode === 'dashboard') && <FAB onClick={handleNewAtom} title="Create new atom" />}
     </main>
 
     {/* Chat sidebar backdrop — mobile only */}

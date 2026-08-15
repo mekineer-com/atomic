@@ -14,6 +14,7 @@ pub mod graph;
 pub mod import;
 pub mod ingest;
 pub mod logs;
+pub mod memu_entities;
 pub mod memu_proxy;
 pub mod memu_reviews;
 pub mod oauth;
@@ -303,6 +304,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(chat::send_chat_message),
     );
     cfg.route("/memu/session/end", web::post().to(chat::end_memu_session));
+
+    // memU entity proxy
+    cfg.route("/memu/entities", web::get().to(memu_entities::list));
+    cfg.route("/memu/entities/{id}", web::get().to(memu_entities::detail));
 
     // memU review proxy
     cfg.route("/memu/reviews/status", web::get().to(memu_reviews::status));
