@@ -33,7 +33,7 @@ pub async fn memu_json(
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return Err(HttpResponse::build(status).json(json!({"error": memu_error_text(&body)})));
+        return Err(HttpResponse::build(status).json(json!({"error": memu_error_value(&body)})));
     }
     response.json::<Value>().await.map_err(|e| {
         HttpResponse::BadGateway()
@@ -57,15 +57,21 @@ pub fn memu_url(base_url: &str, segments: &[&str]) -> Result<reqwest::Url, HttpR
 }
 
 pub fn memu_error_text(body: &str) -> String {
+    match memu_error_value(body) {
+        Value::String(message) => message,
+        value => value.to_string(),
+    }
+}
+
+fn memu_error_value(body: &str) -> Value {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return body.to_string();
+        return Value::String(body.to_string());
     };
     value
         .get("error")
         .or_else(|| value.get("detail"))
-        .and_then(Value::as_str)
-        .unwrap_or(body)
-        .to_string()
+        .cloned()
+        .unwrap_or_else(|| Value::String(body.to_string()))
 }
 
 pub fn is_memu_id(id: &str) -> bool {

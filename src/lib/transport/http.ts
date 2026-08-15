@@ -247,7 +247,12 @@ export class HttpTransport implements Transport {
       let errorMsg: string;
       try {
         const errJson = JSON.parse(text);
-        errorMsg = errJson.error || text;
+        const error = errJson.error;
+        errorMsg = typeof error === 'string'
+          ? error
+          : Array.isArray(error?.conflicts)
+            ? error.conflicts.join('; ')
+            : JSON.stringify(error ?? errJson);
       } catch {
         errorMsg = text;
       }
