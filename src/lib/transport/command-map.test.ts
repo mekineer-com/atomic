@@ -9,7 +9,7 @@ describe('memU command forwarding', () => {
       limit: 8,
       memoryOnly: true,
       excludeEntityId: 'entity-1',
-      excludeCategoryId: 'category-1',
+      excludeCategoryId: 'category:category-1',
     })).toEqual({
       query: 'M42',
       mode: 'hybrid',

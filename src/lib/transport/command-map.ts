@@ -326,7 +326,9 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       threshold: a.threshold,
       memory_only: a.memoryOnly,
       exclude_entity_id: a.excludeEntityId,
-      exclude_category_id: a.excludeCategoryId,
+      exclude_category_id: typeof a.excludeCategoryId === 'string'
+        ? a.excludeCategoryId.replace(/^category:/, '')
+        : a.excludeCategoryId,
     }),
   },
   search_global_keyword: {
