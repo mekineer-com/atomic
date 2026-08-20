@@ -67,6 +67,11 @@ function normalizeMemoryRef(value: string) {
   return match ? `[M${match[1] ?? match[2]}]` : null;
 }
 
+export function entitySaveCommand(isRelationship: boolean, promoting: boolean) {
+  if (promoting) return 'promote_memu_relationship';
+  return isRelationship ? 'update_memu_relationship' : 'update_memu_entity';
+}
+
 export function MemoryEntityControls({
   memoryId,
   entityIds = [],
@@ -202,8 +207,9 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     setError(null);
     const aliases = aliasesText.split(',').map(alias => alias.trim()).filter(Boolean);
     try {
-      if (entity.is_relationship || promoting) {
-        await getTransport().invoke(promoting ? 'promote_memu_relationship' : 'update_memu_relationship', {
+      const command = entitySaveCommand(entity.is_relationship, promoting);
+      if (command !== 'update_memu_entity') {
+        await getTransport().invoke(command, {
           id: entity.id,
           name,
           entityType,
