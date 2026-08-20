@@ -62,6 +62,11 @@ function shortDate(value: string | null) {
   return value ? new Date(value).toLocaleDateString() : 'Never';
 }
 
+function normalizeMemoryRef(value: string) {
+  const match = value.trim().match(/^(?:[Mm]([1-9]\d*)|\[[Mm]([1-9]\d*)\])$/);
+  return match ? `[M${match[1] ?? match[2]}]` : null;
+}
+
 export function MemoryEntityControls({
   memoryId,
   entityIds = [],
@@ -151,6 +156,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   const [relationship, setRelationship] = useState('');
   const [memoryQuery, setMemoryQuery] = useState('');
   const [memoryResults, setMemoryResults] = useState<SemanticSearchResult[]>([]);
+  const [linkedMemoryResult, setLinkedMemoryResult] = useState<EntityMemory | null>(null);
   const [mergeOpen, setMergeOpen] = useState(false);
   const [mergeCandidates, setMergeCandidates] = useState<EntitySummary[]>([]);
   const [duplicateId, setDuplicateId] = useState('');
@@ -174,6 +180,9 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     let cancelled = false;
     setEntity(null);
     setError(null);
+    setMemoryQuery('');
+    setMemoryResults([]);
+    setLinkedMemoryResult(null);
     load()
       .then(value => { if (!cancelled) display(value); })
       .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
@@ -193,8 +202,8 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     setError(null);
     const aliases = aliasesText.split(',').map(alias => alias.trim()).filter(Boolean);
     try {
-      if (activeRelationship || promoting) {
-        await getTransport().invoke(activeRelationship ? 'update_memu_relationship' : 'promote_memu_relationship', {
+      if (entity.is_relationship || promoting) {
+        await getTransport().invoke(entity.is_relationship ? 'update_memu_relationship' : 'promote_memu_relationship', {
           id: entity.id,
           name,
           entityType,
@@ -202,7 +211,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
           relationship,
         });
       } else {
-        await getTransport().invoke('update_memu_entity', { id: entity.id, name, entityType, aliases });
+        await getTransport().invoke('update_memu_entity', { id: entity.id, name, entityType, aliases, description: relationship });
       }
       await refresh();
       setEditing(false);
@@ -320,6 +329,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
       });
       await refresh();
       setMemoryResults([]);
+      setLinkedMemoryResult(null);
       setMemoryQuery('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -329,10 +339,22 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   const searchMemories = async (event: FormEvent) => {
     event.preventDefault();
     if (!memoryQuery.trim()) return;
+    const exactRef = normalizeMemoryRef(memoryQuery);
+    const linkedExact = exactRef ? entity?.memories.find(memory => memory.memory_ref === exactRef) : null;
+    if (linkedExact) {
+      setMemoryResults([]);
+      setLinkedMemoryResult(linkedExact);
+      return;
+    }
     try {
-      const results = await getTransport().invoke<SemanticSearchResult[]>('search_atoms_hybrid', { query: memoryQuery, limit: 8 });
-      const linked = new Set(entity?.memories.map(memory => memory.id));
-      setMemoryResults(results.filter(result => result.id.startsWith('memory:') && !linked.has(result.id)));
+      setLinkedMemoryResult(null);
+      const results = await getTransport().invoke<SemanticSearchResult[]>('search_atoms_hybrid', {
+        query: memoryQuery,
+        limit: 8,
+        memoryOnly: true,
+        excludeEntityId: entityId,
+      });
+      setMemoryResults(results);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -400,12 +422,12 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
             <label className="block text-xs text-[var(--color-text-tertiary)]">Name<input value={name} maxLength={activeRelationship || promoting ? 50 : undefined} onChange={event => setName(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
             <label className="block text-xs text-[var(--color-text-tertiary)]">Type<select value={entityType} onChange={event => setEntityType(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]"><option value="person">Person</option><option value="place">Place</option><option value="topic">Topic</option><option value="project">Project</option></select></label>
             <label className="block text-xs text-[var(--color-text-tertiary)]">Aliases<input value={aliasesText} onChange={event => setAliasesText(event.target.value)} placeholder="Comma separated" className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
-            {(activeRelationship || promoting) && <label className="block text-xs text-[var(--color-text-tertiary)]">Relationship<textarea value={relationship} maxLength={50} onChange={event => setRelationship(event.target.value)} className="mt-1 min-h-24 w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>}
+            <label className="block text-xs text-[var(--color-text-tertiary)]">{entity.is_relationship || promoting ? 'Relationship' : 'Description'}<textarea value={relationship} maxLength={entity.is_relationship || promoting ? 50 : undefined} onChange={event => setRelationship(event.target.value)} className="mt-1 min-h-24 w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
             <button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50">{saving ? 'Saving...' : promoting ? 'Make relationship' : 'Save'}</button>
           </section>
         ) : entity.properties.relationship ? (
           <section className="mb-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
-            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">Relationship</h2>
+            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">{entity.is_relationship ? 'Relationship' : 'Description'}</h2>
             <p className="leading-relaxed text-[var(--color-text-primary)]">{entity.properties.relationship}</p>
           </section>
         ) : null}
@@ -451,6 +473,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
           <button type="submit" className="rounded border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)]">Search</button>
         </form>}
         {!entity.ignored && memoryResults.length > 0 && <div className="mt-2 space-y-1">{memoryResults.map(memory => <button key={memory.id} type="button" onClick={() => void setMemoryEntity(memory.id, true)} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]">{memory.title || memory.snippet}</button>)}</div>}
+        {!entity.ignored && linkedMemoryResult && <button type="button" onClick={() => openReader(linkedMemoryResult.id)} className="mt-2 block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]"><span className="mr-2 text-[var(--color-text-tertiary)]">{linkedMemoryResult.memory_ref} · Already linked</span>{linkedMemoryResult.summary}</button>}
       </div>
     </article>
   );

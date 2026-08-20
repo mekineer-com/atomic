@@ -176,7 +176,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'PATCH',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}`,
     argsMode: 'body',
-    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases }),
+    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases, description: a.description }),
   },
   ignore_memu_entity: {
     method: 'POST',
@@ -307,7 +307,15 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'POST',
     path: '/api/search',
     argsMode: 'body',
-    transformArgs: (a) => ({ query: a.query, mode: 'hybrid', limit: a.limit, threshold: a.threshold }),
+    transformArgs: (a) => ({
+      query: a.query,
+      mode: 'hybrid',
+      limit: a.limit,
+      threshold: a.threshold,
+      memory_only: a.memoryOnly,
+      exclude_entity_id: a.excludeEntityId,
+      exclude_category_id: a.excludeCategoryId,
+    }),
   },
   search_global_keyword: {
     method: 'POST',

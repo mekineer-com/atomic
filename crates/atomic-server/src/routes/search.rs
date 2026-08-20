@@ -19,6 +19,13 @@ pub struct SearchRequest {
     pub limit: Option<i32>,
     /// Minimum similarity threshold
     pub threshold: Option<f32>,
+    /// Return memory atoms only
+    #[serde(default)]
+    pub memory_only: bool,
+    /// Exclude memories already linked to this memU entity
+    pub exclude_entity_id: Option<String>,
+    /// Exclude memories already linked to this memU dossier
+    pub exclude_category_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -56,7 +63,7 @@ pub async fn search(
         }
     };
     if let Some(config) = state.memu_session.clone() {
-        return memu_search(config, &req.query, &req.mode, req.limit.unwrap_or(20)).await;
+        return memu_search(config, &req).await;
     }
 
     let mut options = SearchOptions::new(req.query, mode, req.limit.unwrap_or(20));
@@ -84,14 +91,16 @@ pub async fn global_search(
 ) -> HttpResponse {
     let req = body.into_inner();
     if let Some(config) = state.memu_session.clone() {
-        let atoms = match memu_search_value(
-            config,
-            &req.query,
-            "keyword",
-            req.section_limit.unwrap_or(5),
-        )
-        .await
-        {
+        let search_req = SearchRequest {
+            query: req.query,
+            mode: "keyword".to_string(),
+            limit: req.section_limit,
+            threshold: None,
+            memory_only: false,
+            exclude_entity_id: None,
+            exclude_category_id: None,
+        };
+        let atoms = match memu_search_value(config, &search_req).await {
             Ok(atoms) => atoms,
             Err(response) => return response,
         };
@@ -206,11 +215,9 @@ async fn memu_find_similar(
 
 async fn memu_search(
     config: crate::state::MemuSessionConfig,
-    query: &str,
-    mode: &str,
-    limit: i32,
+    request: &SearchRequest,
 ) -> HttpResponse {
-    match memu_search_value(config, query, mode, limit).await {
+    match memu_search_value(config, request).await {
         Ok(body) => HttpResponse::Ok().json(body),
         Err(response) => response,
     }
@@ -218,18 +225,25 @@ async fn memu_search(
 
 async fn memu_search_value(
     config: crate::state::MemuSessionConfig,
-    query: &str,
-    mode: &str,
-    limit: i32,
+    request: &SearchRequest,
 ) -> Result<Vec<serde_json::Value>, HttpResponse> {
     let client = memu_proxy::client()?;
-    let params = vec![
-        ("q", query.to_string()),
-        ("mode", mode.to_string()),
+    let mut params = vec![
+        ("q", request.query.clone()),
+        ("mode", request.mode.clone()),
         ("user_id", config.user_id),
         ("soul_id", config.soul_id),
-        ("limit", limit.max(1).to_string()),
+        ("limit", request.limit.unwrap_or(20).max(1).to_string()),
     ];
+    if request.memory_only {
+        params.push(("memory_only", "true".to_string()));
+    }
+    if let Some(entity_id) = &request.exclude_entity_id {
+        params.push(("exclude_entity_id", entity_id.clone()));
+    }
+    if let Some(category_id) = &request.exclude_category_id {
+        params.push(("exclude_category_id", category_id.clone()));
+    }
     let body = memu_proxy::memu_json(
         client
             .get(format!("{}/integration/atomic/search", config.base_url))
