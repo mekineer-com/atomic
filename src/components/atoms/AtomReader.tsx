@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef, type FormEvent } from 'react';
 import { ChevronDown, Trash2 } from 'lucide-react';
 import { openExternalUrl } from '../../lib/platform';
 import { Modal } from '../ui/Modal';
@@ -43,6 +43,101 @@ const AtomicCodeMirrorEditor = lazy(async () => {
   );
   return { default: Wrapped };
 });
+
+function DossierMembershipControls({
+  atom,
+  onUpdated,
+  onReload,
+  onOpen,
+}: {
+  atom: AtomWithTags;
+  onUpdated: (atom: AtomWithTags) => void;
+  onReload: () => Promise<void>;
+  onOpen: (id: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<SemanticSearchResult[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const members = atom.members ?? [];
+  const readOnly = atom.anchor_role != null;
+
+  const change = async (memoryId: string, attached: boolean) => {
+    if (atom.summaries_revision == null) {
+      setError('Dossier revision is unavailable. Reload and try again.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await getTransport().invoke<AtomWithTags>(
+        attached ? 'attach_memu_category_memory' : 'detach_memu_category_memory',
+        {
+          categoryId: atom.id,
+          memoryId,
+          displayedSummary: atom.content,
+          summariesRevision: atom.summaries_revision,
+        },
+      );
+      useCanvasStore.getState().invalidateCanvasData();
+      onUpdated(updated);
+      setQuery('');
+      setResults([]);
+    } catch (reason) {
+      setError(String(reason));
+      await onReload().catch(() => undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const search = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!query.trim()) return;
+    setError(null);
+    try {
+      setResults(await getTransport().invoke<SemanticSearchResult[]>('search_atoms_hybrid', {
+        query,
+        limit: 8,
+        memoryOnly: true,
+        excludeCategoryId: atom.id,
+      }));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  return (
+    <section className="mt-4 border-t border-[var(--color-border)] pt-4">
+      <button type="button" onClick={() => setExpanded(value => !value)} className="flex w-full items-center justify-between text-left text-sm font-medium text-[var(--color-text-primary)]">
+        <span>Memories in this dossier ({members.length})</span>
+        <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="mt-3 space-y-2">
+          {readOnly && <p className="text-xs text-[var(--color-text-tertiary)]">Membership is managed by consolidation.</p>}
+          {members.map(member => (
+            <div key={member.memory_id} className="flex items-start gap-2 rounded border border-[var(--color-border)] p-2 text-xs">
+              <button type="button" onClick={() => onOpen(member.id)} className="min-w-0 flex-1 text-left hover:text-[var(--color-accent)]">
+                <span className="mr-2 text-[var(--color-text-tertiary)]">{member.memory_ref ?? 'Unnumbered'} · {member.status}</span>
+                <span>{member.summary}</span>
+              </button>
+              {!readOnly && <button type="button" disabled={busy || member.cited} title={member.cited ? `Remove ${member.memory_ref} from dossier text first` : 'Detach memory'} onClick={() => void change(member.memory_id, false)} className="text-[var(--color-text-tertiary)] enabled:hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-40">Detach</button>}
+            </div>
+          ))}
+          {members.length === 0 && <p className="text-xs text-[var(--color-text-tertiary)]">No memories attached.</p>}
+          {!readOnly && <form onSubmit={search} className="flex gap-2">
+            <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Find a memory or enter M#" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
+            <button type="submit" disabled={busy} className="rounded border border-[var(--color-border)] px-2 py-1.5 text-xs disabled:opacity-50">Search</button>
+          </form>}
+          {!readOnly && results.map(memory => <button key={memory.id} type="button" disabled={busy} onClick={() => void change(memory.id, true)} className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--color-bg-hover)] disabled:opacity-50">{memory.title || memory.snippet}</button>)}
+          {error && <p className="text-xs text-red-400">{error}</p>}
+        </div>
+      )}
+    </section>
+  );
+}
 
 interface AtomReaderProps {
   atomId: string;
@@ -174,6 +269,7 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
           onRelatedAtomClick={(id, opts) => overlayNavigate({ type: 'reader', atomId: id }, opts)}
           onViewGraph={(opts) => overlayNavigate({ type: 'graph', atomId }, opts)}
           onAtomUpdated={(updated) => setAtom(updated)}
+          onReload={refreshAtom}
         />
       )}
     </div>
@@ -190,11 +286,12 @@ interface AtomReaderContentProps {
   onRelatedAtomClick: (atomId: string, opts?: { newTab?: boolean }) => void;
   onViewGraph: (opts?: { newTab?: boolean }) => void;
   onAtomUpdated?: (atom: AtomWithTags) => void;
+  onReload: () => Promise<void>;
 }
 
 function AtomReaderContent({
   atom, highlightText, initialEditing,
-  onDismiss, onDelete, onTagClick, onRelatedAtomClick, onViewGraph, onAtomUpdated,
+  onDismiss, onDelete, onTagClick, onRelatedAtomClick, onViewGraph, onAtomUpdated, onReload,
 }: AtomReaderContentProps) {
   const readerTheme = useUIStore(s => s.readerTheme);
   const setReaderEditState = useUIStore(s => s.setReaderEditState);
@@ -561,8 +658,8 @@ function AtomReaderContent({
                           Delete
                         </button>
                       ) : (
-                        <button disabled className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm opacity-50">
-                          Delete disabled
+                        <button disabled title="Delete not implemented" className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm opacity-50">
+                          Delete
                         </button>
                       )}
                     </div>
@@ -683,6 +780,15 @@ function AtomReaderContent({
                   useCanvasStore.getState().invalidateCanvasData();
                   onAtomUpdated?.(updated);
                 }}
+              />
+            )}
+
+            {isMemuCategory && (
+              <DossierMembershipControls
+                atom={atom}
+                onUpdated={(updated) => onAtomUpdated?.(updated)}
+                onReload={onReload}
+                onOpen={(id) => onRelatedAtomClick(id)}
               />
             )}
 

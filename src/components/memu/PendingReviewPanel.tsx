@@ -319,7 +319,7 @@ function GeneratedSummaryRow({
       )}
       <div className="mt-2 flex gap-2">
         <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => void run()}>{edited ? 'Save + approve' : 'Approve'}</button>
-        {kind === 'category' && <button disabled className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete disabled</button>}
+        {kind === 'category' && <button disabled title="Delete not implemented" className="rounded border border-[var(--color-border)] px-3 py-1 text-sm opacity-50">Delete</button>}
       </div>
     </article>
   );

@@ -211,6 +211,7 @@ export function SigmaCanvas({
   const [isRebuilding, setIsRebuilding] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const canvasInvalidation = useCanvasStore(state => state.canvasInvalidation);
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<CanvasTheme>(DEFAULT_THEME);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
@@ -293,7 +294,7 @@ export function SigmaCanvas({
       });
 
     return () => { cancelled = true; };
-  }, [activeDbId, refreshNonce]);
+  }, [activeDbId, refreshNonce, canvasInvalidation]);
 
   const visibleAtomIds = useMemo(() => {
     if (!data || isPreview) return [];

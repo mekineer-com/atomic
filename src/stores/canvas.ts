@@ -33,6 +33,7 @@ interface CanvasStore {
   canvasDataDbId: string | null;
   canvasRebuildData: GlobalCanvasData | null;
   canvasRebuildKey: string | null;
+  canvasInvalidation: number;
   setCanvasData: (data: GlobalCanvasData, dbId: string | null) => void;
   setCanvasRebuildData: (data: GlobalCanvasData, key: string) => void;
   invalidateCanvasData: () => void;
@@ -57,6 +58,7 @@ export const useCanvasStore = create<CanvasStore>()((set) => ({
   canvasDataDbId: null,
   canvasRebuildData: null,
   canvasRebuildKey: null,
+  canvasInvalidation: 0,
   pendingCamera: null,
   pendingFocusAtomId: null,
 
@@ -68,12 +70,13 @@ export const useCanvasStore = create<CanvasStore>()((set) => ({
 
   setCanvasData: (data, dbId) => set({ canvasData: data, canvasDataDbId: dbId }),
   setCanvasRebuildData: (data, key) => set({ canvasRebuildData: data, canvasRebuildKey: key }),
-  invalidateCanvasData: () => set({
+  invalidateCanvasData: () => set((state) => ({
     canvasData: null,
     canvasDataDbId: null,
     canvasRebuildData: null,
     canvasRebuildKey: null,
-  }),
+    canvasInvalidation: state.canvasInvalidation + 1,
+  })),
 
   setPendingCamera: (state) => set({ pendingCamera: state }),
   setPendingFocusAtomId: (id) => set({ pendingFocusAtomId: id }),

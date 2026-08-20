@@ -374,6 +374,14 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::patch().to(memu_reviews::update_category),
     );
     cfg.route(
+        "/memu/reviews/category/{id}/memory/{memory_id}",
+        web::put().to(memu_reviews::attach_category_memory),
+    );
+    cfg.route(
+        "/memu/reviews/category/{id}/memory/{memory_id}",
+        web::delete().to(memu_reviews::detach_category_memory),
+    );
+    cfg.route(
         "/memu/reviews/soul-summary/{id}/approve",
         web::post().to(memu_reviews::approve_soul_summary),
     );

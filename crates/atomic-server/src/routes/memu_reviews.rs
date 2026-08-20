@@ -129,6 +129,67 @@ pub async fn update_category(
     update(state, "category", &path.into_inner(), body.into_inner()).await
 }
 
+pub async fn attach_category_memory(
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+    body: web::Json<SummaryGuard>,
+) -> HttpResponse {
+    set_category_memory(state, path.into_inner(), body.into_inner(), true).await
+}
+
+pub async fn detach_category_memory(
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+    body: web::Json<SummaryGuard>,
+) -> HttpResponse {
+    set_category_memory(state, path.into_inner(), body.into_inner(), false).await
+}
+
+async fn set_category_memory(
+    state: web::Data<AppState>,
+    (category_id, memory_id): (String, String),
+    body: SummaryGuard,
+    attached: bool,
+) -> HttpResponse {
+    if body.summaries_revision.is_none() || body.displayed_summary.is_none() {
+        return HttpResponse::BadRequest().json(json!({"error": "summary snapshot is required"}));
+    }
+    let config = match session(&state) {
+        Ok(config) => config,
+        Err(response) => return response,
+    };
+    let client = match client() {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let url = match memu_url(
+        &config.base_url,
+        &["category", &category_id, "memory", &memory_id],
+    ) {
+        Ok(url) => url,
+        Err(response) => return response,
+    };
+    let request = if attached {
+        client.put(url)
+    } else {
+        client.delete(url)
+    };
+    match memu_json(
+        request
+            .query(&[
+                ("user_id", config.user_id.as_str()),
+                ("soul_id", config.soul_id.as_str()),
+            ])
+            .json(&body),
+        "memU category membership",
+    )
+    .await
+    {
+        Ok(body) => updated_atom_response(&state, body),
+        Err(response) => response,
+    }
+}
+
 async fn update(
     state: web::Data<AppState>,
     kind: &str,

@@ -142,6 +142,18 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       summaries_revision: a.summaries_revision,
     }),
   },
+  attach_memu_category_memory: {
+    method: 'PUT',
+    path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.categoryId as string)}/memory/${encodeURIComponent(a.memoryId as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ displayed_summary: a.displayedSummary, summaries_revision: a.summariesRevision }),
+  },
+  detach_memu_category_memory: {
+    method: 'DELETE',
+    path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.categoryId as string)}/memory/${encodeURIComponent(a.memoryId as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ displayed_summary: a.displayedSummary, summaries_revision: a.summariesRevision }),
+  },
   approve_soul_summary: {
     method: 'POST',
     path: (a) => `/api/memu/reviews/soul-summary/${encodeURIComponent(a.kind as string)}/approve`,

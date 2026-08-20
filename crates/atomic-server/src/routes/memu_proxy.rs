@@ -119,7 +119,7 @@ pub fn atom_from_node(node: &Value) -> Value {
         .filter(|value| !value.is_null())
         .cloned()
         .unwrap_or_else(|| json!([]));
-    json!({
+    let mut atom = json!({
         "id": id,
         "title": node["label"].as_str().unwrap_or(id),
         "content": summary,
@@ -149,7 +149,11 @@ pub fn atom_from_node(node: &Value) -> Value {
         "tagging_error": null,
         "kind": "captured",
         "tags": tags,
-    })
+    });
+    if let (Some(members), Some(response)) = (node.get("members"), atom.as_object_mut()) {
+        response.insert("members".to_string(), members.clone());
+    }
+    atom
 }
 
 pub fn readonly() -> HttpResponse {
@@ -170,5 +174,12 @@ mod tests {
         let atom = atom_from_node(&json!({"id": "memory:m1", "entity_ids": null}));
         assert_eq!(atom["entity_ids"], json!([]));
         assert_eq!(atom["entity_names"], json!([]));
+        assert!(atom.get("members").is_none());
+
+        let detail = atom_from_node(&json!({
+            "id": "category:c1",
+            "members": [{"memory_id": "m1", "status": "Active"}],
+        }));
+        assert_eq!(detail["members"][0]["memory_id"], "m1");
     }
 }

@@ -11,6 +11,18 @@ export interface MemoryCitation {
   summary: string;
 }
 
+export interface DossierMember {
+  id: string;
+  memory_id: string;
+  memory_ref: string | null;
+  summary: string;
+  memory_type: string;
+  happened_at: string | null;
+  created_at: string | null;
+  status: 'Active' | 'Inactive';
+  cited: boolean;
+}
+
 export interface DossierFields {
   description?: string | null;
   approved_description?: string | null;
@@ -22,6 +34,7 @@ export interface DossierFields {
   last_evidence_at?: string | null;
   last_revised_at?: string | null;
   citations?: MemoryCitation[];
+  members?: DossierMember[];
   summaries_revision?: number;
 }
 
