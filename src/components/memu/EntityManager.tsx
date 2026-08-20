@@ -203,7 +203,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     const aliases = aliasesText.split(',').map(alias => alias.trim()).filter(Boolean);
     try {
       if (entity.is_relationship || promoting) {
-        await getTransport().invoke(entity.is_relationship ? 'update_memu_relationship' : 'promote_memu_relationship', {
+        await getTransport().invoke(promoting ? 'promote_memu_relationship' : 'update_memu_relationship', {
           id: entity.id,
           name,
           entityType,
