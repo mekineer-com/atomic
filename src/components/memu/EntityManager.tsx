@@ -482,7 +482,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
             <button type="button" onClick={() => void setMemoryEntity(memory.id, true)} className="text-[var(--color-accent)]">Attach</button>
           </div>
         ))}</div>}
-        {!entity.ignored && linkedMemoryResult && <button type="button" onClick={() => openReader(linkedMemoryResult.id)} className="mt-2 block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]"><span className="mr-2 text-[var(--color-text-tertiary)]">{linkedMemoryResult.memory_ref} · Already linked</span>{linkedMemoryResult.summary}</button>}
+        {!entity.ignored && linkedMemoryResult && <button type="button" title={linkedMemoryResult.summary} onClick={() => openReader(linkedMemoryResult.id)} className="mt-2 block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]"><span className="mr-2 text-[var(--color-text-tertiary)]">{linkedMemoryResult.memory_ref} · Already linked</span>{linkedMemoryResult.summary}</button>}
       </div>
     </article>
   );
