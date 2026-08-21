@@ -478,7 +478,13 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
           <input value={memoryQuery} onChange={event => setMemoryQuery(event.target.value)} placeholder="Find a memory to attach" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]" />
           <button type="submit" className="rounded border border-[var(--color-border)] px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)]">Search</button>
         </form>}
-        {!entity.ignored && memoryResults.length > 0 && <div className="mt-2 space-y-1">{memoryResults.map(memory => <button key={memory.id} type="button" onClick={() => void setMemoryEntity(memory.id, true)} className="block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]">{memory.title || memory.snippet}</button>)}</div>}
+        {!entity.ignored && memoryResults.length > 0 && <div className="mt-2 space-y-1">{memoryResults.map(memory => (
+          <div key={memory.id} title={memory.content} className="flex items-center gap-2 rounded px-3 py-2 text-sm hover:bg-[var(--color-bg-hover)]">
+            <span className="min-w-0 flex-1">{memory.title || memory.snippet}</span>
+            <button type="button" onClick={() => openReader(memory.id)} className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Open</button>
+            <button type="button" onClick={() => void setMemoryEntity(memory.id, true)} className="text-[var(--color-accent)]">Attach</button>
+          </div>
+        ))}</div>}
         {!entity.ignored && linkedMemoryResult && <button type="button" onClick={() => openReader(linkedMemoryResult.id)} className="mt-2 block w-full rounded px-3 py-2 text-left text-sm hover:bg-[var(--color-bg-hover)]"><span className="mr-2 text-[var(--color-text-tertiary)]">{linkedMemoryResult.memory_ref} · Already linked</span>{linkedMemoryResult.summary}</button>}
       </div>
     </article>

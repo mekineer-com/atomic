@@ -61,6 +61,10 @@ function DossierMembershipControls({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const members = atom.members ?? [];
+  const memberGroups = [
+    ['Cited in dossier prose', members.filter(member => member.cited)],
+    ['Other attached memories', members.filter(member => !member.cited)],
+  ] as const;
   const readOnly = atom.anchor_role != null;
 
   const change = async (memoryId: string, attached: boolean) => {
@@ -117,13 +121,18 @@ function DossierMembershipControls({
       {expanded && (
         <div className="mt-3 space-y-2">
           {readOnly && <p className="text-xs text-[var(--color-text-tertiary)]">Membership is managed by consolidation.</p>}
-          {members.map(member => (
-            <div key={member.memory_id} className="flex items-start gap-2 rounded border border-[var(--color-border)] p-2 text-xs">
-              <button type="button" onClick={() => onOpen(member.id)} className="min-w-0 flex-1 text-left hover:text-[var(--color-accent)]">
-                <span className="mr-2 text-[var(--color-text-tertiary)]">{member.memory_ref ?? 'Unnumbered'} · {member.status}</span>
-                <span>{member.summary}</span>
-              </button>
-              {!readOnly && <button type="button" disabled={busy || member.cited} title={member.cited ? `Remove ${member.memory_ref} from dossier text first` : 'Detach memory'} onClick={() => void change(member.memory_id, false)} className="text-[var(--color-text-tertiary)] enabled:hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-40">Detach</button>}
+          {memberGroups.map(([label, group]) => group.length > 0 && (
+            <div key={label} className="space-y-2">
+              <h3 className="text-xs font-medium text-[var(--color-text-tertiary)]">{label}</h3>
+              {group.map(member => (
+                <div key={member.memory_id} className="flex items-start gap-2 rounded border border-[var(--color-border)] p-2 text-xs">
+                  <button type="button" onClick={() => onOpen(member.id)} className="min-w-0 flex-1 text-left hover:text-[var(--color-accent)]">
+                    <span className="mr-2 text-[var(--color-text-tertiary)]">{member.memory_ref ?? 'Unnumbered'} · {member.status}</span>
+                    <span>{member.summary}</span>
+                  </button>
+                  {!readOnly && <button type="button" disabled={busy || member.cited} title={member.cited ? `Remove ${member.memory_ref} from dossier text first` : 'Detach memory'} onClick={() => void change(member.memory_id, false)} className="text-[var(--color-text-tertiary)] enabled:hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-40">Detach</button>}
+                </div>
+              ))}
             </div>
           ))}
           {members.length === 0 && <p className="text-xs text-[var(--color-text-tertiary)]">No memories attached.</p>}
@@ -131,7 +140,13 @@ function DossierMembershipControls({
             <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Find a memory or enter M#" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
             <button type="submit" disabled={busy} className="rounded border border-[var(--color-border)] px-2 py-1.5 text-xs disabled:opacity-50">Search</button>
           </form>}
-          {!readOnly && results.map(memory => <button key={memory.id} type="button" disabled={busy} onClick={() => void change(memory.id, true)} className="block w-full rounded px-2 py-1.5 text-left text-xs hover:bg-[var(--color-bg-hover)] disabled:opacity-50">{memory.title || memory.snippet}</button>)}
+          {!readOnly && results.map(memory => (
+            <div key={memory.id} title={memory.content} className="flex items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-[var(--color-bg-hover)]">
+              <span className="min-w-0 flex-1">{memory.title || memory.snippet}</span>
+              <button type="button" onClick={() => onOpen(memory.id)} className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">Open</button>
+              <button type="button" disabled={busy} onClick={() => void change(memory.id, true)} className="text-[var(--color-accent)] disabled:opacity-50">Attach</button>
+            </div>
+          ))}
           {error && <p className="text-xs text-red-400">{error}</p>}
         </div>
       )}
