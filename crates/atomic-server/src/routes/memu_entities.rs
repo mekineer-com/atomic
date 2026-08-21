@@ -332,7 +332,7 @@ async fn relationship_write(
     }
 }
 
-pub async fn deactivate_relationship(
+pub async fn remove_relationship(
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> HttpResponse {
@@ -356,7 +356,7 @@ pub async fn deactivate_relationship(
         client
             .delete(url)
             .query(&[("user_id", config.user_id.as_str())]),
-        "memU relationship deactivate",
+        "memU relationship remove",
     )
     .await
     {

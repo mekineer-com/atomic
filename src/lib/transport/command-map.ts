@@ -224,7 +224,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     argsMode: 'body',
     transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases, relationship: a.relationship }),
   },
-  deactivate_memu_relationship: {
+  remove_memu_relationship: {
     method: 'DELETE',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}/relationship`,
   },

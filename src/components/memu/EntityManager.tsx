@@ -9,7 +9,6 @@ interface EntityProperties {
   relationship?: string;
   aliases?: string[];
   ignored?: boolean;
-  active?: boolean;
 }
 
 interface EntitySummary {
@@ -194,8 +193,6 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     return () => { cancelled = true; };
   }, [display, load]);
 
-  const activeRelationship = Boolean(entity?.is_relationship && entity.properties.active !== false);
-
   const refresh = async () => {
     display(await load());
     onChanged?.();
@@ -228,12 +225,12 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     }
   };
 
-  const deactivateRelationship = async () => {
+  const removeRelationship = async () => {
     if (!entity) return;
     setSaving(true);
     setError(null);
     try {
-      await getTransport().invoke('deactivate_memu_relationship', { id: entity.id });
+      await getTransport().invoke('remove_memu_relationship', { id: entity.id });
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -383,7 +380,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
             <p className="mt-1 text-sm text-[var(--color-text-tertiary)]">{entity.entity_type}</p>
           </div>
           <div className="flex flex-wrap gap-2 text-xs text-[var(--color-text-secondary)]">
-            {entity.is_relationship && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">{activeRelationship ? 'Relationship' : 'Inactive relationship'}</span>}
+            {entity.is_relationship && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Relationship</span>}
             {entity.orphan && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Orphan</span>}
             {entity.ignored && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">Ignored</span>}
             <button type="button" onClick={toggleEdit} className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)]">{editing ? 'Cancel' : 'Edit'}</button>
@@ -393,9 +390,9 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
             {!entity.ignored && <button
               type="button"
               disabled={saving}
-              onClick={() => activeRelationship ? void deactivateRelationship() : beginPromotion()}
+              onClick={() => entity.is_relationship ? void removeRelationship() : beginPromotion()}
               className="rounded border border-[var(--color-border)] px-2 py-1 hover:bg-[var(--color-bg-hover)] disabled:opacity-50"
-            >{activeRelationship ? 'Deactivate relationship' : 'Make relationship'}</button>}
+            >{entity.is_relationship ? 'Remove relationship' : 'Make relationship'}</button>}
           </div>
         </div>
 
@@ -425,7 +422,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
 
         {editing ? (
           <section className="mb-6 space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
-            <label className="block text-xs text-[var(--color-text-tertiary)]">Name<input value={name} maxLength={activeRelationship || promoting ? 50 : undefined} onChange={event => setName(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
+            <label className="block text-xs text-[var(--color-text-tertiary)]">Name<input value={name} maxLength={entity.is_relationship || promoting ? 50 : undefined} onChange={event => setName(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
             <label className="block text-xs text-[var(--color-text-tertiary)]">Type<input value={entityType} onChange={event => setEntityType(event.target.value)} placeholder="person" className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
             <label className="block text-xs text-[var(--color-text-tertiary)]">Aliases<input value={aliasesText} onChange={event => setAliasesText(event.target.value)} placeholder="Comma separated" className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
             {(entity.is_relationship || promoting) && <label className="block text-xs text-[var(--color-text-tertiary)]">Relationship<textarea value={relationship} maxLength={50} onChange={event => setRelationship(event.target.value)} className="mt-1 min-h-24 w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>}

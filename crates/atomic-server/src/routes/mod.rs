@@ -343,7 +343,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     );
     cfg.route(
         "/memu/entities/{id}/relationship",
-        web::delete().to(memu_entities::deactivate_relationship),
+        web::delete().to(memu_entities::remove_relationship),
     );
     cfg.route(
         "/memu/memories/{memory_id}/entities/{entity_id}",

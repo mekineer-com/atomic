@@ -635,6 +635,14 @@ function AtomReaderContent({
                       <p className="rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{memuError}</p>
                     )}
                     {isMemuCategory && memuEditing && <MemoryCitationLinks citations={atom.citations} />}
+                    {isMemuCategory && (
+                      <DossierMembershipControls
+                        atom={atom}
+                        onUpdated={(updated) => onAtomUpdated?.(updated)}
+                        onReload={onReload}
+                        onOpen={(id) => onRelatedAtomClick(id)}
+                      />
+                    )}
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() => void (memuEdited ? saveMemuSummary() : approveMemuSummary())}
@@ -795,15 +803,6 @@ function AtomReaderContent({
                   useCanvasStore.getState().invalidateCanvasData();
                   onAtomUpdated?.(updated);
                 }}
-              />
-            )}
-
-            {isMemuCategory && (
-              <DossierMembershipControls
-                atom={atom}
-                onUpdated={(updated) => onAtomUpdated?.(updated)}
-                onReload={onReload}
-                onOpen={(id) => onRelatedAtomClick(id)}
               />
             )}
 
