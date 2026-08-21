@@ -188,7 +188,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'PATCH',
     path: (a) => `/api/memu/entities/${encodeURIComponent(a.id as string)}`,
     argsMode: 'body',
-    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases, description: a.description }),
+    transformArgs: (a) => ({ name: a.name, entity_type: a.entityType, aliases: a.aliases }),
   },
   ignore_memu_entity: {
     method: 'POST',

@@ -21,17 +21,15 @@ describe('memU command forwarding', () => {
     });
   });
 
-  it('forwards ordinary entity descriptions', () => {
+  it('forwards free-text ordinary entity types without description', () => {
     expect(COMMAND_MAP.update_memu_entity.transformArgs?.({
       name: 'Library',
-      entityType: 'project',
+      entityType: 'WhatsApp integration library',
       aliases: [],
-      description: 'WhatsApp integration library',
     })).toEqual({
       name: 'Library',
-      entity_type: 'project',
+      entity_type: 'WhatsApp integration library',
       aliases: [],
-      description: 'WhatsApp integration library',
     });
   });
 });

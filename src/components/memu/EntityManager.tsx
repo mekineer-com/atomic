@@ -138,7 +138,7 @@ export function MemoryEntityControls({
         <div className="mt-1 space-y-1">
           {matches.map(entity => (
             <button key={entity.id} type="button" onClick={() => void change(entity.id, true)} className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[var(--color-bg-hover)]">
-              {entity.name} <span className="capitalize text-[var(--color-text-tertiary)]">{entity.entity_type}</span>
+              {entity.name} <span className="text-[var(--color-text-tertiary)]">{entity.entity_type}</span>
             </button>
           ))}
           {matches.length === 0 && <p className="px-2 py-1 text-xs text-[var(--color-text-tertiary)]">No matches.</p>}
@@ -217,7 +217,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
           relationship,
         });
       } else {
-        await getTransport().invoke('update_memu_entity', { id: entity.id, name, entityType, aliases, description: relationship });
+        await getTransport().invoke('update_memu_entity', { id: entity.id, name, entityType, aliases });
       }
       await refresh();
       setEditing(false);
@@ -380,7 +380,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
         <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">{entity.name}</h1>
-            <p className="mt-1 text-sm capitalize text-[var(--color-text-tertiary)]">{entity.entity_type}</p>
+            <p className="mt-1 text-sm text-[var(--color-text-tertiary)]">{entity.entity_type}</p>
           </div>
           <div className="flex flex-wrap gap-2 text-xs text-[var(--color-text-secondary)]">
             {entity.is_relationship && <span className="rounded-full border border-[var(--color-border)] px-2 py-1">{activeRelationship ? 'Relationship' : 'Inactive relationship'}</span>}
@@ -426,14 +426,14 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
         {editing ? (
           <section className="mb-6 space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
             <label className="block text-xs text-[var(--color-text-tertiary)]">Name<input value={name} maxLength={activeRelationship || promoting ? 50 : undefined} onChange={event => setName(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
-            <label className="block text-xs text-[var(--color-text-tertiary)]">Type<select value={entityType} onChange={event => setEntityType(event.target.value)} className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]"><option value="person">Person</option><option value="place">Place</option><option value="topic">Topic</option><option value="project">Project</option></select></label>
+            <label className="block text-xs text-[var(--color-text-tertiary)]">Type<input value={entityType} onChange={event => setEntityType(event.target.value)} placeholder="person" className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
             <label className="block text-xs text-[var(--color-text-tertiary)]">Aliases<input value={aliasesText} onChange={event => setAliasesText(event.target.value)} placeholder="Comma separated" className="mt-1 block w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
-            <label className="block text-xs text-[var(--color-text-tertiary)]">{entity.is_relationship || promoting ? 'Relationship' : 'Description'}<textarea value={relationship} maxLength={entity.is_relationship || promoting ? 50 : undefined} onChange={event => setRelationship(event.target.value)} className="mt-1 min-h-24 w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>
-            <button type="button" disabled={saving || !name.trim()} onClick={() => void save()} className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50">{saving ? 'Saving...' : promoting ? 'Make relationship' : 'Save'}</button>
+            {(entity.is_relationship || promoting) && <label className="block text-xs text-[var(--color-text-tertiary)]">Relationship<textarea value={relationship} maxLength={50} onChange={event => setRelationship(event.target.value)} className="mt-1 min-h-24 w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2 text-sm text-[var(--color-text-primary)]" /></label>}
+            <button type="button" disabled={saving || !name.trim() || !entityType.trim()} onClick={() => void save()} className="rounded bg-[var(--color-accent)] px-3 py-1.5 text-sm text-white disabled:opacity-50">{saving ? 'Saving...' : promoting ? 'Make relationship' : 'Save'}</button>
           </section>
-        ) : entity.properties.relationship ? (
+        ) : entity.is_relationship && entity.properties.relationship ? (
           <section className="mb-6 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4">
-            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">{entity.is_relationship ? 'Relationship' : 'Description'}</h2>
+            <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">Relationship</h2>
             <p className="leading-relaxed text-[var(--color-text-primary)]">{entity.properties.relationship}</p>
           </section>
         ) : null}
@@ -518,7 +518,7 @@ export function EntityManager() {
 
   const createEntity = async (event: FormEvent) => {
     event.preventDefault();
-    if (!newName.trim()) return;
+    if (!newName.trim() || !newType.trim()) return;
     setCreatingEntity(true);
     setError(null);
     try {
@@ -543,7 +543,7 @@ export function EntityManager() {
     return entities
       .filter(entity => !needle || entity.name.toLocaleLowerCase().includes(needle) ||
         (entity.properties.aliases ?? []).some(alias => alias.toLocaleLowerCase().includes(needle)))
-      .filter(entity => type === 'all' || entity.entity_type === type)
+      .filter(entity => type === 'all' || entity.entity_type.toLocaleLowerCase() === type)
       .filter(entity => !relationshipOnly || entity.is_relationship)
       .filter(entity => showIgnored || !entity.ignored)
       .filter(entity => !orphanOnly || entity.orphan)
@@ -554,6 +554,9 @@ export function EntityManager() {
         return left.name.localeCompare(right.name);
       });
   }, [entities, orphanOnly, query, relationshipOnly, showIgnored, sort, type]);
+  const entityTypes = useMemo(() => Array.from(
+    new Map(entities.map(entity => [entity.entity_type.toLocaleLowerCase(), entity.entity_type])).values(),
+  ).sort((left, right) => left.localeCompare(right)), [entities]);
 
   if (error && entities.length === 0) return <div className="p-6 text-sm text-red-400">{error}</div>;
 
@@ -570,8 +573,8 @@ export function EntityManager() {
           {creating && <form onSubmit={createEntity} className="mb-3 space-y-2 rounded border border-[var(--color-border)] bg-[var(--color-bg-card)] p-2">
             <input autoFocus value={newName} onChange={event => setNewName(event.target.value)} placeholder="Entity name" className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
             <div className="flex gap-2">
-              <select value={newType} onChange={event => setNewType(event.target.value)} className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-1.5 text-xs"><option value="person">Person</option><option value="place">Place</option><option value="topic">Topic</option><option value="project">Project</option></select>
-              <button type="submit" disabled={creatingEntity || !newName.trim()} className="rounded bg-[var(--color-accent)] px-2 py-1 text-xs text-white disabled:opacity-50">{creatingEntity ? 'Adding...' : 'Create'}</button>
+              <input value={newType} onChange={event => setNewType(event.target.value)} placeholder="Type" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-1.5 text-xs" />
+              <button type="submit" disabled={creatingEntity || !newName.trim() || !newType.trim()} className="rounded bg-[var(--color-accent)] px-2 py-1 text-xs text-white disabled:opacity-50">{creatingEntity ? 'Adding...' : 'Create'}</button>
             </div>
           </form>}
           {error && <p className="mb-3 text-xs text-red-400">{error}</p>}
@@ -586,7 +589,7 @@ export function EntityManager() {
           </label>
           <div className="grid grid-cols-2 gap-2">
             <select value={type} onChange={event => setType(event.target.value)} className="rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-1.5 text-xs">
-              <option value="all">All types</option><option value="person">People</option><option value="place">Places</option><option value="topic">Topics</option><option value="project">Projects</option>
+              <option value="all">All types</option>{entityTypes.map(entityType => <option key={entityType} value={entityType.toLocaleLowerCase()}>{entityType}</option>)}
             </select>
             <select value={sort} onChange={event => setSort(event.target.value as SortMode)} className="rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-1.5 text-xs">
               <option value="name">Name</option><option value="links">Most memories</option><option value="recent">Recently mentioned</option><option value="created">Recently created</option>
@@ -607,7 +610,7 @@ export function EntityManager() {
               className={`mb-1 w-full rounded-md px-3 py-2 text-left ${selectedId === entity.id ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'}`}
             >
               <div className="truncate text-sm font-medium">{entity.name}</div>
-              <div className="mt-0.5 flex gap-2 text-xs text-[var(--color-text-tertiary)]"><span className="capitalize">{entity.entity_type}</span><span>{entity.linked_memory_count} memories</span></div>
+              <div className="mt-0.5 flex gap-2 text-xs text-[var(--color-text-tertiary)]"><span>{entity.entity_type}</span><span>{entity.linked_memory_count} memories</span></div>
             </button>
           ))}
           {visible.length === 0 && <p className="p-4 text-center text-sm text-[var(--color-text-tertiary)]">No matching entities.</p>}
