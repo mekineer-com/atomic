@@ -257,7 +257,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   };
 
   const deleteEntity = async () => {
-    if (!entity || !window.confirm(`Delete ${entity.name}? It may be created again later.`)) return;
+    if (!entity || !window.confirm(`Permanently delete ${entity.name}? This cannot be undone.`)) return;
     setSaving(true);
     setError(null);
     try {
@@ -305,6 +305,11 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
 
   const mergeEntity = async () => {
     if (!duplicateId) return;
+    const duplicate = mergeCandidates.find(candidate => candidate.id === duplicateId);
+    const duplicateName = duplicate?.name ?? 'The selected entity';
+    if (!window.confirm(
+      `Permanently merge ${duplicateName} into ${entity?.name ?? 'this entity'}? ${duplicateName} will cease to exist. This cannot be undone.`,
+    )) return;
     setSaving(true);
     setError(null);
     try {

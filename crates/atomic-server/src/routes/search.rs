@@ -239,10 +239,19 @@ async fn memu_search_value(
         params.push(("memory_only", "true".to_string()));
     }
     if let Some(entity_id) = &request.exclude_entity_id {
-        params.push(("exclude_entity_id", entity_id.clone()));
+        params.push((
+            "exclude_entity_id",
+            entity_id.strip_prefix("entity:").unwrap_or(entity_id).to_string(),
+        ));
     }
     if let Some(category_id) = &request.exclude_category_id {
-        params.push(("exclude_category_id", category_id.clone()));
+        params.push((
+            "exclude_category_id",
+            category_id
+                .strip_prefix("category:")
+                .unwrap_or(category_id)
+                .to_string(),
+        ));
     }
     let body = memu_proxy::memu_json(
         client

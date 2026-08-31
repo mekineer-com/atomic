@@ -105,9 +105,12 @@ export function PendingReviewPanel() {
 
   return (
     <div className="h-full overflow-y-auto bg-[var(--color-bg-main)] p-4">
-        <div className="mb-4">
-          <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
-          <p className="text-sm text-[var(--color-text-secondary)]">Approve agent edits and pending memories.</p>
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
+            <p className="text-sm text-[var(--color-text-secondary)]">Approve agent edits and pending memories.</p>
+          </div>
+          <button type="button" disabled={loading} onClick={() => void loadReviews()} className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50">Refresh</button>
         </div>
 
         {loading && <p className="text-sm text-[var(--color-text-secondary)]">Loading...</p>}

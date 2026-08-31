@@ -3,6 +3,8 @@ import remarkGfm from 'remark-gfm';
 import type { MemoryCitation } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
 
+export const safeDossierHref = (href?: string) => href && /^(https?:|mailto:|#)/i.test(href) ? href : undefined;
+
 export function DossierMarkdown({
   children,
   citations = [],
@@ -33,7 +35,7 @@ export function DossierMarkdown({
             >
               {label}
             </button>
-          ) : <a href={href}>{label}</a>;
+          ) : safeDossierHref(href) ? <a href={href}>{label}</a> : <>{label}</>;
         },
       }}
     >
