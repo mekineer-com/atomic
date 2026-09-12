@@ -17,7 +17,7 @@ import { verifyProviderConfigured } from '../../lib/api';
 import { isTauri } from '../../lib/platform';
 import { hasServerConfig } from '../../lib/transport';
 import { getTransport } from '../../lib/transport';
-import { currentIdentity, selectSoul } from '../../lib/openalma-identity';
+import { createOpenAlmaSoul, currentIdentity, selectSoul } from '../../lib/openalma-identity';
 import { useChatStore } from '../../stores/chat';
 import { NewMemoryModal } from '../atoms/NewMemoryModal';
 import { NEW_MEMORY_EVENT, startNewAtom } from '../../lib/new-atom';
@@ -47,6 +47,28 @@ export function Layout() {
     if (identity && soulId !== identity.soulId) {
       selectSoul(identity.userId, soulId);
       window.location.reload();
+    }
+  };
+
+  const createSoul = async () => {
+    const chat = useChatStore.getState();
+    if (chat.isStreaming || chat.isEndingSession) {
+      window.alert('Wait for the current reply or recap to finish before creating a Soul.');
+      return;
+    }
+    const proposed = window.prompt('What is the new Soul\'s name?')?.trim() || '';
+    if (!proposed || !window.confirm(`Create ${proposed} as a new Soul?`)) return;
+    if (souls.includes(proposed)) {
+      window.alert(`${proposed} already exists. Select it from the list.`);
+      return;
+    }
+    try {
+      const soulId = await createOpenAlmaSoul(getTransport(), proposed);
+      if (!identity) throw new Error('OpenAlma owner is missing');
+      selectSoul(identity.userId, soulId);
+      window.location.reload();
+    } catch (error) {
+      window.alert(`Could not create Soul: ${String(error)}`);
     }
   };
 
@@ -230,6 +252,9 @@ export function Layout() {
           >
             {souls.map((soul) => <option key={soul} value={soul}>{soul}</option>)}
           </select>
+          <button type="button" onClick={() => void createSoul()} className="font-medium text-[var(--color-accent)]">
+            New Soul
+          </button>
         </label>
       )}
       <LeftPanel />

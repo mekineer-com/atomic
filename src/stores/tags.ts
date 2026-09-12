@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { getTransport } from '../lib/transport';
 import { cacheKey, readCache, writeCache } from '../lib/cache/idb';
+import { currentIdentity } from '../lib/openalma-identity';
 import { useDatabasesStore } from './databases';
 
 export interface Tag {
@@ -104,7 +105,7 @@ function findTagInTree(nodes: TagWithCount[], tagId: string): TagWithCount | nul
 async function fetchAllTagsFresh(): Promise<TagWithCount[]> {
   const tags = await getTransport().invoke<TagWithCount[]>('get_all_tags');
   const dbId = useDatabasesStore.getState().activeId;
-  if (dbId) void writeCache(cacheKey('tags', dbId), tags);
+  if (dbId && !currentIdentity()) void writeCache(cacheKey('tags', dbId), tags);
   return tags;
 }
 
@@ -125,6 +126,7 @@ export const useTagsStore = create<TagsStore>((set, get) => ({
   },
 
   hydrateFromCache: async (dbId?: string | null) => {
+    if (currentIdentity()) return;
     const resolvedDbId = dbId ?? useDatabasesStore.getState().activeId;
     if (!resolvedDbId) return;
     // Don't clobber a freshly-fetched tree.

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { toast } from 'sonner';
 import { getTransport } from '../lib/transport';
 import { cacheKey, readCache, writeCache } from '../lib/cache/idb';
+import { currentIdentity } from '../lib/openalma-identity';
 import { useDatabasesStore } from './databases';
 import { useCanvasStore } from './canvas';
 
@@ -321,7 +322,7 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
         nextCursorId: result.next_cursor_id ?? null,
         initialLoadComplete: true,
       });
-      if (isDefaultQuery) {
+      if (isDefaultQuery && !currentIdentity()) {
         const dbId = useDatabasesStore.getState().activeId;
         if (dbId) {
           void writeCache(cacheKey('atoms-default', dbId), {
@@ -338,6 +339,7 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   },
 
   hydrateFromCache: async (dbId?: string | null) => {
+    if (currentIdentity()) return;
     const resolvedDbId = dbId ?? useDatabasesStore.getState().activeId;
     if (!resolvedDbId) return;
     // Don't clobber an already-populated store — if the network fetch beat

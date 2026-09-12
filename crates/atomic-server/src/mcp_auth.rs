@@ -161,6 +161,13 @@ mod tests {
     }
 
     async fn test_state(public_url: Option<&str>) -> (web::Data<AppState>, String) {
+        test_state_with_mode(public_url, false).await
+    }
+
+    async fn test_state_with_mode(
+        public_url: Option<&str>,
+        integrated: bool,
+    ) -> (web::Data<AppState>, String) {
         let temp = tempfile::TempDir::new().unwrap();
         let manager = std::sync::Arc::new(atomic_core::DatabaseManager::new(temp.path()).unwrap());
         let (_, raw_token) = manager
@@ -176,7 +183,9 @@ mod tests {
             event_tx,
             public_url: public_url.map(String::from),
             log_buffer: crate::log_buffer::LogBuffer::new(16),
-            memu_session: None,
+            memu_session: integrated.then(|| crate::state::MemuSessionConfig {
+                base_url: "http://127.0.0.1:8099".to_string(),
+            }),
             export_jobs: crate::export_jobs::ExportJobManager::for_tests(
                 temp.path().join("exports"),
             ),
@@ -209,6 +218,38 @@ mod tests {
             .to_request();
         let resp = actix_test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn integrated_mode_rejects_authenticated_mcp_before_dispatch() {
+        let (state, raw_token) = test_state_with_mode(None, true).await;
+        let dispatched = std::rc::Rc::new(std::cell::Cell::new(false));
+        let endpoint_flag = dispatched.clone();
+        let app = actix_test::init_service(
+            App::new().service(
+                web::scope("/mcp")
+                    .wrap(McpAuth {
+                        state: state.clone(),
+                    })
+                    .route(
+                        "/ping",
+                        web::get().to(move || {
+                            endpoint_flag.set(true);
+                            protected_endpoint()
+                        }),
+                    ),
+            ),
+        )
+        .await;
+
+        let req = actix_test::TestRequest::get()
+            .uri("/mcp/ping")
+            .insert_header(("Authorization", format!("Bearer {raw_token}")))
+            .to_request();
+        let resp = actix_test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), 409);
+        assert!(!dispatched.get());
     }
 
     #[actix_web::test]

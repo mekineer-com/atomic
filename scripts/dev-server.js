@@ -126,6 +126,12 @@ function startProcess(name, command, args, opts = {}) {
     }
   });
 
+  proc.on('error', (error) => {
+    console.error(`\x1b[31m[${prefix}] failed to start:\x1b[0m ${error.message}`);
+    process.exitCode = 1;
+    cleanup();
+  });
+
   children.push(proc);
   return proc;
 }

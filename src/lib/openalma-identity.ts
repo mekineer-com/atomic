@@ -15,6 +15,16 @@ export function selectSoul(userId: string, soulId: string): void {
   localStorage.setItem(SOUL_KEY, soulId);
 }
 
+export async function createOpenAlmaSoul(transport: Transport, soulId: string): Promise<string> {
+  const created = await transport.invoke<{ soul_id: string }>('create_openalma_soul', {
+    soul_id: soulId,
+    use_existing: false,
+  });
+  const { souls } = await transport.invoke<{ souls: string[] }>('get_openalma_souls');
+  if (!souls.includes(created.soul_id)) throw new Error('Created Soul was not returned by the server');
+  return created.soul_id;
+}
+
 export async function ensureOpenAlmaIdentity(transport: Transport): Promise<{ userId: string; souls: string[] } | null> {
   const status = await transport.invoke<{ enabled: boolean }>('get_memu_review_status');
   if (!status.enabled) return null;
