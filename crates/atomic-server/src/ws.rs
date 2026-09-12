@@ -3,6 +3,7 @@
 use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
 use actix_web::{web, HttpRequest, HttpResponse};
+use std::collections::HashMap;
 use tokio::sync::broadcast;
 
 /// WebSocket upgrade handler
@@ -14,23 +15,26 @@ pub async fn ws_handler(
     query: web::Query<WsQuery>,
 ) -> Result<HttpResponse, actix_web::Error> {
     // Authenticate via query param
-    let core = state
-        .manager
-        .active_core()
-        .await
-        .map_err(|_| actix_web::error::ErrorInternalServerError("Failed to get database"))?;
+    let fixed_database = query.db.clone();
+    let core = match fixed_database.as_deref() {
+        Some(id) => state.manager.get_core(id).await,
+        None => state.manager.active_core().await,
+    }
+    .map_err(|_| actix_web::error::ErrorBadRequest("Database not found"))?;
     match core.verify_api_token(&query.token).await {
         Ok(Some(_)) => {}
         _ => return Ok(HttpResponse::Unauthorized().finish()),
     }
     let scope = if state.memu_session.is_some() {
-        match memu_proxy::validate_scope(
-            &state,
-            query.user_id.clone().unwrap_or_default(),
-            query.soul_id.clone().unwrap_or_default(),
-        )
-        .await
-        {
+        let Some(user_id) = query.user_id.clone().filter(|value| !value.is_empty()) else {
+            return Ok(HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "user_id is required"})));
+        };
+        let Some(soul_id) = query.soul_id.clone().filter(|value| !value.is_empty()) else {
+            return Ok(HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "soul_id is required"})));
+        };
+        match memu_proxy::validate_scope(&state, user_id, soul_id).await {
             Ok(scope) => Some(scope),
             Err(response) => return Ok(response),
         }
@@ -42,25 +46,43 @@ pub async fn ws_handler(
 
     // Subscribe to broadcast channel
     let mut rx = state.event_tx.subscribe();
+    let manager = state.manager.clone();
 
     // Spawn task to forward broadcast events to this WebSocket client
     actix_web::rt::spawn(async move {
+        let mut ownership = HashMap::<(String, String), bool>::new();
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    if let (Some(conversation_id), Some(scope)) =
-                        (event.conversation_id(), scope.as_ref())
-                    {
-                        let owned = core
-                            .get_conversation(conversation_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .is_some_and(|conv| {
-                                conv.conversation.user_id.as_deref() == Some(scope.user_id.as_str())
-                                    && conv.conversation.soul_id.as_deref()
-                                        == Some(scope.soul_id.as_str())
-                            });
+                    if let Some(scope) = scope.as_ref() {
+                        let Some((conversation_id, database_id)) =
+                            event.conversation_id().zip(event.database_id())
+                        else {
+                            continue;
+                        };
+                        let selected_database =
+                            fixed_database.clone().or_else(|| manager.active_id().ok());
+                        if selected_database.as_deref() != Some(database_id) {
+                            continue;
+                        }
+                        let key = (database_id.to_string(), conversation_id.to_string());
+                        let owned = if let Some(owned) = ownership.get(&key) {
+                            *owned
+                        } else {
+                            let Ok(core) = manager.get_core(database_id).await else {
+                                continue;
+                            };
+                            let Ok(Some(conv)) = core.get_conversation(conversation_id).await
+                            else {
+                                continue;
+                            };
+                            let owned = conv.conversation.user_id.as_deref()
+                                == Some(scope.user_id.as_str())
+                                && conv.conversation.soul_id.as_deref()
+                                    == Some(scope.soul_id.as_str());
+                            ownership.insert(key, owned);
+                            owned
+                        };
                         if !owned {
                             continue;
                         }
@@ -92,6 +114,7 @@ pub async fn ws_handler(
 #[derive(serde::Deserialize)]
 pub struct WsQuery {
     pub token: String,
+    pub db: Option<String>,
     pub user_id: Option<String>,
     pub soul_id: Option<String>,
 }

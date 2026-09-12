@@ -8,7 +8,7 @@ use actix_web::{web, FromRequest, HttpRequest};
 use atomic_core::AtomicCore;
 
 /// Extractor that resolves the correct AtomicCore for the current request.
-pub struct Db(pub AtomicCore);
+pub struct Db(pub AtomicCore, pub String);
 
 impl FromRequest for Db {
     type Error = actix_web::Error;
@@ -20,9 +20,13 @@ impl FromRequest for Db {
             let state = req.app_data::<web::Data<AppState>>().ok_or_else(|| {
                 actix_web::error::ErrorInternalServerError("AppState not configured")
             })?;
-            state.resolve_core(&req).await.map(Db).map_err(|e| {
-                actix_web::error::ErrorBadRequest(format!("Database not found: {}", e))
-            })
+            state
+                .resolve_core_with_id(&req)
+                .await
+                .map(|(core, id)| Db(core, id))
+                .map_err(|e| {
+                    actix_web::error::ErrorBadRequest(format!("Database not found: {}", e))
+                })
         })
     }
 }

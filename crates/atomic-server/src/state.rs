@@ -110,13 +110,20 @@ impl AppState {
         &self,
         req: &actix_web::HttpRequest,
     ) -> Result<AtomicCore, atomic_core::AtomicCoreError> {
+        self.resolve_core_with_id(req).await.map(|(core, _)| core)
+    }
+
+    pub async fn resolve_core_with_id(
+        &self,
+        req: &actix_web::HttpRequest,
+    ) -> Result<(AtomicCore, String), atomic_core::AtomicCoreError> {
         // Check X-Atomic-Database header
         if let Some(db_id) = req
             .headers()
             .get("X-Atomic-Database")
             .and_then(|v| v.to_str().ok())
         {
-            return self.manager.get_core(db_id).await;
+            return Ok((self.manager.get_core(db_id).await?, db_id.to_string()));
         }
 
         // Check ?db= query parameter
@@ -128,11 +135,12 @@ impl AppState {
                 None
             }
         }) {
-            return self.manager.get_core(db_id).await;
+            return Ok((self.manager.get_core(db_id).await?, db_id.to_string()));
         }
 
         // Default to active database
-        self.manager.active_core().await
+        let db_id = self.manager.active_id()?;
+        Ok((self.manager.get_core(&db_id).await?, db_id))
     }
 }
 
@@ -257,30 +265,36 @@ pub enum ServerEvent {
 
     // Chat streaming events
     ChatStreamDelta {
+        database_id: String,
         conversation_id: String,
         content: String,
     },
     ChatToolStart {
+        database_id: String,
         conversation_id: String,
         tool_call_id: String,
         tool_name: String,
         tool_input: serde_json::Value,
     },
     ChatToolComplete {
+        database_id: String,
         conversation_id: String,
         tool_call_id: String,
         results_count: i32,
     },
     ChatComplete {
+        database_id: String,
         conversation_id: String,
         message: atomic_core::ChatMessageWithContext,
     },
     ChatCanvasAction {
+        database_id: String,
         conversation_id: String,
         action: String,
         params: serde_json::Value,
     },
     ChatError {
+        database_id: String,
         conversation_id: String,
         error: String,
     },
@@ -308,6 +322,82 @@ impl ServerEvent {
                 conversation_id, ..
             } => Some(conversation_id),
             _ => None,
+        }
+    }
+
+    pub fn database_id(&self) -> Option<&str> {
+        match self {
+            Self::ChatStreamDelta { database_id, .. }
+            | Self::ChatToolStart { database_id, .. }
+            | Self::ChatToolComplete { database_id, .. }
+            | Self::ChatComplete { database_id, .. }
+            | Self::ChatCanvasAction { database_id, .. }
+            | Self::ChatError { database_id, .. } => Some(database_id),
+            _ => None,
+        }
+    }
+
+    pub fn from_chat(event: atomic_core::ChatEvent, database_id: String) -> Self {
+        match event {
+            atomic_core::ChatEvent::StreamDelta {
+                conversation_id,
+                content,
+            } => Self::ChatStreamDelta {
+                database_id,
+                conversation_id,
+                content,
+            },
+            atomic_core::ChatEvent::ToolStart {
+                conversation_id,
+                tool_call_id,
+                tool_name,
+                tool_input,
+            } => Self::ChatToolStart {
+                database_id,
+                conversation_id,
+                tool_call_id,
+                tool_name,
+                tool_input,
+            },
+            atomic_core::ChatEvent::ToolComplete {
+                conversation_id,
+                tool_call_id,
+                results_count,
+            } => Self::ChatToolComplete {
+                database_id,
+                conversation_id,
+                tool_call_id,
+                results_count,
+            },
+            atomic_core::ChatEvent::Complete {
+                conversation_id,
+                message,
+            } => Self::ChatComplete {
+                database_id,
+                conversation_id,
+                message,
+            },
+            atomic_core::ChatEvent::CanvasAction {
+                conversation_id,
+                action,
+                params,
+            } => Self::ChatCanvasAction {
+                database_id,
+                conversation_id,
+                action,
+                params,
+            },
+            atomic_core::ChatEvent::AtomCreated { atom, .. } => Self::AtomCreated { atom },
+            atomic_core::ChatEvent::AtomUpdated { atom, .. } => Self::AtomUpdated { atom },
+            atomic_core::ChatEvent::AtomPipelineEvent { event, .. } => Self::from(event),
+            atomic_core::ChatEvent::Error {
+                conversation_id,
+                error,
+            } => Self::ChatError {
+                database_id,
+                conversation_id,
+                error,
+            },
         }
     }
 }
@@ -458,75 +548,6 @@ impl From<atomic_core::IngestionEvent> for ServerEvent {
     }
 }
 
-impl From<atomic_core::ChatEvent> for ServerEvent {
-    fn from(event: atomic_core::ChatEvent) -> Self {
-        match event {
-            atomic_core::ChatEvent::StreamDelta {
-                conversation_id,
-                content,
-            } => ServerEvent::ChatStreamDelta {
-                conversation_id,
-                content,
-            },
-            atomic_core::ChatEvent::ToolStart {
-                conversation_id,
-                tool_call_id,
-                tool_name,
-                tool_input,
-            } => ServerEvent::ChatToolStart {
-                conversation_id,
-                tool_call_id,
-                tool_name,
-                tool_input,
-            },
-            atomic_core::ChatEvent::ToolComplete {
-                conversation_id,
-                tool_call_id,
-                results_count,
-            } => ServerEvent::ChatToolComplete {
-                conversation_id,
-                tool_call_id,
-                results_count,
-            },
-            atomic_core::ChatEvent::Complete {
-                conversation_id,
-                message,
-            } => ServerEvent::ChatComplete {
-                conversation_id,
-                message,
-            },
-            atomic_core::ChatEvent::CanvasAction {
-                conversation_id,
-                action,
-                params,
-            } => ServerEvent::ChatCanvasAction {
-                conversation_id,
-                action,
-                params,
-            },
-            atomic_core::ChatEvent::AtomCreated {
-                conversation_id: _,
-                atom,
-            } => ServerEvent::AtomCreated { atom },
-            atomic_core::ChatEvent::AtomUpdated {
-                conversation_id: _,
-                atom,
-            } => ServerEvent::AtomUpdated { atom },
-            atomic_core::ChatEvent::AtomPipelineEvent {
-                conversation_id: _,
-                event,
-            } => ServerEvent::from(event),
-            atomic_core::ChatEvent::Error {
-                conversation_id,
-                error,
-            } => ServerEvent::ChatError {
-                conversation_id,
-                error,
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,13 +617,15 @@ mod tests {
             conversation_id: "c1".into(),
             content: "hello".into(),
         };
-        match ServerEvent::from(event) {
+        match ServerEvent::from_chat(event, "default".into()) {
             ServerEvent::ChatStreamDelta {
                 conversation_id,
                 content,
+                database_id,
             } => {
                 assert_eq!(conversation_id, "c1");
                 assert_eq!(content, "hello");
+                assert_eq!(database_id, "default");
             }
             _ => panic!("Wrong variant"),
         }
@@ -616,7 +639,7 @@ mod tests {
             tool_name: "search".into(),
             tool_input: serde_json::json!({"query": "test"}),
         };
-        match ServerEvent::from(event) {
+        match ServerEvent::from_chat(event, "default".into()) {
             ServerEvent::ChatToolStart {
                 conversation_id,
                 tool_name,
@@ -637,10 +660,11 @@ mod tests {
             conversation_id: "c3".into(),
             error: "api failed".into(),
         };
-        match ServerEvent::from(event) {
+        match ServerEvent::from_chat(event, "default".into()) {
             ServerEvent::ChatError {
                 conversation_id,
                 error,
+                ..
             } => {
                 assert_eq!(conversation_id, "c3");
                 assert_eq!(error, "api failed");

@@ -7,11 +7,17 @@ use crate::routes::memu_proxy::{self, memu_error_text, MemuScope};
 use crate::state::AppState;
 use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use utoipa::{IntoParams, ToSchema};
 
-// ponytail: one personal-server lock; key by conversation if parallel chats matter.
-static CONVERSATION_WORK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+type ConversationKey = (String, String);
+static CONVERSATION_WORK: LazyLock<
+    tokio::sync::Mutex<HashMap<ConversationKey, Arc<tokio::sync::Mutex<()>>>>,
+> = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateConversationBody {
@@ -178,6 +184,28 @@ async fn require_conversation_owner(
         }
         Err(error) => Err(crate::error::error_response(error)),
     }
+}
+
+async fn lock_conversation(
+    db: &Db,
+    id: &str,
+    scope: Option<&MemuScope>,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, HttpResponse> {
+    require_conversation_owner(db, id, scope).await?;
+    let key = (db.1.clone(), id.to_string());
+    let lock = {
+        let mut locks = CONVERSATION_WORK.lock().await;
+        // ponytail: prune idle locks on demand; use an eviction cache if this map becomes hot.
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        Arc::clone(
+            locks
+                .entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    let guard = lock.lock_owned().await;
+    require_conversation_owner(db, id, scope).await?;
+    Ok(guard)
 }
 
 fn transcript_rows(conv: &atomic_core::ConversationWithMessages) -> Vec<AtomicTranscriptRow> {
@@ -473,9 +501,10 @@ pub async fn update_conversation(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
-        return response;
-    }
+    let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
     let req = body.into_inner();
     ok_or_error(
         db.0.update_conversation(&id, req.title.as_deref(), req.is_archived)
@@ -495,9 +524,10 @@ pub async fn delete_conversation(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
-        return response;
-    }
+    let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
     ok_or_error(db.0.delete_conversation(&id).await)
 }
 
@@ -521,9 +551,10 @@ pub async fn set_conversation_scope(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
-        return response;
-    }
+    let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
     let tag_ids = body.into_inner().tag_ids;
     ok_or_error(db.0.set_conversation_scope(&id, &tag_ids).await)
 }
@@ -547,9 +578,10 @@ pub async fn add_tag_to_scope(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
-        return response;
-    }
+    let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
     let tag_id = body.into_inner().tag_id;
     ok_or_error(db.0.add_tag_to_scope(&id, &tag_id).await)
 }
@@ -566,9 +598,10 @@ pub async fn remove_tag_from_scope(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
-        return response;
-    }
+    let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
     ok_or_error(db.0.remove_tag_from_scope(&id, &tag_id).await)
 }
 
@@ -598,13 +631,11 @@ pub async fn send_chat_message(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) =
-        require_conversation_owner(&db, &conversation_id, memu_session.as_ref()).await
-    {
-        return response;
-    }
-    let _work = CONVERSATION_WORK.lock().await;
-    let on_event = chat_event_callback(state.event_tx.clone());
+    let _work = match lock_conversation(&db, &conversation_id, memu_session.as_ref()).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
+    let on_event = chat_event_callback(state.event_tx.clone(), db.1.clone());
     let result = if let Some(memu_session) = memu_session {
         let settings = match fetch_atomic_chat_profile(&memu_session).await {
             Ok(settings) => settings,
@@ -661,12 +692,10 @@ pub async fn end_memu_session(
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"error": "conversation_id is required"}));
     }
-    if let Err(response) =
-        require_conversation_owner(&db, conversation_id, Some(&memu_session)).await
-    {
-        return response;
-    }
-    let _work = CONVERSATION_WORK.lock().await;
+    let _work = match lock_conversation(&db, conversation_id, Some(&memu_session)).await {
+        Ok(guard) => guard,
+        Err(response) => return response,
+    };
 
     let mut conv = match db.0.get_conversation(conversation_id).await {
         Ok(Some(conv)) => conv,
@@ -686,7 +715,7 @@ pub async fn end_memu_session(
             Ok(settings) => settings,
             Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
         };
-        let on_event = chat_event_callback(state.event_tx.clone());
+        let on_event = chat_event_callback(state.event_tx.clone(), db.1.clone());
         let recap_prompt = atomic_recap_prompt(&memu_session.user_id, &transcript_before_recap);
         if let Err(e) =
             db.0.send_chat_message_with_external_settings(
