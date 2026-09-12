@@ -1,11 +1,11 @@
 //! Chat / Conversation routes
 
 use crate::db_extractor::Db;
-use crate::error::{ok_or_error, ApiErrorResponse};
+use crate::error::{ApiErrorResponse, ok_or_error};
 use crate::event_bridge::chat_event_callback;
-use crate::routes::memu_proxy::{self, memu_error_text, MemuScope};
+use crate::routes::memu_proxy::{self, MemuScope, memu_error_text};
 use crate::state::AppState;
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -67,7 +67,9 @@ pub struct EndMemuSessionBody {
 }
 
 fn atomic_recap_instruction(user_id: &str) -> String {
-    format!("This Atomic session is ending. Write a recap of your activity with {user_id}: what you looked at, what you changed (edits you made and why), ideas rejected or deferred, and follow-ups you want to remember. Write it as yourself, for yourself.")
+    format!(
+        "This Atomic session is ending. Write a recap of your activity with {user_id}: what you looked at, what you changed (edits you made and why), ideas rejected or deferred, and follow-ups you want to remember. Write it as yourself, for yourself."
+    )
 }
 
 fn atomic_recap_prompt(user_id: &str, rows: &[AtomicTranscriptRow]) -> String {
@@ -704,7 +706,7 @@ pub async fn end_memu_session(
         Ok(Some(conv)) => conv,
         Ok(None) => {
             return HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "Conversation not found"}))
+                .json(serde_json::json!({"error": "Conversation not found"}));
         }
         Err(e) => return crate::error::error_response(e),
     };
@@ -723,6 +725,11 @@ pub async fn end_memu_session(
             db.1.clone(),
             Some((memu_session.user_id.clone(), memu_session.soul_id.clone())),
         );
+        let memu_tools = atomic_core::MemuToolConfig {
+            base_url: memu_session.base_url.clone(),
+            user_id: memu_session.user_id.clone(),
+            soul_id: memu_session.soul_id.clone(),
+        };
         let recap_prompt = atomic_recap_prompt(&memu_session.user_id, &transcript_before_recap);
         if let Err(e) =
             db.0.send_chat_message_with_external_settings(
@@ -730,7 +737,7 @@ pub async fn end_memu_session(
                 &recap_prompt,
                 on_event,
                 settings,
-                None,
+                Some(memu_tools),
                 None,
                 None,
             )
@@ -742,7 +749,7 @@ pub async fn end_memu_session(
             Ok(Some(conv)) => conv,
             Ok(None) => {
                 return HttpResponse::NotFound()
-                    .json(serde_json::json!({"error": "Conversation not found"}))
+                    .json(serde_json::json!({"error": "Conversation not found"}));
             }
             Err(e) => return crate::error::error_response(e),
         };

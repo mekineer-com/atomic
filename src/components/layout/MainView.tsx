@@ -38,6 +38,7 @@ import { isTauri } from '../../lib/platform';
 import { getTransport } from '../../lib/transport';
 import { useIsMobile } from '../../hooks';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
+import { startNewAtom } from '../../lib/new-atom';
 
 export function MainView() {
   const atoms = useAtomsStore(s => s.atoms);
@@ -193,17 +194,13 @@ export function MainView() {
     openReader(atomId, highlightText, opts);
   }, [openReader, matchingChunkMap]);
 
-  const createAtom = useAtomsStore(s => s.createAtom);
-  const openReaderEditing = useUIStore(s => s.openReaderEditing);
-
   const handleNewAtom = useCallback(async () => {
     try {
-      const newAtom = await createAtom('');
-      openReaderEditing(newAtom.id);
+      await startNewAtom();
     } catch (error) {
       console.error('Failed to create atom:', error);
     }
-  }, [createAtom, openReaderEditing]);
+  }, []);
 
   const handleRetryEmbedding = useCallback(async (atomId: string) => {
     try {

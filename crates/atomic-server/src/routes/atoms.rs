@@ -1,11 +1,11 @@
 //! Atom and Tag CRUD routes
 
 use crate::db_extractor::Db;
-use crate::error::{ok_or_error, ApiErrorResponse};
+use crate::error::{ApiErrorResponse, ok_or_error};
 use crate::event_bridge::embedding_event_callback;
 use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
-use actix_web::{web, HttpRequest, HttpResponse};
+use actix_web::{HttpRequest, HttpResponse, web};
 use atomic_core::{
     AtomLink, AtomWithTags, BulkCreateResult, PaginatedAtoms, PaginatedTagChildren, SourceInfo,
     Tag, TagWithCount,
@@ -421,12 +421,43 @@ pub struct CreateAtomRequest {
     tag = "atoms",
 )]
 pub async fn create_atom(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     body: web::Json<CreateAtomRequest>,
 ) -> HttpResponse {
     if state.memu_session.is_some() {
-        return memu_proxy::readonly();
+        let req = body.into_inner();
+        if req.content.trim().is_empty() {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": "Memory content is required"}));
+        }
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(config) => config,
+            Err(response) => return response,
+        };
+        let client = match memu_proxy::client() {
+            Ok(client) => client,
+            Err(response) => return response,
+        };
+        let url =
+            match memu_proxy::memu_url(&config.base_url, &["integration", "atomic", "memories"]) {
+                Ok(url) => url,
+                Err(response) => return response,
+            };
+        return match memu_proxy::memu_json(
+            client.post(url).json(&serde_json::json!({
+                "text": req.content,
+                "user_id": config.user_id,
+                "soul_id": config.soul_id,
+            })),
+            "memU memory creation",
+        )
+        .await
+        {
+            Ok(node) => HttpResponse::Created().json(memu_proxy::atom_from_node(&node)),
+            Err(response) => response,
+        };
     }
     let req = body.into_inner();
     let on_event = embedding_event_callback(state.event_tx.clone());

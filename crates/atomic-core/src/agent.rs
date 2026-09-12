@@ -22,7 +22,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -1317,6 +1317,7 @@ async fn run_agent_loop(
     if canvas_context.is_some() {
         tools.extend(get_canvas_tools());
     }
+    let allowed_tool_names: HashSet<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
     let on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static> = {
         let on_event = Arc::clone(&on_event);
         let conversation_id = ctx.conversation_id.clone();
@@ -1422,6 +1423,9 @@ async fn run_agent_loop(
 
                 // Execute tool
                 let (tool_result, results_count) = match tool_name {
+                    _ if !allowed_tool_names.contains(tool_name) => {
+                        (format!("Tool unavailable in this session: {tool_name}"), 0)
+                    }
                     "search_atoms" => {
                         let query = tool_args["query"].as_str().unwrap_or("");
                         let limit = tool_args["limit"].as_i64().unwrap_or(5) as i32;

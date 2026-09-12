@@ -1,12 +1,12 @@
 //! Bearer token authentication middleware — verifies tokens against the database
 
 use crate::state::AppState;
+use actix_web::Error;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use actix_web::error::{ErrorConflict, ErrorUnauthorized};
 use actix_web::http::Method;
 use actix_web::web;
-use actix_web::Error;
-use futures::future::{ok, LocalBoxFuture, Ready};
+use futures::future::{LocalBoxFuture, Ready, ok};
 use std::task::{Context, Poll};
 
 /// Middleware that requires a valid Bearer token (looked up in the api_tokens table)
@@ -51,7 +51,7 @@ fn integrated_api_allowed(method: &Method, path: &str) -> bool {
     if (path == "/api/search" || path == "/api/search/global") && post {
         return true;
     }
-    if path == "/api/atoms" && get {
+    if path == "/api/atoms" && (get || post) {
         return true;
     }
     if path.starts_with("/api/atoms/")
@@ -159,7 +159,7 @@ where
 mod tests {
     use super::*;
     use actix_web::test as actix_test;
-    use actix_web::{web, App, HttpResponse};
+    use actix_web::{App, HttpResponse, web};
     use tokio::sync::broadcast;
 
     async fn protected_endpoint() -> HttpResponse {
@@ -177,6 +177,7 @@ mod tests {
             &Method::GET,
             "/api/atoms/memory:example"
         ));
+        assert!(integrated_api_allowed(&Method::POST, "/api/atoms"));
         assert!(integrated_api_allowed(&Method::GET, "/api/settings/models"));
         assert!(integrated_api_allowed(
             &Method::PUT,

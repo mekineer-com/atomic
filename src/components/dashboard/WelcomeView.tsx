@@ -1,6 +1,5 @@
 import { Plus } from 'lucide-react';
-import { useAtomsStore } from '../../stores/atoms';
-import { useUIStore } from '../../stores/ui';
+import { startNewAtom } from '../../lib/new-atom';
 import { isDesktopApp } from '../../lib/transport';
 import { CaptureOptions } from './CaptureOptions';
 
@@ -27,13 +26,9 @@ function Kbd({ children }: { children: React.ReactNode }) {
 }
 
 export function WelcomeView() {
-  const createAtom = useAtomsStore(s => s.createAtom);
-  const openReaderEditing = useUIStore(s => s.openReaderEditing);
-
   const handleCreate = async () => {
     try {
-      const atom = await createAtom('');
-      openReaderEditing(atom.id);
+      await startNewAtom();
     } catch (err) {
       console.error('Failed to create atom:', err);
     }

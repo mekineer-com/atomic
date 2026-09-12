@@ -43,6 +43,11 @@ You can create atoms in several ways:
 - **RSS/Atom feeds** - Subscribe to feeds and let Atomic create atoms for new entries.
 - **MCP** - Let an MCP client create or update memory using Atomic tools.
 
+In standalone mode, **New** creates a local atom and opens the editor. In
+OpenAlma integrated mode, **New** asks for non-empty memory text and stores that
+exact text as an approved memory in memU for the currently selected owner and
+Soul; it does not create a local Atomic atom.
+
 ## Markdown Links
 
 Atoms can contain wiki-style links using `[[...]]`. Atomic stores discovered links separately so the editor and graph views can resolve relationships between atoms while preserving unresolved targets for future editing.

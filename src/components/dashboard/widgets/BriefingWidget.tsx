@@ -5,6 +5,7 @@ import { CitationPopover } from '../../wiki/CitationPopover';
 import { BriefingContent } from './BriefingContent';
 import { CaptureOptions } from '../CaptureOptions';
 import { useIsMobile } from '../../../hooks';
+import { startNewAtom } from '../../../lib/new-atom';
 import { useAtomsStore } from '../../../stores/atoms';
 import { useWikiStore } from '../../../stores/wiki';
 import { useUIStore } from '../../../stores/ui';
@@ -47,18 +48,15 @@ function formatToday(date: Date): string {
  */
 export function BriefingWidget() {
   const atoms = useAtomsStore(s => s.atoms);
-  const createAtom = useAtomsStore(s => s.createAtom);
   const suggestedArticles = useWikiStore(s => s.suggestedArticles);
   const articles = useWikiStore(s => s.articles);
   const openReader = useUIStore(s => s.openReader);
-  const openReaderEditing = useUIStore(s => s.openReaderEditing);
   const setViewMode = useUIStore(s => s.setViewMode);
   const isMobile = useIsMobile();
 
   const handleCreateAtom = async () => {
     try {
-      const atom = await createAtom('');
-      openReaderEditing(atom.id);
+      await startNewAtom();
     } catch (err) {
       console.error('Failed to create atom:', err);
     }

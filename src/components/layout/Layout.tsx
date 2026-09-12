@@ -19,6 +19,8 @@ import { hasServerConfig } from '../../lib/transport';
 import { getTransport } from '../../lib/transport';
 import { currentIdentity, selectSoul } from '../../lib/openalma-identity';
 import { useChatStore } from '../../stores/chat';
+import { NewMemoryModal } from '../atoms/NewMemoryModal';
+import { NEW_MEMORY_EVENT, startNewAtom } from '../../lib/new-atom';
 
 
 export function Layout() {
@@ -28,6 +30,7 @@ export function Layout() {
   const fetchTags = useTagsStore(s => s.fetchTags);
   const [isSetupRequired, setIsSetupRequired] = useState<boolean | null>(null); // null = checking
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [newMemoryOpen, setNewMemoryOpen] = useState(false);
   const [souls, setSouls] = useState<string[]>([]);
   const identity = currentIdentity();
 
@@ -100,10 +103,7 @@ export function Layout() {
       // Cmd+N or Ctrl+N to create new atom (only when palettes are closed)
       if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !commandPaletteOpen && !searchPaletteOpen) {
         e.preventDefault();
-        const { createAtom } = useAtomsStore.getState();
-        createAtom('').then((newAtom) => {
-          useUIStore.getState().openReaderEditing(newAtom.id);
-        }).catch(console.error);
+        void startNewAtom().catch(console.error);
         return;
       }
     };
@@ -111,6 +111,12 @@ export function Layout() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [toggleCommandPalette, toggleSearchPalette, openSearchPalette, commandPaletteOpen, searchPaletteOpen]);
+
+  useEffect(() => {
+    const open = () => setNewMemoryOpen(true);
+    window.addEventListener(NEW_MEMORY_EVENT, open);
+    return () => window.removeEventListener(NEW_MEMORY_EVENT, open);
+  }, []);
 
   // Listen for custom settings event from command palette
   useEffect(() => {
@@ -243,6 +249,7 @@ export function Layout() {
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
       />
+      <NewMemoryModal isOpen={newMemoryOpen} onClose={() => setNewMemoryOpen(false)} />
     </div>
   );
 }

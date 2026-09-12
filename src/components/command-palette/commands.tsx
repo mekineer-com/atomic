@@ -3,6 +3,7 @@ import { getTransport } from '../../lib/transport';
 import { Command, CommandCategory } from './types';
 import { useAtomsStore } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
+import { startNewAtom } from '../../lib/new-atom';
 import { useTagsStore } from '../../stores/tags';
 
 // Icon components as simple wrappers
@@ -98,9 +99,7 @@ export const commands: Command[] = [
     shortcut: '⌘N',
     icon: PlusIcon,
     action: async () => {
-      const { createAtom } = useAtomsStore.getState();
-      const newAtom = await createAtom('');
-      useUIStore.getState().openReaderEditing(newAtom.id);
+      await startNewAtom();
     },
   },
   {

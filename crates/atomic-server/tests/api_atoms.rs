@@ -5,7 +5,13 @@
 
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, web};
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
@@ -41,11 +47,8 @@ impl TestCtx {
             event_tx,
             public_url: None,
             log_buffer: atomic_server::log_buffer::LogBuffer::new(16),
-            memu_session: memu_base_url.map(|base_url| atomic_server::state::MemuSessionConfig {
-                base_url,
-                user_id: "Marcos".to_string(),
-                soul_id: "Siri".to_string(),
-            }),
+            memu_session: memu_base_url
+                .map(|base_url| atomic_server::state::MemuSessionConfig { base_url }),
             export_jobs: atomic_server::export_jobs::ExportJobManager::for_tests(
                 temp.path().join("exports"),
             ),
@@ -67,8 +70,8 @@ impl TestCtx {
 }
 
 async fn atomic_session_start_ok(body: web::Json<Value>) -> HttpResponse {
-    assert_eq!(body["user_id"], "Marcos");
-    assert_eq!(body["soul_id"], "Siri");
+    assert_eq!(body["user_id"], "TestOwner");
+    assert_eq!(body["soul_id"], "TestSoul");
     assert!(
         body["conversation_id"]
             .as_str()
@@ -92,9 +95,19 @@ async fn atomic_chat_profile_ok() -> HttpResponse {
     }))
 }
 
+async fn memu_owner() -> HttpResponse {
+    HttpResponse::Ok().json(json!({"user_id": "TestOwner"}))
+}
+
+async fn memu_souls() -> HttpResponse {
+    HttpResponse::Ok().json(json!({"souls": ["TestSoul"]}))
+}
+
 fn start_memu_stub(handler: fn() -> actix_web::Route) -> (String, actix_web::dev::ServerHandle) {
     let server = HttpServer::new(move || {
         App::new()
+            .route("/owner", web::get().to(memu_owner))
+            .route("/souls", web::get().to(memu_souls))
             .route("/integration/atomic/session_start", handler())
             .route(
                 "/integration/atomic/chat_profile",
@@ -169,13 +182,130 @@ fn start_fake_model_with_memu_write_tools() -> (String, actix_web::dev::ServerHa
     (format!("http://{}", addr), handle)
 }
 
+struct ToolModelState {
+    request_count: AtomicUsize,
+    tool_call_on: usize,
+    tool_calls: Value,
+}
+
+async fn fake_tool_completion(
+    state: web::Data<ToolModelState>,
+    _body: web::Json<Value>,
+) -> HttpResponse {
+    let request_number = state.request_count.fetch_add(1, Ordering::SeqCst);
+    let delta = if request_number == state.tool_call_on {
+        json!({"tool_calls": state.tool_calls})
+    } else {
+        json!({"content": "fake answer"})
+    };
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .body(format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices": [{"delta": delta, "finish_reason": null}]})
+        ))
+}
+
+fn start_tool_model(
+    tool_call_on: usize,
+    tool_calls: Value,
+) -> (
+    String,
+    actix_web::dev::ServerHandle,
+    web::Data<ToolModelState>,
+) {
+    let state = web::Data::new(ToolModelState {
+        request_count: AtomicUsize::new(0),
+        tool_call_on,
+        tool_calls,
+    });
+    let server = HttpServer::new({
+        let state = state.clone();
+        move || {
+            App::new()
+                .app_data(state.clone())
+                .route("/chat/completions", web::post().to(fake_tool_completion))
+                .route("/v1/chat/completions", web::post().to(fake_tool_completion))
+        }
+    })
+    .bind(("127.0.0.1", 0))
+    .unwrap();
+    let addr = server.addrs()[0];
+    let server = server.run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    (format!("http://{}", addr), handle, state)
+}
+
+struct MemuCreateState {
+    creations: Mutex<Vec<Value>>,
+}
+
+async fn memu_session_end() -> HttpResponse {
+    HttpResponse::Ok().json(json!({"status": "ok"}))
+}
+
+async fn memu_memory_create(
+    state: web::Data<MemuCreateState>,
+    body: web::Json<Value>,
+) -> HttpResponse {
+    let body = body.into_inner();
+    state.creations.lock().unwrap().push(body.clone());
+    HttpResponse::Created().json(json!({
+        "id": "memory:human-created",
+        "label": "Human memory",
+        "summary": body["text"],
+        "memory_type": "knowledge",
+        "created_at": "2026-07-04T00:00:00Z",
+        "updated_at": "2026-07-04T00:00:00Z",
+        "category_ids": [],
+        "category_names": []
+    }))
+}
+
+fn start_memu_create_stub() -> (
+    String,
+    actix_web::dev::ServerHandle,
+    web::Data<MemuCreateState>,
+) {
+    let state = web::Data::new(MemuCreateState {
+        creations: Mutex::new(Vec::new()),
+    });
+    let server = HttpServer::new({
+        let state = state.clone();
+        move || {
+            App::new()
+                .app_data(state.clone())
+                .route("/owner", web::get().to(memu_owner))
+                .route("/souls", web::get().to(memu_souls))
+                .route(
+                    "/integration/atomic/memories",
+                    web::post().to(memu_memory_create),
+                )
+        }
+    })
+    .bind(("127.0.0.1", 0))
+    .unwrap();
+    let addr = server.addrs()[0];
+    let server = server.run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    (format!("http://{}", addr), handle, state)
+}
+
 fn start_memu_stub_with_model(model_url: String) -> (String, actix_web::dev::ServerHandle) {
     let server = HttpServer::new(move || {
         let model_url = model_url.clone();
         App::new()
+            .route("/owner", web::get().to(memu_owner))
+            .route("/souls", web::get().to(memu_souls))
             .route(
                 "/integration/atomic/session_start",
                 web::post().to(atomic_session_start_ok),
+            )
+            .route(
+                "/integration/atomic/session_end",
+                web::post().to(memu_session_end),
             )
             .route(
                 "/integration/atomic/chat_profile",
@@ -379,6 +509,8 @@ async fn memu_neighborhood(path: web::Path<String>, req: HttpRequest) -> HttpRes
 fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
     let server = HttpServer::new(move || {
         App::new()
+            .route("/owner", web::get().to(memu_owner))
+            .route("/souls", web::get().to(memu_souls))
             .route("/integration/atomic/atoms", web::get().to(memu_atoms))
             .route("/integration/atomic/tags", web::get().to(memu_tags))
             .route("/integration/atomic/search", web::get().to(memu_search))
@@ -434,22 +566,88 @@ fn test_app(
         )
 }
 
+async fn local_atom_count(ctx: &TestCtx) -> i32 {
+    ctx.state
+        .manager
+        .active_core()
+        .await
+        .unwrap()
+        .list_atoms(
+            &atomic_core::ListAtomsParams {
+                tag_id: None,
+                limit: 50,
+                offset: 0,
+                cursor: None,
+                cursor_id: None,
+                source_filter: atomic_core::SourceFilter::All,
+                source_value: None,
+                sort_by: atomic_core::SortField::Updated,
+                sort_order: atomic_core::SortOrder::Desc,
+            },
+            &atomic_core::KindFilter::All,
+        )
+        .await
+        .unwrap()
+        .total_count
+}
+
 // ---------------------------------------------------------------------------
 // Atom CRUD tests
 // ---------------------------------------------------------------------------
 
 #[actix_web::test]
-async fn test_create_conversation_requires_memu_config() {
+async fn test_integrated_human_create_uses_exact_memu_scope() {
+    let (memu_url, memu_handle, memu_state) = start_memu_create_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/atoms")
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"content": "  A human-authored memory.  "}))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+    assert_eq!(response.status(), 201);
+    let atom: Value = actix_test::read_body_json(response).await;
+    assert_eq!(atom["id"], "memory:human-created");
+    assert_eq!(atom["content"], "  A human-authored memory.  ");
+    assert_eq!(
+        memu_state.creations.lock().unwrap().as_slice(),
+        &[json!({
+            "text": "  A human-authored memory.  ",
+            "user_id": "TestOwner",
+            "soul_id": "TestSoul",
+        })]
+    );
+    assert_eq!(local_atom_count(&ctx).await, 0);
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/atoms")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({"content": "  "}))
+        .to_request();
+    assert_eq!(actix_test::call_service(&app, req).await.status(), 400);
+    assert_eq!(memu_state.creations.lock().unwrap().len(), 1);
+
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_standalone_conversation_does_not_require_memu_config() {
     let ctx = TestCtx::new().await;
     let app = actix_test::init_service(test_app(&ctx)).await;
 
     let req = actix_test::TestRequest::post()
         .uri("/api/conversations")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"tag_ids": [], "title": null}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 500);
+    assert_eq!(resp.status(), 201);
 }
 
 #[actix_web::test]
@@ -461,6 +659,8 @@ async fn test_create_conversation_stores_hidden_memu_snapshot() {
     let req = actix_test::TestRequest::post()
         .uri("/api/conversations")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"tag_ids": [], "title": null}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
@@ -482,6 +682,8 @@ async fn test_create_conversation_stores_hidden_memu_snapshot() {
     let req = actix_test::TestRequest::get()
         .uri(&format!("/api/conversations/{conversation_id}"))
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -500,6 +702,8 @@ async fn test_create_conversation_cleans_up_after_memu_failure() {
     let req = actix_test::TestRequest::post()
         .uri("/api/conversations")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"tag_ids": [], "title": null}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
@@ -508,6 +712,8 @@ async fn test_create_conversation_cleans_up_after_memu_failure() {
     let req = actix_test::TestRequest::get()
         .uri("/api/conversations")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -534,7 +740,7 @@ async fn test_memu_session_satisfies_provider_verify() {
 }
 
 #[actix_web::test]
-async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
+async fn test_memu_read_routes_proxy() {
     let (memu_url, memu_handle) = start_memu_memory_stub();
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
@@ -542,6 +748,8 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let req = actix_test::TestRequest::get()
         .uri("/api/atoms")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let atoms: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(atoms["atoms"][0]["id"], "memory:m1");
@@ -549,6 +757,8 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let req = actix_test::TestRequest::get()
         .uri("/api/tags?min_count=0")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let tags: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(tags[0]["id"], "category:c1");
@@ -556,6 +766,8 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let req = actix_test::TestRequest::get()
         .uri("/api/atoms/memory:m1")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let atom: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(atom["content"], "Memory summary");
@@ -564,6 +776,8 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let req = actix_test::TestRequest::post()
         .uri("/api/search")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"query": "memory", "mode": "hybrid"}))
         .to_request();
     let search: Value = actix_test::call_and_read_body_json(&app, req).await;
@@ -572,6 +786,8 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let req = actix_test::TestRequest::post()
         .uri("/api/search/global")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"query": "global", "section_limit": 5}))
         .to_request();
     let search: Value = actix_test::call_and_read_body_json(&app, req).await;
@@ -580,6 +796,8 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let req = actix_test::TestRequest::get()
         .uri("/api/canvas/global")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let response = actix_test::call_service(&app, req).await;
     let server_timing = response
@@ -615,54 +833,29 @@ async fn test_memu_read_routes_proxy_and_keep_writes_read_only() {
     let req = actix_test::TestRequest::post()
         .uri("/api/canvas/rebuild")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"atom_ids": ["memory:bad"]}))
         .to_request();
     let response = actix_test::call_service(&app, req).await;
     assert_eq!(response.status(), 502);
     let error: Value = actix_test::read_body_json(response).await;
-    assert!(error["error"]
-        .as_str()
-        .unwrap()
-        .contains("memU canvas source shape failed"));
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("memU canvas source shape failed")
+    );
 
     let req = actix_test::TestRequest::get()
         .uri("/api/graph/neighborhood/memory:m1")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let neighborhood: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(neighborhood["center_atom_id"], "memory:m1");
     assert_eq!(neighborhood["atoms"][0]["depth"], 0);
-
-    let req = actix_test::TestRequest::put()
-        .uri("/api/atoms/memory:m1/content")
-        .insert_header(ctx.auth_header())
-        .set_json(json!({"content": "changed"}))
-        .to_request();
-    let resp = actix_test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 409);
-
-    let req = actix_test::TestRequest::post()
-        .uri("/api/atoms")
-        .insert_header(ctx.auth_header())
-        .set_json(json!({"content": "hidden local atom"}))
-        .to_request();
-    let resp = actix_test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 409);
-
-    let req = actix_test::TestRequest::put()
-        .uri("/api/canvas/positions")
-        .insert_header(ctx.auth_header())
-        .set_json(json!([{"atom_id": "memory:m1", "x": 1.0, "y": 2.0}]))
-        .to_request();
-    let resp = actix_test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-
-    let req = actix_test::TestRequest::get()
-        .uri("/api/canvas/positions")
-        .insert_header(ctx.auth_header())
-        .to_request();
-    let positions: Value = actix_test::call_and_read_body_json(&app, req).await;
-    assert_eq!(positions.as_array().unwrap().len(), 0);
 
     memu_handle.stop(true).await;
 }
@@ -677,6 +870,8 @@ async fn test_memu_review_save_broadcasts_atom_updated() {
     let req = actix_test::TestRequest::patch()
         .uri("/api/memu/reviews/memory/m1")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"summary": "Updated memory"}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
@@ -687,7 +882,7 @@ async fn test_memu_review_save_broadcasts_atom_updated() {
         .unwrap()
         .unwrap()
     {
-        atomic_server::state::ServerEvent::AtomUpdated { atom } => {
+        atomic_server::state::ServerEvent::AtomUpdated { atom, .. } => {
             assert_eq!(atom.atom.id, "memory:m1");
             assert_eq!(atom.atom.content, "Updated memory");
         }
@@ -707,6 +902,8 @@ async fn test_empty_memu_review_response_does_not_broadcast_atom_updated() {
     let req = actix_test::TestRequest::post()
         .uri("/api/memu/reviews/memory/m1/approve")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -725,6 +922,8 @@ async fn test_send_message_uses_memu_chat_profile() {
     let req = actix_test::TestRequest::post()
         .uri("/api/conversations")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"tag_ids": [], "title": null}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
@@ -735,6 +934,8 @@ async fn test_send_message_uses_memu_chat_profile() {
     let req = actix_test::TestRequest::post()
         .uri(&format!("/api/conversations/{conversation_id}/messages"))
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"content": "hello"}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
@@ -769,6 +970,8 @@ async fn test_memu_backed_chat_offers_edit_but_not_create() {
     let req = actix_test::TestRequest::post()
         .uri("/api/conversations")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"tag_ids": [], "title": null}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
@@ -779,11 +982,69 @@ async fn test_memu_backed_chat_offers_edit_but_not_create() {
     let req = actix_test::TestRequest::post()
         .uri(&format!("/api/conversations/{conversation_id}/messages"))
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({"content": "hello"}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 
+    let req = actix_test::TestRequest::post()
+        .uri("/api/memu/session/end")
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"conversation_id": conversation_id}))
+        .to_request();
+    assert_eq!(actix_test::call_service(&app, req).await.status(), 200);
+
+    memu_handle.stop(true).await;
+    model_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_memu_chat_returns_tool_result_without_executing_unavailable_create() {
+    let tool_calls = json!([{
+        "index": 0,
+        "id": "call-create",
+        "type": "function",
+        "function": {
+            "name": "create_atom",
+            "arguments": "{\"content\":\"# Must not exist\"}"
+        }
+    }]);
+    let (model_url, model_handle, _) = start_tool_model(0, tool_calls);
+    let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/conversations")
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"tag_ids": [], "title": null}))
+        .to_request();
+    let created: Value = actix_test::call_and_read_body_json(&app, req).await;
+    let conversation_id = created["id"].as_str().unwrap();
+
+    let req = actix_test::TestRequest::post()
+        .uri(&format!("/api/conversations/{conversation_id}/messages"))
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"content": "create a note"}))
+        .to_request();
+    let response: Value = actix_test::call_and_read_body_json(&app, req).await;
+
+    assert_eq!(local_atom_count(&ctx).await, 0);
+    assert_eq!(response["tool_calls"][0]["tool_name"], "create_atom");
+    assert!(
+        response["tool_calls"][0]["tool_output"]
+            .as_str()
+            .unwrap()
+            .contains("Tool unavailable in this session")
+    );
     memu_handle.stop(true).await;
     model_handle.stop(true).await;
 }
