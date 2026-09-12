@@ -22,7 +22,7 @@ describe('dev server child supervision', () => {
   it('cleans up siblings once and records failure on a spawn error', async () => {
     const children = [];
     mock.module('node:child_process', {
-      namedExports: {
+      exports: {
         execSync() {},
         spawn() {
           const child = new EventEmitter();

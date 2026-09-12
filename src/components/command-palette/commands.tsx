@@ -1,7 +1,6 @@
 import { Plus, Search, Tag, BookOpen, MessageCircle, LayoutGrid, List as ListIcon, Settings, RefreshCw, GitMerge, X } from 'lucide-react';
 import { getTransport } from '../../lib/transport';
 import { Command, CommandCategory } from './types';
-import { useAtomsStore } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
 import { startNewAtom } from '../../lib/new-atom';
 import { useTagsStore } from '../../stores/tags';
