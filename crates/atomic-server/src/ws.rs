@@ -1,5 +1,6 @@
 //! WebSocket endpoint for real-time event streaming
 
+use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
 use actix_web::{web, HttpRequest, HttpResponse};
 use tokio::sync::broadcast;
@@ -22,6 +23,20 @@ pub async fn ws_handler(
         Ok(Some(_)) => {}
         _ => return Ok(HttpResponse::Unauthorized().finish()),
     }
+    let scope = if state.memu_session.is_some() {
+        match memu_proxy::validate_scope(
+            &state,
+            query.user_id.clone().unwrap_or_default(),
+            query.soul_id.clone().unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(scope) => Some(scope),
+            Err(response) => return Ok(response),
+        }
+    } else {
+        None
+    };
 
     let (response, mut session, _msg_stream) = actix_ws::handle(&req, stream)?;
 
@@ -33,6 +48,23 @@ pub async fn ws_handler(
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    if let (Some(conversation_id), Some(scope)) =
+                        (event.conversation_id(), scope.as_ref())
+                    {
+                        let owned = core
+                            .get_conversation(conversation_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_some_and(|conv| {
+                                conv.conversation.user_id.as_deref() == Some(scope.user_id.as_str())
+                                    && conv.conversation.soul_id.as_deref()
+                                        == Some(scope.soul_id.as_str())
+                            });
+                        if !owned {
+                            continue;
+                        }
+                    }
                     if let Ok(json) = serde_json::to_string(&event) {
                         if session.text(json).await.is_err() {
                             break; // Client disconnected
@@ -60,4 +92,6 @@ pub async fn ws_handler(
 #[derive(serde::Deserialize)]
 pub struct WsQuery {
     pub token: String,
+    pub user_id: Option<String>,
+    pub soul_id: Option<String>,
 }

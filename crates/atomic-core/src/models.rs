@@ -774,6 +774,8 @@ pub struct CanvasLevel {
 pub struct Conversation {
     pub id: String,
     pub title: Option<String>,
+    pub user_id: Option<String>,
+    pub soul_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub is_archived: bool,

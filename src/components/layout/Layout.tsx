@@ -16,6 +16,9 @@ import { useTheme, useFont } from '../../hooks';
 import { verifyProviderConfigured } from '../../lib/api';
 import { isTauri } from '../../lib/platform';
 import { hasServerConfig } from '../../lib/transport';
+import { getTransport } from '../../lib/transport';
+import { currentIdentity, selectSoul } from '../../lib/openalma-identity';
+import { useChatStore } from '../../stores/chat';
 
 
 export function Layout() {
@@ -25,6 +28,24 @@ export function Layout() {
   const fetchTags = useTagsStore(s => s.fetchTags);
   const [isSetupRequired, setIsSetupRequired] = useState<boolean | null>(null); // null = checking
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [souls, setSouls] = useState<string[]>([]);
+  const identity = currentIdentity();
+
+  useEffect(() => {
+    void getTransport().invoke<{ souls: string[] }>('get_openalma_souls').then((result) => setSouls(result.souls));
+  }, []);
+
+  const switchSoul = (soulId: string) => {
+    const chat = useChatStore.getState();
+    if (chat.isStreaming || chat.isEndingSession) {
+      window.alert('Wait for the current reply or recap to finish before switching Souls.');
+      return;
+    }
+    if (identity && soulId !== identity.soulId) {
+      selectSoul(identity.userId, soulId);
+      window.location.reload();
+    }
+  };
 
   // Command palette state
   const commandPaletteOpen = useUIStore((state) => state.commandPaletteOpen);
@@ -192,6 +213,19 @@ export function Layout() {
   return (
     <div className="flex h-full overflow-hidden bg-[var(--color-bg-main)]">
       <RouterBridge />
+      {identity && souls.length > 0 && (
+        <label className="fixed right-4 top-3 z-40 flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
+          Soul
+          <select
+            aria-label="Active Soul"
+            value={identity.soulId}
+            onChange={(event) => switchSoul(event.target.value)}
+            className="bg-transparent font-medium text-[var(--color-text-primary)] outline-none"
+          >
+            {souls.map((soul) => <option key={soul} value={soul}>{soul}</option>)}
+          </select>
+        </label>
+      )}
       <LeftPanel />
       <MainView />
       <LoadingIndicator />

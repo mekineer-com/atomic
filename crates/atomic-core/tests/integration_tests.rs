@@ -260,15 +260,30 @@ async fn test_conversation_lifecycle() {
 
     // Create conversation with scope
     let conv = core
-        .create_conversation(&[tag.id.clone()], Some("Test Chat"))
+        .create_conversation(
+            &[tag.id.clone()],
+            Some("Test Chat"),
+            "Fictional User",
+            "Fictional Soul",
+        )
         .await
         .unwrap();
     assert_eq!(conv.conversation.title.as_deref(), Some("Test Chat"));
+    assert_eq!(conv.conversation.user_id.as_deref(), Some("Fictional User"));
+    assert_eq!(conv.conversation.soul_id.as_deref(), Some("Fictional Soul"));
     assert_eq!(conv.tags.len(), 1);
 
     // List conversations
-    let convs = core.get_conversations(None, 10, 0).await.unwrap();
+    let convs = core
+        .get_conversations(None, 10, 0, "Fictional User", "Fictional Soul")
+        .await
+        .unwrap();
     assert_eq!(convs.len(), 1);
+    assert!(core
+        .get_conversations(None, 10, 0, "Fictional User", "Other Soul")
+        .await
+        .unwrap()
+        .is_empty());
 
     // Update title
     let updated = core
@@ -443,7 +458,7 @@ async fn test_empty_database_queries() {
     assert_eq!(page.total_count, 0);
     assert!(core.get_source_list().await.unwrap().is_empty());
     assert!(core
-        .get_conversations(None, 10, 0)
+        .get_conversations(None, 10, 0, "Fictional User", "Fictional Soul")
         .await
         .unwrap()
         .is_empty());

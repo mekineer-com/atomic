@@ -1,10 +1,10 @@
 //! Search routes
 
 use crate::db_extractor::Db;
-use crate::error::{ApiErrorResponse, ok_or_error};
+use crate::error::{ok_or_error, ApiErrorResponse};
 use crate::routes::memu_proxy;
 use crate::state::AppState;
-use actix_web::{HttpResponse, web};
+use actix_web::{web, HttpRequest, HttpResponse};
 use atomic_core::{SearchMode, SearchOptions, SemanticSearchResult, SimilarAtomResult};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -47,6 +47,7 @@ pub struct GlobalSearchRequest {
     tag = "search",
 )]
 pub async fn search(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     body: web::Json<SearchRequest>,
@@ -62,7 +63,11 @@ pub async fn search(
             }));
         }
     };
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         return memu_search(config, &req).await;
     }
 
@@ -85,12 +90,17 @@ pub async fn search(
     tag = "search",
 )]
 pub async fn global_search(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     body: web::Json<GlobalSearchRequest>,
 ) -> HttpResponse {
     let req = body.into_inner();
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         let search_req = SearchRequest {
             query: req.query,
             mode: "keyword".to_string(),
@@ -139,6 +149,7 @@ pub struct FindSimilarQuery {
     tag = "search",
 )]
 pub async fn find_similar(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
@@ -147,7 +158,11 @@ pub async fn find_similar(
     let atom_id = path.into_inner();
     let limit = query.limit.unwrap_or(10);
     let threshold = query.threshold.unwrap_or(0.7);
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         if !memu_proxy::is_memu_id(&atom_id) {
             return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
         }
@@ -157,7 +172,7 @@ pub async fn find_similar(
 }
 
 async fn memu_find_similar(
-    config: crate::state::MemuSessionConfig,
+    config: memu_proxy::MemuScope,
     atom_id: &str,
     limit: i32,
     threshold: f32,
@@ -213,10 +228,7 @@ async fn memu_find_similar(
     HttpResponse::Ok().json(atoms)
 }
 
-async fn memu_search(
-    config: crate::state::MemuSessionConfig,
-    request: &SearchRequest,
-) -> HttpResponse {
+async fn memu_search(config: memu_proxy::MemuScope, request: &SearchRequest) -> HttpResponse {
     match memu_search_value(config, request).await {
         Ok(body) => HttpResponse::Ok().json(body),
         Err(response) => response,
@@ -224,7 +236,7 @@ async fn memu_search(
 }
 
 async fn memu_search_value(
-    config: crate::state::MemuSessionConfig,
+    config: memu_proxy::MemuScope,
     request: &SearchRequest,
 ) -> Result<Vec<serde_json::Value>, HttpResponse> {
     let client = memu_proxy::client()?;
@@ -241,7 +253,10 @@ async fn memu_search_value(
     if let Some(entity_id) = &request.exclude_entity_id {
         params.push((
             "exclude_entity_id",
-            entity_id.strip_prefix("entity:").unwrap_or(entity_id).to_string(),
+            entity_id
+                .strip_prefix("entity:")
+                .unwrap_or(entity_id)
+                .to_string(),
         ));
     }
     if let Some(category_id) = &request.exclude_category_id {

@@ -281,7 +281,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 22;
+    const LATEST_VERSION: i32 = 23;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         Self::run_migrations_internal(conn, false)
@@ -1089,7 +1089,19 @@ impl Database {
         // at server startup with a per-DB idempotency flag. A pure SQL drop
         // here would discard history before the Rust path could rehome it.
         if version < 22 {
-            conn.execute_batch(&format!("PRAGMA user_version = {};", Self::LATEST_VERSION))?;
+            conn.execute_batch("PRAGMA user_version = 22;")?;
+        }
+
+        // V23: legacy rows remain unowned because their creation identity is unknowable.
+        if version < 23 {
+            conn.execute_batch(&format!(
+                "ALTER TABLE conversations ADD COLUMN user_id TEXT;
+                 ALTER TABLE conversations ADD COLUMN soul_id TEXT;
+                 CREATE INDEX idx_conversations_owner
+                     ON conversations(user_id, soul_id, updated_at DESC);
+                 PRAGMA user_version = {};",
+                Self::LATEST_VERSION,
+            ))?;
         }
 
         // --- Triggers (recreated every startup to stay current) ---

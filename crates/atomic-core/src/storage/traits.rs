@@ -627,6 +627,8 @@ pub trait ChatStore: Send + Sync {
         &self,
         tag_ids: &[String],
         title: Option<&str>,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<ConversationWithTags>;
 
     /// List conversations with optional tag filter and pagination.
@@ -635,6 +637,8 @@ pub trait ChatStore: Send + Sync {
         filter_tag_id: Option<&str>,
         limit: i32,
         offset: i32,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<Vec<ConversationWithTags>>;
 
     /// Get a conversation with its full message history.

@@ -3,7 +3,8 @@ import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { ErrorBoundary } from './components/ui/ErrorBoundary'
 import './index.css'
-import { initTransport } from './lib/transport'
+import { ensureOpenAlmaIdentity } from './lib/openalma-identity'
+import { getTransport, initTransport } from './lib/transport'
 
 async function clearStaleServiceWorkers() {
   if ('serviceWorker' in navigator) {
@@ -17,6 +18,8 @@ async function clearStaleServiceWorkers() {
 clearStaleServiceWorkers()
   .catch((err) => console.warn('Stale service worker cleanup failed:', err))
   .then(initTransport)
+  .then(() => ensureOpenAlmaIdentity(getTransport()))
+  .then(() => getTransport().connect())
   .then(() => {
     const app = (
       <ErrorBoundary>

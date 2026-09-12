@@ -76,8 +76,6 @@ async fn main() -> std::io::Result<()> {
             setup_token,
             dangerously_skip_setup_token,
             memu_server_url,
-            memu_user_id,
-            memu_soul_id,
         }) => {
             // Auto-detect public URL on Fly.io if not explicitly set
             let public_url = public_url.or_else(|| {
@@ -94,7 +92,7 @@ async fn main() -> std::io::Result<()> {
                 public_url,
                 setup_token,
                 dangerously_skip_setup_token,
-                memu_session_config(memu_server_url, memu_user_id, memu_soul_id),
+                memu_session_config(memu_server_url),
                 log_buffer,
             )
             .await
@@ -109,7 +107,7 @@ async fn main() -> std::io::Result<()> {
                 None,
                 None,
                 false,
-                memu_session_config(None, None, None),
+                memu_session_config(None),
                 log_buffer,
             )
             .await
@@ -149,25 +147,13 @@ async fn create_manager(
     }
 }
 
-fn memu_session_config(
-    base_url: Option<String>,
-    user_id: Option<String>,
-    soul_id: Option<String>,
-) -> Option<MemuSessionConfig> {
+fn memu_session_config(base_url: Option<String>) -> Option<MemuSessionConfig> {
     let base_url = base_url.or_else(|| std::env::var("MEMU_SERVER_URL").ok());
-    let user_id = user_id.or_else(|| std::env::var("MEMU_USER_ID").ok());
-    let soul_id = soul_id.or_else(|| std::env::var("MEMU_SOUL_ID").ok());
     let base_url = base_url?.trim().trim_end_matches('/').to_string();
-    let user_id = user_id?.trim().to_string();
-    let soul_id = soul_id?.trim().to_string();
-    if base_url.is_empty() || user_id.is_empty() || soul_id.is_empty() {
+    if base_url.is_empty() {
         return None;
     }
-    Some(MemuSessionConfig {
-        base_url,
-        user_id,
-        soul_id,
-    })
+    Some(MemuSessionConfig { base_url })
 }
 
 async fn run_token_command(core: &atomic_core::AtomicCore, action: TokenAction) {

@@ -1,6 +1,7 @@
 import type { Transport, HttpTransportConfig } from './types';
 import { COMMAND_MAP } from './command-map';
 import { normalizeServerEvent } from './event-normalizer';
+import { currentIdentity } from '../openalma-identity';
 
 export class HttpTransport implements Transport {
   readonly mode = 'http' as const;
@@ -28,10 +29,14 @@ export class HttpTransport implements Transport {
   async connect(): Promise<void> {
     if (!this.config.baseUrl) return;
     this.shouldReconnect = true;
+    const identity = currentIdentity();
+    const identityQuery = identity
+      ? `&user_id=${encodeURIComponent(identity.userId)}&soul_id=${encodeURIComponent(identity.soulId)}`
+      : '';
     this.wsUrl = this.config.baseUrl
       .replace(/^http/, 'ws')
       .replace(/\/$/, '')
-      + `/ws?token=${encodeURIComponent(this.config.authToken)}`;
+      + `/ws?token=${encodeURIComponent(this.config.authToken)}${identityQuery}`;
     this.attachLifecycleListeners();
     try {
       await this.connectWs();
@@ -224,6 +229,11 @@ export class HttpTransport implements Transport {
     const headers: Record<string, string> = {
       'Authorization': `Bearer ${this.config.authToken}`,
     };
+    const identity = currentIdentity();
+    if (identity) {
+      headers['X-OpenAlma-User'] = encodeURIComponent(identity.userId);
+      headers['X-OpenAlma-Soul'] = encodeURIComponent(identity.soulId);
+    }
 
     const fetchOpts: RequestInit = { method: spec.method, headers };
 

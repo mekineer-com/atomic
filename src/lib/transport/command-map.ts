@@ -18,6 +18,10 @@ function atomBody(args: Record<string, unknown>) {
 }
 
 export const COMMAND_MAP: Record<string, CommandSpec> = {
+  get_openalma_owner: { method: 'GET', path: '/api/memu/owner' },
+  create_openalma_owner: { method: 'POST', path: '/api/memu/owner', argsMode: 'body' },
+  get_openalma_souls: { method: 'GET', path: '/api/memu/souls' },
+  create_openalma_soul: { method: 'POST', path: '/api/memu/souls', argsMode: 'body' },
   // ==================== Atoms ====================
   get_all_atoms: {
     method: 'GET',

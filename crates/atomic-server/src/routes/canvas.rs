@@ -3,7 +3,7 @@
 use crate::db_extractor::Db;
 use crate::error::ok_or_error;
 use crate::routes::memu_proxy;
-use crate::state::{AppState, MemuSessionConfig};
+use crate::state::AppState;
 use actix_web::{web, HttpRequest, HttpResponse};
 use atomic_core::{
     projection, AtomPosition, CanvasAtomPosition, CanvasClusterLabel, CanvasEdgeData,
@@ -150,11 +150,16 @@ where
 
 #[utoipa::path(get, path = "/api/canvas/global", params(GlobalCanvasQuery), responses((status = 200, description = "Global canvas data", body = atomic_core::GlobalCanvasData)), tag = "canvas")]
 pub async fn get_global_canvas(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     query: web::Query<GlobalCanvasQuery>,
 ) -> HttpResponse {
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         let started = Instant::now();
         let source = match fetch_memu_canvas_source(&config, None).await {
             Ok(source) => source,
@@ -182,13 +187,13 @@ pub async fn rebuild_canvas(
     req: HttpRequest,
     body: web::Json<RebuildCanvasBody>,
 ) -> HttpResponse {
-    let requested: HashSet<String> = body
-        .into_inner()
-        .atom_ids
-        .into_iter()
-        .collect();
+    let requested: HashSet<String> = body.into_inner().atom_ids.into_iter().collect();
 
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &req).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         let started = Instant::now();
         let source = match fetch_memu_canvas_source(&config, Some(&requested)).await {
             Ok(source) => source,
@@ -244,7 +249,7 @@ pub async fn rebuild_canvas(
 }
 
 async fn fetch_memu_canvas_source(
-    config: &MemuSessionConfig,
+    config: &memu_proxy::MemuScope,
     atom_ids: Option<&HashSet<String>>,
 ) -> Result<TimedMemuCanvasSource, HttpResponse> {
     let client = memu_proxy::client()?;
@@ -384,10 +389,7 @@ fn memu_canvas_data(source: MemuCanvasSource) -> GlobalCanvasData {
 }
 
 fn merge_edges(edges: &mut Vec<CanvasEdgeData>, extra: Vec<CanvasEdgeData>) {
-    let mut seen: HashSet<(String, String, String)> = edges
-        .iter()
-        .map(edge_key)
-        .collect();
+    let mut seen: HashSet<(String, String, String)> = edges.iter().map(edge_key).collect();
     for edge in extra {
         if seen.insert(edge_key(&edge)) {
             edges.push(edge);
@@ -488,7 +490,14 @@ mod tests {
             source: source.to_string(),
             target: target.to_string(),
             weight: 0.7,
-            kind: Some(if predicate == "similarity" { predicate } else { "triple" }.to_string()),
+            kind: Some(
+                if predicate == "similarity" {
+                    predicate
+                } else {
+                    "triple"
+                }
+                .to_string(),
+            ),
             predicate: Some(predicate.to_string()),
         }
     }
@@ -508,13 +517,22 @@ mod tests {
     #[test]
     fn packed_embedding_decodes_exact_float32_values() {
         let values = [1.25_f32, -2.5, 0.0];
-        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         let atom: MemuCanvasAtom =
             serde_json::from_value(packed_atom(json!(STANDARD.encode(bytes)))).unwrap();
 
         assert_eq!(
-            atom.embedding.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-            values.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+            atom.embedding
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -531,7 +549,10 @@ mod tests {
             assert!(serde_json::from_value::<MemuCanvasAtom>(packed_atom(value)).is_err());
         }
         let mut missing = packed_atom(json!("AACAPw=="));
-        missing.as_object_mut().unwrap().remove("embedding_f32_le_b64");
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("embedding_f32_le_b64");
         assert!(serde_json::from_value::<MemuCanvasAtom>(missing).is_err());
     }
 

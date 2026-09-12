@@ -80,8 +80,19 @@ async fn load_conversation_with_tags(
     conversation_id: &str,
     db_id: &str,
 ) -> StorageResult<ConversationWithTags> {
-    let row = sqlx::query_as::<_, (String, Option<String>, String, String, i32)>(
-        "SELECT id, title, created_at, updated_at, is_archived
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            i32,
+        ),
+    >(
+        "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
          FROM conversations WHERE id = $1 AND db_id = $2",
     )
     .bind(conversation_id)
@@ -96,9 +107,11 @@ async fn load_conversation_with_tags(
     let conversation = Conversation {
         id: row.0,
         title: row.1,
-        created_at: row.2,
-        updated_at: row.3,
-        is_archived: row.4 != 0,
+        user_id: row.2,
+        soul_id: row.3,
+        created_at: row.4,
+        updated_at: row.5,
+        is_archived: row.6 != 0,
     };
 
     let tags = fetch_conversation_tags(pool, conversation_id, db_id).await?;
@@ -214,16 +227,20 @@ impl ChatStore for PostgresStorage {
         &self,
         tag_ids: &[String],
         title: Option<&str>,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<ConversationWithTags> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
 
         sqlx::query(
-            "INSERT INTO conversations (id, title, created_at, updated_at, is_archived, db_id)
-             VALUES ($1, $2, $3, $4, 0, $5)",
+            "INSERT INTO conversations (id, title, user_id, soul_id, created_at, updated_at, is_archived, db_id)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, $7)",
         )
         .bind(&id)
         .bind(title)
+        .bind(user_id)
+        .bind(soul_id)
         .bind(&now)
         .bind(&now)
         .bind(&self.db_id)
@@ -249,6 +266,8 @@ impl ChatStore for PostgresStorage {
             conversation: Conversation {
                 id,
                 title: title.map(String::from),
+                user_id: Some(user_id.to_string()),
+                soul_id: Some(soul_id.to_string()),
                 created_at: now.clone(),
                 updated_at: now,
                 is_archived: false,
@@ -264,17 +283,22 @@ impl ChatStore for PostgresStorage {
         filter_tag_id: Option<&str>,
         limit: i32,
         offset: i32,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<Vec<ConversationWithTags>> {
         let conversations: Vec<Conversation> = if let Some(tag_id) = filter_tag_id {
-            let rows = sqlx::query_as::<_, (String, Option<String>, String, String, i32)>(
-                "SELECT DISTINCT c.id, c.title, c.created_at, c.updated_at, c.is_archived
+            let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, String, String, i32)>(
+                "SELECT DISTINCT c.id, c.title, c.user_id, c.soul_id, c.created_at, c.updated_at, c.is_archived
                  FROM conversations c
                  JOIN conversation_tags ct ON ct.conversation_id = c.id
-                 WHERE ct.tag_id = $1 AND c.is_archived = 0 AND c.db_id = $4 AND ct.db_id = $4
+                 WHERE ct.tag_id = $1 AND c.user_id = $2 AND c.soul_id = $3
+                   AND c.is_archived = 0 AND c.db_id = $6 AND ct.db_id = $6
                  ORDER BY c.updated_at DESC
-                 LIMIT $2 OFFSET $3",
+                 LIMIT $4 OFFSET $5",
             )
             .bind(tag_id)
+            .bind(user_id)
+            .bind(soul_id)
             .bind(limit)
             .bind(offset)
             .bind(&self.db_id)
@@ -284,23 +308,40 @@ impl ChatStore for PostgresStorage {
 
             rows.into_iter()
                 .map(
-                    |(id, title, created_at, updated_at, is_archived)| Conversation {
-                        id,
-                        title,
-                        created_at,
-                        updated_at,
-                        is_archived: is_archived != 0,
+                    |(id, title, user_id, soul_id, created_at, updated_at, is_archived)| {
+                        Conversation {
+                            id,
+                            title,
+                            user_id,
+                            soul_id,
+                            created_at,
+                            updated_at,
+                            is_archived: is_archived != 0,
+                        }
                     },
                 )
                 .collect()
         } else {
-            let rows = sqlx::query_as::<_, (String, Option<String>, String, String, i32)>(
-                "SELECT id, title, created_at, updated_at, is_archived
+            let rows = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    String,
+                    String,
+                    i32,
+                ),
+            >(
+                "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
                  FROM conversations
-                 WHERE is_archived = 0 AND db_id = $3
+                 WHERE user_id = $1 AND soul_id = $2 AND is_archived = 0 AND db_id = $5
                  ORDER BY updated_at DESC
-                 LIMIT $1 OFFSET $2",
+                 LIMIT $3 OFFSET $4",
             )
+            .bind(user_id)
+            .bind(soul_id)
             .bind(limit)
             .bind(offset)
             .bind(&self.db_id)
@@ -310,12 +351,16 @@ impl ChatStore for PostgresStorage {
 
             rows.into_iter()
                 .map(
-                    |(id, title, created_at, updated_at, is_archived)| Conversation {
-                        id,
-                        title,
-                        created_at,
-                        updated_at,
-                        is_archived: is_archived != 0,
+                    |(id, title, user_id, soul_id, created_at, updated_at, is_archived)| {
+                        Conversation {
+                            id,
+                            title,
+                            user_id,
+                            soul_id,
+                            created_at,
+                            updated_at,
+                            is_archived: is_archived != 0,
+                        }
                     },
                 )
                 .collect()
@@ -354,8 +399,19 @@ impl ChatStore for PostgresStorage {
         &self,
         conversation_id: &str,
     ) -> StorageResult<Option<ConversationWithMessages>> {
-        let row = sqlx::query_as::<_, (String, Option<String>, String, String, i32)>(
-            "SELECT id, title, created_at, updated_at, is_archived
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+                i32,
+            ),
+        >(
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
              FROM conversations WHERE id = $1 AND db_id = $2",
         )
         .bind(conversation_id)
@@ -365,13 +421,17 @@ impl ChatStore for PostgresStorage {
         .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
         let conv = match row {
-            Some((id, title, created_at, updated_at, is_archived)) => Conversation {
-                id,
-                title,
-                created_at,
-                updated_at,
-                is_archived: is_archived != 0,
-            },
+            Some((id, title, user_id, soul_id, created_at, updated_at, is_archived)) => {
+                Conversation {
+                    id,
+                    title,
+                    user_id,
+                    soul_id,
+                    created_at,
+                    updated_at,
+                    is_archived: is_archived != 0,
+                }
+            }
             None => return Ok(None),
         };
 
@@ -538,8 +598,19 @@ impl ChatStore for PostgresStorage {
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         }
 
-        let row = sqlx::query_as::<_, (String, Option<String>, String, String, i32)>(
-            "SELECT id, title, created_at, updated_at, is_archived
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+                i32,
+            ),
+        >(
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
              FROM conversations WHERE id = $1 AND db_id = $2",
         )
         .bind(id)
@@ -552,9 +623,11 @@ impl ChatStore for PostgresStorage {
         Ok(Conversation {
             id: row.0,
             title: row.1,
-            created_at: row.2,
-            updated_at: row.3,
-            is_archived: row.4 != 0,
+            user_id: row.2,
+            soul_id: row.3,
+            created_at: row.4,
+            updated_at: row.5,
+            is_archived: row.6 != 0,
         })
     }
 

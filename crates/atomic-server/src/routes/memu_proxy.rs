@@ -1,14 +1,113 @@
-use crate::state::{AppState, MemuSessionConfig};
-use actix_web::{http::StatusCode, HttpResponse};
+use crate::state::AppState;
+use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-pub fn session(state: &AppState) -> Result<MemuSessionConfig, HttpResponse> {
-    state.memu_session.clone().ok_or_else(|| {
-        HttpResponse::InternalServerError().json(json!({
-            "error": "MEMU_SERVER_URL, MEMU_USER_ID, and MEMU_SOUL_ID are required"
-        }))
+#[derive(Clone)]
+pub struct MemuScope {
+    pub base_url: String,
+    pub user_id: String,
+    pub soul_id: String,
+}
+
+pub async fn owner_get(state: web::Data<AppState>) -> HttpResponse {
+    identity_proxy(&state, "/owner", None).await
+}
+
+pub async fn owner_create(state: web::Data<AppState>, body: web::Json<Value>) -> HttpResponse {
+    identity_proxy(&state, "/owner", Some(body.into_inner())).await
+}
+
+pub async fn souls_get(state: web::Data<AppState>) -> HttpResponse {
+    identity_proxy(&state, "/souls", None).await
+}
+
+pub async fn soul_create(state: web::Data<AppState>, body: web::Json<Value>) -> HttpResponse {
+    identity_proxy(&state, "/souls", Some(body.into_inner())).await
+}
+
+async fn identity_proxy(state: &AppState, path: &str, body: Option<Value>) -> HttpResponse {
+    let Some(config) = state.memu_session.as_ref() else {
+        return HttpResponse::InternalServerError()
+            .json(json!({"error": "MEMU_SERVER_URL is required"}));
+    };
+    let client = match client() {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let request = if let Some(body) = body {
+        client
+            .post(format!("{}{}", config.base_url, path))
+            .json(&body)
+    } else {
+        client.get(format!("{}{}", config.base_url, path))
+    };
+    match memu_json(request, "memU identity").await {
+        Ok(value) => HttpResponse::Ok().json(value),
+        Err(response) => response,
+    }
+}
+
+pub async fn session(state: &AppState, request: &HttpRequest) -> Result<MemuScope, HttpResponse> {
+    let user_id = identity_header(request, "X-OpenAlma-User")?;
+    let soul_id = identity_header(request, "X-OpenAlma-Soul")?;
+    validate_scope(state, user_id, soul_id).await
+}
+
+pub async fn validate_scope(
+    state: &AppState,
+    user_id: String,
+    soul_id: String,
+) -> Result<MemuScope, HttpResponse> {
+    let config = state.memu_session.clone().ok_or_else(|| {
+        HttpResponse::InternalServerError().json(json!({"error": "MEMU_SERVER_URL is required"}))
+    })?;
+    let client = client()?;
+    let owner = memu_json(
+        client.get(format!("{}/owner", config.base_url)),
+        "memU owner",
+    )
+    .await?;
+    if owner.get("user_id").and_then(Value::as_str) != Some(user_id.as_str()) {
+        return Err(HttpResponse::Conflict().json(json!({"error": "OpenAlma owner mismatch"})));
+    }
+    let souls = memu_json(
+        client.get(format!("{}/souls", config.base_url)),
+        "memU souls",
+    )
+    .await?;
+    if !souls
+        .get("souls")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row.as_str() == Some(soul_id.as_str()))
+        })
+    {
+        return Err(HttpResponse::Conflict().json(json!({"error": "OpenAlma soul mismatch"})));
+    }
+    Ok(MemuScope {
+        base_url: config.base_url,
+        user_id,
+        soul_id,
     })
+}
+
+fn identity_header(request: &HttpRequest, name: &str) -> Result<String, HttpResponse> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            reqwest::Url::parse(&format!("http://localhost/?value={value}"))
+                .ok()?
+                .query_pairs()
+                .find_map(|(key, value)| (key == "value").then(|| value.into_owned()))
+        })
+        .ok_or_else(|| {
+            HttpResponse::BadRequest().json(json!({"error": format!("{name} is required")}))
+        })
 }
 
 pub fn client() -> Result<reqwest::Client, HttpResponse> {
@@ -78,7 +177,7 @@ pub fn is_memu_id(id: &str) -> bool {
     id.starts_with("memory:") || id.starts_with("category:") || id.starts_with("entity:")
 }
 
-pub fn scope_query(config: &MemuSessionConfig) -> [(&str, &str); 2] {
+pub fn scope_query(config: &MemuScope) -> [(&str, &str); 2] {
     [
         ("user_id", config.user_id.as_str()),
         ("soul_id", config.soul_id.as_str()),

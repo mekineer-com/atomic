@@ -4,7 +4,7 @@ use crate::db_extractor::Db;
 use crate::error::ok_or_error;
 use crate::routes::memu_proxy;
 use crate::state::AppState;
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
 use utoipa::IntoParams;
 
@@ -32,6 +32,7 @@ pub struct NeighborhoodQuery {
 
 #[utoipa::path(get, path = "/api/graph/neighborhood/{atom_id}", params(("atom_id" = String, Path, description = "Center atom ID"), NeighborhoodQuery), responses((status = 200, description = "Neighborhood graph", body = atomic_core::NeighborhoodGraph)), tag = "graph")]
 pub async fn get_atom_neighborhood(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
@@ -40,9 +41,14 @@ pub async fn get_atom_neighborhood(
     let atom_id = path.into_inner();
     let depth = query.depth.unwrap_or(1);
     let min_similarity = query.min_similarity.unwrap_or(0.5);
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         if !memu_proxy::is_memu_id(&atom_id) {
-            return HttpResponse::NotFound().json(serde_json::json!({"error": "memU atom not found"}));
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "memU atom not found"}));
         }
         let client = match memu_proxy::client() {
             Ok(client) => client,

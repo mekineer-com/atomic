@@ -1,15 +1,19 @@
 use crate::routes::memu_proxy::{client, memu_json, memu_url, scope_query, session};
 use crate::routes::memu_reviews::updated_atom_response;
 use crate::state::AppState;
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde_json::{json, Value};
 
-pub async fn list(state: web::Data<AppState>) -> HttpResponse {
-    proxy(state, None).await
+pub async fn list(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    proxy(request, state, None).await
 }
 
-pub async fn create(state: web::Data<AppState>, body: web::Json<Value>) -> HttpResponse {
-    let config = match session(&state) {
+pub async fn create(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    body: web::Json<Value>,
+) -> HttpResponse {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -35,12 +39,20 @@ pub async fn create(state: web::Data<AppState>, body: web::Json<Value>) -> HttpR
     }
 }
 
-pub async fn detail(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    proxy(state, Some(path.into_inner())).await
+pub async fn detail(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    proxy(request, state, Some(path.into_inner())).await
 }
 
-async fn proxy(state: web::Data<AppState>, entity_id: Option<String>) -> HttpResponse {
-    let config = match session(&state) {
+async fn proxy(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    entity_id: Option<String>,
+) -> HttpResponse {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -68,11 +80,12 @@ async fn proxy(state: web::Data<AppState>, entity_id: Option<String>) -> HttpRes
 }
 
 pub async fn update(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<Value>,
 ) -> HttpResponse {
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -103,11 +116,12 @@ pub async fn update(
 }
 
 async fn entity_action(
+    request: HttpRequest,
     state: web::Data<AppState>,
     entity_id: String,
     action: Option<&str>,
 ) -> HttpResponse {
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -128,30 +142,38 @@ async fn entity_action(
     } else {
         client.delete(url)
     };
-    match memu_json(
-        request.query(&scope_query(&config)),
-        "memU entity action",
-    )
-    .await
-    {
+    match memu_json(request.query(&scope_query(&config)), "memU entity action").await {
         Ok(body) => HttpResponse::Ok().json(body),
         Err(response) => response,
     }
 }
 
-pub async fn ignore(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    entity_action(state, path.into_inner(), Some("ignore")).await
+pub async fn ignore(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    entity_action(request, state, path.into_inner(), Some("ignore")).await
 }
 
-pub async fn restore(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    entity_action(state, path.into_inner(), Some("restore")).await
+pub async fn restore(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    entity_action(request, state, path.into_inner(), Some("restore")).await
 }
 
-pub async fn delete(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    entity_action(state, path.into_inner(), None).await
+pub async fn delete(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    entity_action(request, state, path.into_inner(), None).await
 }
 
 pub async fn merge_preview(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     query: web::Query<std::collections::HashMap<String, String>>,
@@ -160,10 +182,18 @@ pub async fn merge_preview(
         return HttpResponse::BadRequest()
             .json(json!({"error": "duplicate_entity_id is required"}));
     };
-    merge_proxy(state, path.into_inner(), duplicate_id.clone(), false).await
+    merge_proxy(
+        request,
+        state,
+        path.into_inner(),
+        duplicate_id.clone(),
+        false,
+    )
+    .await
 }
 
 pub async fn merge(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<Value>,
@@ -177,16 +207,24 @@ pub async fn merge(
         return HttpResponse::BadRequest()
             .json(json!({"error": "duplicate_entity_id is required"}));
     }
-    merge_proxy(state, path.into_inner(), duplicate_id.to_owned(), true).await
+    merge_proxy(
+        request,
+        state,
+        path.into_inner(),
+        duplicate_id.to_owned(),
+        true,
+    )
+    .await
 }
 
 async fn merge_proxy(
+    request: HttpRequest,
     state: web::Data<AppState>,
     entity_id: String,
     duplicate_id: String,
     commit: bool,
 ) -> HttpResponse {
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -221,11 +259,12 @@ async fn merge_proxy(
 }
 
 async fn set_memory_entity(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
     attached: bool,
 ) -> HttpResponse {
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -260,37 +299,48 @@ async fn set_memory_entity(
     }
 }
 
-pub async fn attach(state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
-    set_memory_entity(state, path, true).await
+pub async fn attach(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> HttpResponse {
+    set_memory_entity(request, state, path, true).await
 }
 
-pub async fn detach(state: web::Data<AppState>, path: web::Path<(String, String)>) -> HttpResponse {
-    set_memory_entity(state, path, false).await
+pub async fn detach(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> HttpResponse {
+    set_memory_entity(request, state, path, false).await
 }
 
 pub async fn promote_relationship(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<Value>,
 ) -> HttpResponse {
-    relationship_write(state, path.into_inner(), body.into_inner(), false).await
+    relationship_write(request, state, path.into_inner(), body.into_inner(), false).await
 }
 
 pub async fn update_relationship(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<Value>,
 ) -> HttpResponse {
-    relationship_write(state, path.into_inner(), body.into_inner(), true).await
+    relationship_write(request, state, path.into_inner(), body.into_inner(), true).await
 }
 
 async fn relationship_write(
+    request: HttpRequest,
     state: web::Data<AppState>,
     entity_id: String,
     mut body: Value,
     update: bool,
 ) -> HttpResponse {
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -333,10 +383,11 @@ async fn relationship_write(
 }
 
 pub async fn remove_relationship(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };

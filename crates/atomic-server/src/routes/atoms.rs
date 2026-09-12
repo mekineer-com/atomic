@@ -1,11 +1,11 @@
 //! Atom and Tag CRUD routes
 
 use crate::db_extractor::Db;
-use crate::error::{ApiErrorResponse, ok_or_error};
+use crate::error::{ok_or_error, ApiErrorResponse};
 use crate::event_bridge::embedding_event_callback;
 use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
-use actix_web::{HttpResponse, web};
+use actix_web::{web, HttpRequest, HttpResponse};
 use atomic_core::{
     AtomLink, AtomWithTags, BulkCreateResult, PaginatedAtoms, PaginatedTagChildren, SourceInfo,
     Tag, TagWithCount,
@@ -89,11 +89,16 @@ fn parse_kinds(raw: Option<&str>) -> Result<atomic_core::models::KindFilter, Htt
     tag = "atoms",
 )]
 pub async fn get_atoms(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     query: web::Query<GetAtomsQuery>,
 ) -> HttpResponse {
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         let client = match memu_proxy::client() {
             Ok(client) => client,
             Err(response) => return response,
@@ -256,10 +261,15 @@ pub async fn get_source_list(state: web::Data<AppState>, db: Db) -> HttpResponse
     ),
     tag = "atoms",
 )]
-pub async fn get_atom(state: web::Data<AppState>, db: Db, path: web::Path<String>) -> HttpResponse {
+pub async fn get_atom(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    db: Db,
+    path: web::Path<String>,
+) -> HttpResponse {
     let id = path.into_inner();
     if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
-        let config = match memu_proxy::session(&state) {
+        let config = match memu_proxy::session(&state, &request).await {
             Ok(config) => config,
             Err(response) => return response,
         };
@@ -654,11 +664,16 @@ pub struct GetTagChildrenQuery {
     tag = "tags",
 )]
 pub async fn get_tags(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     query: web::Query<GetTagsQuery>,
 ) -> HttpResponse {
-    if let Some(config) = state.memu_session.clone() {
+    if state.memu_session.is_some() {
+        let config = match memu_proxy::session(&state, &request).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
         let client = match memu_proxy::client() {
             Ok(client) => client,
             Err(response) => return response,

@@ -79,8 +79,6 @@ impl SetupClaimLimiter {
 #[derive(Clone)]
 pub struct MemuSessionConfig {
     pub base_url: String,
-    pub user_id: String,
-    pub soul_id: String,
 }
 
 /// Shared application state for all route handlers
@@ -286,6 +284,32 @@ pub enum ServerEvent {
         conversation_id: String,
         error: String,
     },
+}
+
+impl ServerEvent {
+    pub fn conversation_id(&self) -> Option<&str> {
+        match self {
+            Self::ChatStreamDelta {
+                conversation_id, ..
+            }
+            | Self::ChatToolStart {
+                conversation_id, ..
+            }
+            | Self::ChatToolComplete {
+                conversation_id, ..
+            }
+            | Self::ChatComplete {
+                conversation_id, ..
+            }
+            | Self::ChatCanvasAction {
+                conversation_id, ..
+            }
+            | Self::ChatError {
+                conversation_id, ..
+            } => Some(conversation_id),
+            _ => None,
+        }
+    }
 }
 
 impl From<atomic_core::EmbeddingEvent> for ServerEvent {

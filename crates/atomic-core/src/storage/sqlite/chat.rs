@@ -10,13 +10,15 @@ impl SqliteStorage {
         &self,
         tag_ids: &[String],
         title: Option<&str>,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<ConversationWithTags> {
         let conn = self
             .db
             .conn
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        crate::chat::create_conversation(&conn, tag_ids, title)
+        crate::chat::create_conversation(&conn, tag_ids, title, user_id, soul_id)
     }
 
     pub(crate) fn get_conversations_sync(
@@ -24,9 +26,11 @@ impl SqliteStorage {
         filter_tag_id: Option<&str>,
         limit: i32,
         offset: i32,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<Vec<ConversationWithTags>> {
         let conn = self.db.read_conn()?;
-        crate::chat::get_conversations(&conn, filter_tag_id, limit, offset)
+        crate::chat::get_conversations(&conn, filter_tag_id, limit, offset, user_id, soul_id)
     }
 
     pub(crate) fn get_conversation_sync(
@@ -187,12 +191,16 @@ impl ChatStore for SqliteStorage {
         &self,
         tag_ids: &[String],
         title: Option<&str>,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<ConversationWithTags> {
         let storage = self.clone();
         let tag_ids = tag_ids.to_vec();
         let title = title.map(|s| s.to_string());
+        let user_id = user_id.to_string();
+        let soul_id = soul_id.to_string();
         tokio::task::spawn_blocking(move || {
-            storage.create_conversation_sync(&tag_ids, title.as_deref())
+            storage.create_conversation_sync(&tag_ids, title.as_deref(), &user_id, &soul_id)
         })
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
@@ -203,11 +211,21 @@ impl ChatStore for SqliteStorage {
         filter_tag_id: Option<&str>,
         limit: i32,
         offset: i32,
+        user_id: &str,
+        soul_id: &str,
     ) -> StorageResult<Vec<ConversationWithTags>> {
         let storage = self.clone();
         let filter_tag_id = filter_tag_id.map(|s| s.to_string());
+        let user_id = user_id.to_string();
+        let soul_id = soul_id.to_string();
         tokio::task::spawn_blocking(move || {
-            storage.get_conversations_sync(filter_tag_id.as_deref(), limit, offset)
+            storage.get_conversations_sync(
+                filter_tag_id.as_deref(),
+                limit,
+                offset,
+                &user_id,
+                &soul_id,
+            )
         })
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?

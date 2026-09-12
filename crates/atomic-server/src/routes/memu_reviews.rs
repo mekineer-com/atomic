@@ -1,6 +1,6 @@
 use crate::routes::memu_proxy::{self, client, memu_json, memu_url, session};
 use crate::state::{AppState, ServerEvent};
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -30,8 +30,8 @@ pub async fn status(state: web::Data<AppState>) -> HttpResponse {
     HttpResponse::Ok().json(json!({"enabled": state.memu_session.is_some()}))
 }
 
-pub async fn list_pending(state: web::Data<AppState>) -> HttpResponse {
-    let config = match session(&state) {
+pub async fn list_pending(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -53,16 +53,22 @@ pub async fn list_pending(state: web::Data<AppState>) -> HttpResponse {
     }
 }
 
-pub async fn approve_memory(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    approve(state, "memory", &path.into_inner()).await
+pub async fn approve_memory(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    approve(request, state, "memory", &path.into_inner()).await
 }
 
 pub async fn approve_category(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<SummaryGuard>,
 ) -> HttpResponse {
     approve_summary(
+        request,
         state,
         "category",
         &path.into_inner(),
@@ -72,8 +78,13 @@ pub async fn approve_category(
     .await
 }
 
-async fn approve(state: web::Data<AppState>, kind: &str, id: &str) -> HttpResponse {
-    let config = match session(&state) {
+async fn approve(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    kind: &str,
+    id: &str,
+) -> HttpResponse {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -114,38 +125,57 @@ pub(super) fn updated_atom_response(state: &AppState, body: Value) -> HttpRespon
 }
 
 pub async fn update_memory(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<SummaryUpdate>,
 ) -> HttpResponse {
-    update(state, "memory", &path.into_inner(), body.into_inner()).await
+    update(
+        request,
+        state,
+        "memory",
+        &path.into_inner(),
+        body.into_inner(),
+    )
+    .await
 }
 
 pub async fn update_category(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<SummaryUpdate>,
 ) -> HttpResponse {
-    update(state, "category", &path.into_inner(), body.into_inner()).await
+    update(
+        request,
+        state,
+        "category",
+        &path.into_inner(),
+        body.into_inner(),
+    )
+    .await
 }
 
 pub async fn attach_category_memory(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
     body: web::Json<SummaryGuard>,
 ) -> HttpResponse {
-    set_category_memory(state, path.into_inner(), body.into_inner(), true).await
+    set_category_memory(request, state, path.into_inner(), body.into_inner(), true).await
 }
 
 pub async fn detach_category_memory(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<(String, String)>,
     body: web::Json<SummaryGuard>,
 ) -> HttpResponse {
-    set_category_memory(state, path.into_inner(), body.into_inner(), false).await
+    set_category_memory(request, state, path.into_inner(), body.into_inner(), false).await
 }
 
 async fn set_category_memory(
+    request: HttpRequest,
     state: web::Data<AppState>,
     (category_id, memory_id): (String, String),
     body: SummaryGuard,
@@ -154,7 +184,7 @@ async fn set_category_memory(
     if body.summaries_revision.is_none() || body.displayed_summary.is_none() {
         return HttpResponse::BadRequest().json(json!({"error": "summary snapshot is required"}));
     }
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -191,6 +221,7 @@ async fn set_category_memory(
 }
 
 async fn update(
+    request: HttpRequest,
     state: web::Data<AppState>,
     kind: &str,
     id: &str,
@@ -204,7 +235,7 @@ async fn update(
     {
         return HttpResponse::BadRequest().json(json!({"error": "no changes supplied"}));
     }
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -253,6 +284,7 @@ async fn update(
 }
 
 pub async fn update_soul_summary(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<SummaryUpdate>,
@@ -261,7 +293,7 @@ pub async fn update_soul_summary(
     if body.summary.is_none() {
         return HttpResponse::BadRequest().json(json!({"error": "summary is required"}));
     }
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -292,11 +324,13 @@ pub async fn update_soul_summary(
 }
 
 pub async fn approve_soul_summary(
+    request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
     body: web::Json<SummaryGuard>,
 ) -> HttpResponse {
     approve_summary(
+        request,
         state,
         "soul-summary",
         &path.into_inner(),
@@ -307,13 +341,14 @@ pub async fn approve_soul_summary(
 }
 
 async fn approve_summary(
+    request: HttpRequest,
     state: web::Data<AppState>,
     kind: &str,
     id: &str,
     body: SummaryGuard,
     atom_response: bool,
 ) -> HttpResponse {
-    let config = match session(&state) {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
@@ -343,8 +378,12 @@ async fn approve_summary(
     }
 }
 
-pub async fn delete_memory(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
-    let config = match session(&state) {
+pub async fn delete_memory(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
     };
