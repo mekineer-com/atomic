@@ -105,17 +105,26 @@ async fn approve(
     )
     .await
     {
-        Ok(body) => updated_atom_response(&state, body),
+        Ok(body) => updated_atom_response(&state, body, &config),
         Err(response) => response,
     }
 }
 
-pub(super) fn updated_atom_response(state: &AppState, body: Value) -> HttpResponse {
+pub(super) fn updated_atom_response(
+    state: &AppState,
+    body: Value,
+    scope: &memu_proxy::MemuScope,
+) -> HttpResponse {
     let revision = body.get("summaries_revision").cloned();
     let mut atom_value = memu_proxy::atom_from_node(&body);
     if memu_proxy::is_memu_id(body["id"].as_str().unwrap_or_default()) {
         if let Ok(atom) = serde_json::from_value::<atomic_core::AtomWithTags>(atom_value.clone()) {
-            let _ = state.event_tx.send(ServerEvent::AtomUpdated { atom });
+            let _ = state.event_tx.send(ServerEvent::AtomUpdated {
+                atom,
+                user_id: Some(scope.user_id.clone()),
+                soul_id: Some(scope.soul_id.clone()),
+                database_id: None,
+            });
         }
     }
     if let (Some(revision), Some(response)) = (revision, atom_value.as_object_mut()) {
@@ -215,7 +224,7 @@ async fn set_category_memory(
     )
     .await
     {
-        Ok(body) => updated_atom_response(&state, body),
+        Ok(body) => updated_atom_response(&state, body, &config),
         Err(response) => response,
     }
 }
@@ -278,7 +287,7 @@ async fn update(
     )
     .await
     {
-        Ok(body) => updated_atom_response(&state, body),
+        Ok(body) => updated_atom_response(&state, body, &config),
         Err(response) => response,
     }
 }
@@ -372,7 +381,7 @@ async fn approve_summary(
     )
     .await
     {
-        Ok(body) if atom_response => updated_atom_response(&state, body),
+        Ok(body) if atom_response => updated_atom_response(&state, body, &config),
         Ok(body) => HttpResponse::Ok().json(body),
         Err(response) => response,
     }

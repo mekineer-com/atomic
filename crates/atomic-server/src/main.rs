@@ -658,8 +658,12 @@ async fn run_server(
                                     {
                                         match core_clone.get_atom(&finding_atom_id).await {
                                             Ok(Some(atom)) => {
-                                                let _ =
-                                                    run_tx.send(ServerEvent::AtomCreated { atom });
+                                                let _ = run_tx.send(ServerEvent::AtomCreated {
+                                                    atom,
+                                                    user_id: None,
+                                                    soul_id: None,
+                                                    database_id: None,
+                                                });
                                             }
                                             Ok(None) => tracing::warn!(
                                                 report_id = %report.id,

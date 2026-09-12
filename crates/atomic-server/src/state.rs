@@ -200,9 +200,15 @@ pub enum ServerEvent {
     // Atom lifecycle events
     AtomCreated {
         atom: atomic_core::AtomWithTags,
+        user_id: Option<String>,
+        soul_id: Option<String>,
+        database_id: Option<String>,
     },
     AtomUpdated {
         atom: atomic_core::AtomWithTags,
+        user_id: Option<String>,
+        soul_id: Option<String>,
+        database_id: Option<String>,
     },
 
     /// The per-DB `dashboard.featured_report_id` pointer changed.
@@ -333,11 +339,30 @@ impl ServerEvent {
             | Self::ChatComplete { database_id, .. }
             | Self::ChatCanvasAction { database_id, .. }
             | Self::ChatError { database_id, .. } => Some(database_id),
+            Self::AtomCreated { database_id, .. } | Self::AtomUpdated { database_id, .. } => {
+                database_id.as_deref()
+            }
             _ => None,
         }
     }
 
-    pub fn from_chat(event: atomic_core::ChatEvent, database_id: String) -> Self {
+    pub fn owner(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::AtomCreated {
+                user_id, soul_id, ..
+            }
+            | Self::AtomUpdated {
+                user_id, soul_id, ..
+            } => Some((user_id.as_deref()?, soul_id.as_deref()?)),
+            _ => None,
+        }
+    }
+
+    pub fn from_chat(
+        event: atomic_core::ChatEvent,
+        database_id: String,
+        owner: Option<(String, String)>,
+    ) -> Self {
         match event {
             atomic_core::ChatEvent::StreamDelta {
                 conversation_id,
@@ -387,8 +412,18 @@ impl ServerEvent {
                 action,
                 params,
             },
-            atomic_core::ChatEvent::AtomCreated { atom, .. } => Self::AtomCreated { atom },
-            atomic_core::ChatEvent::AtomUpdated { atom, .. } => Self::AtomUpdated { atom },
+            atomic_core::ChatEvent::AtomCreated { atom, .. } => Self::AtomCreated {
+                atom,
+                user_id: owner.as_ref().map(|(user_id, _)| user_id.clone()),
+                soul_id: owner.as_ref().map(|(_, soul_id)| soul_id.clone()),
+                database_id: Some(database_id),
+            },
+            atomic_core::ChatEvent::AtomUpdated { atom, .. } => Self::AtomUpdated {
+                atom,
+                user_id: owner.as_ref().map(|(user_id, _)| user_id.clone()),
+                soul_id: owner.as_ref().map(|(_, soul_id)| soul_id.clone()),
+                database_id: Some(database_id),
+            },
             atomic_core::ChatEvent::AtomPipelineEvent { event, .. } => Self::from(event),
             atomic_core::ChatEvent::Error {
                 conversation_id,
@@ -617,7 +652,7 @@ mod tests {
             conversation_id: "c1".into(),
             content: "hello".into(),
         };
-        match ServerEvent::from_chat(event, "default".into()) {
+        match ServerEvent::from_chat(event, "default".into(), None) {
             ServerEvent::ChatStreamDelta {
                 conversation_id,
                 content,
@@ -639,7 +674,7 @@ mod tests {
             tool_name: "search".into(),
             tool_input: serde_json::json!({"query": "test"}),
         };
-        match ServerEvent::from_chat(event, "default".into()) {
+        match ServerEvent::from_chat(event, "default".into(), None) {
             ServerEvent::ChatToolStart {
                 conversation_id,
                 tool_name,
@@ -660,7 +695,7 @@ mod tests {
             conversation_id: "c3".into(),
             error: "api failed".into(),
         };
-        match ServerEvent::from_chat(event, "default".into()) {
+        match ServerEvent::from_chat(event, "default".into(), None) {
             ServerEvent::ChatError {
                 conversation_id,
                 error,

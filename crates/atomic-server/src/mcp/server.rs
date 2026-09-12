@@ -198,6 +198,9 @@ impl AtomicMcpServer {
         // Broadcast atom creation event
         let _ = self.event_tx.send(ServerEvent::AtomCreated {
             atom: result.clone(),
+            user_id: None,
+            soul_id: None,
+            database_id: None,
         });
 
         let response = AtomResponse {

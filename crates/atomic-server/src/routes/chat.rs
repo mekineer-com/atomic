@@ -635,7 +635,10 @@ pub async fn send_chat_message(
         Ok(guard) => guard,
         Err(response) => return response,
     };
-    let on_event = chat_event_callback(state.event_tx.clone(), db.1.clone());
+    let event_owner = memu_session
+        .as_ref()
+        .map(|scope| (scope.user_id.clone(), scope.soul_id.clone()));
+    let on_event = chat_event_callback(state.event_tx.clone(), db.1.clone(), event_owner);
     let result = if let Some(memu_session) = memu_session {
         let settings = match fetch_atomic_chat_profile(&memu_session).await {
             Ok(settings) => settings,
@@ -715,7 +718,11 @@ pub async fn end_memu_session(
             Ok(settings) => settings,
             Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
         };
-        let on_event = chat_event_callback(state.event_tx.clone(), db.1.clone());
+        let on_event = chat_event_callback(
+            state.event_tx.clone(),
+            db.1.clone(),
+            Some((memu_session.user_id.clone(), memu_session.soul_id.clone())),
+        );
         let recap_prompt = atomic_recap_prompt(&memu_session.user_id, &transcript_before_recap);
         if let Err(e) =
             db.0.send_chat_message_with_external_settings(

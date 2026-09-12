@@ -273,7 +273,12 @@ pub async fn run_report_now(
                 // loop emits in `atomic-server::main`.
                 if let atomic_core::reports::RunOutcome::Succeeded { finding_atom_id } = outcome {
                     if let Ok(Some(atom)) = core.get_atom(&finding_atom_id).await {
-                        let _ = event_tx.send(ServerEvent::AtomCreated { atom });
+                        let _ = event_tx.send(ServerEvent::AtomCreated {
+                            atom,
+                            user_id: None,
+                            soul_id: None,
+                            database_id: None,
+                        });
                     }
                 }
             }

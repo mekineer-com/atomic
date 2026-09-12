@@ -30,9 +30,14 @@ pub fn ingestion_event_callback(
 pub fn chat_event_callback(
     tx: broadcast::Sender<ServerEvent>,
     database_id: String,
+    owner: Option<(String, String)>,
 ) -> impl Fn(atomic_core::ChatEvent) + Send + Sync + 'static {
     move |event: atomic_core::ChatEvent| {
-        let _ = tx.send(ServerEvent::from_chat(event, database_id.clone()));
+        let _ = tx.send(ServerEvent::from_chat(
+            event,
+            database_id.clone(),
+            owner.clone(),
+        ));
     }
 }
 

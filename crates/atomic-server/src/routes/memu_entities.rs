@@ -294,7 +294,7 @@ async fn set_memory_entity(
     }
     .query(&scope_query(&config));
     match memu_json(request, "memU entity assignment").await {
-        Ok(body) => updated_atom_response(&state, body),
+        Ok(body) => updated_atom_response(&state, body, &config),
         Err(response) => response,
     }
 }

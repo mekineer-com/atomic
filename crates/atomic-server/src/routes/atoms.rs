@@ -446,7 +446,12 @@ pub async fn create_atom(
         .await
     {
         Ok(Some(atom)) => {
-            let _ = event_tx.send(ServerEvent::AtomCreated { atom: atom.clone() });
+            let _ = event_tx.send(ServerEvent::AtomCreated {
+                atom: atom.clone(),
+                user_id: None,
+                soul_id: None,
+                database_id: None,
+            });
             HttpResponse::Created().json(atom)
         }
         Ok(None) => HttpResponse::Ok().json(serde_json::json!({"skipped": true})),
@@ -488,7 +493,12 @@ pub async fn bulk_create_atoms(
     match db.0.create_atoms_bulk(requests, on_event).await {
         Ok(result) => {
             for atom in &result.atoms {
-                let _ = event_tx.send(ServerEvent::AtomCreated { atom: atom.clone() });
+                let _ = event_tx.send(ServerEvent::AtomCreated {
+                    atom: atom.clone(),
+                    user_id: None,
+                    soul_id: None,
+                    database_id: None,
+                });
             }
             HttpResponse::Created().json(result)
         }
@@ -549,7 +559,12 @@ pub async fn update_atom(
         .await
     {
         Ok(atom) => {
-            let _ = event_tx.send(ServerEvent::AtomUpdated { atom: atom.clone() });
+            let _ = event_tx.send(ServerEvent::AtomUpdated {
+                atom: atom.clone(),
+                user_id: None,
+                soul_id: None,
+                database_id: None,
+            });
             HttpResponse::Ok().json(atom)
         }
         Err(e) => crate::error::error_response(e),

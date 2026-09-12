@@ -262,6 +262,19 @@ pub fn readonly() -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::test::TestRequest;
+
+    #[test]
+    fn identity_header_decodes_reserved_and_unicode_characters() {
+        let request = TestRequest::default()
+            .insert_header(("X-OpenAlma-User", "Fictional%20%26%20%2B%20%E9%9B%AA"))
+            .to_http_request();
+
+        assert_eq!(
+            identity_header(&request, "X-OpenAlma-User").unwrap(),
+            "Fictional & + \u{96ea}"
+        );
+    }
 
     #[test]
     fn memu_boundary_encodes_segments_and_normalizes_entity_arrays() {

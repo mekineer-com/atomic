@@ -55,35 +55,41 @@ pub async fn ws_handler(
             match rx.recv().await {
                 Ok(event) => {
                     if let Some(scope) = scope.as_ref() {
-                        let Some((conversation_id, database_id)) =
-                            event.conversation_id().zip(event.database_id())
-                        else {
-                            continue;
-                        };
                         let selected_database =
                             fixed_database.clone().or_else(|| manager.active_id().ok());
-                        if selected_database.as_deref() != Some(database_id) {
+                        if event.database_id().is_some()
+                            && event.database_id() != selected_database.as_deref()
+                        {
                             continue;
                         }
-                        let key = (database_id.to_string(), conversation_id.to_string());
-                        let owned = if let Some(owned) = ownership.get(&key) {
-                            *owned
-                        } else {
-                            let Ok(core) = manager.get_core(database_id).await else {
-                                continue;
+                        if let Some((conversation_id, database_id)) =
+                            event.conversation_id().zip(event.database_id())
+                        {
+                            let key = (database_id.to_string(), conversation_id.to_string());
+                            let owned = if let Some(owned) = ownership.get(&key) {
+                                *owned
+                            } else {
+                                let Ok(core) = manager.get_core(database_id).await else {
+                                    continue;
+                                };
+                                let Ok(Some(conv)) = core.get_conversation(conversation_id).await
+                                else {
+                                    continue;
+                                };
+                                let owned = conv.conversation.user_id.as_deref()
+                                    == Some(scope.user_id.as_str())
+                                    && conv.conversation.soul_id.as_deref()
+                                        == Some(scope.soul_id.as_str());
+                                ownership.insert(key, owned);
+                                owned
                             };
-                            let Ok(Some(conv)) = core.get_conversation(conversation_id).await
-                            else {
+                            if !owned {
                                 continue;
-                            };
-                            let owned = conv.conversation.user_id.as_deref()
-                                == Some(scope.user_id.as_str())
-                                && conv.conversation.soul_id.as_deref()
-                                    == Some(scope.soul_id.as_str());
-                            ownership.insert(key, owned);
-                            owned
-                        };
-                        if !owned {
+                            }
+                        } else if event.owner()
+                            != Some((scope.user_id.as_str(), scope.soul_id.as_str()))
+                        {
+                            // Integrated sockets deny events without explicit provenance.
                             continue;
                         }
                     }
