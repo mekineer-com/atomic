@@ -1094,10 +1094,22 @@ impl Database {
 
         // V23: legacy rows remain unowned because their creation identity is unknowable.
         if version < 23 {
+            for column in ["user_id", "soul_id"] {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT 1 FROM pragma_table_info('conversations') WHERE name = ?1",
+                        [column],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if !exists {
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE conversations ADD COLUMN {column} TEXT;"
+                    ))?;
+                }
+            }
             conn.execute_batch(&format!(
-                "ALTER TABLE conversations ADD COLUMN user_id TEXT;
-                 ALTER TABLE conversations ADD COLUMN soul_id TEXT;
-                 CREATE INDEX idx_conversations_owner
+                "CREATE INDEX IF NOT EXISTS idx_conversations_owner
                      ON conversations(user_id, soul_id, updated_at DESC);
                  PRAGMA user_version = {};",
                 Self::LATEST_VERSION,

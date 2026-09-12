@@ -200,7 +200,7 @@ mod tests {
         ));
     }
 
-    async fn test_app_state() -> (web::Data<AppState>, String) {
+    async fn test_app_state(integrated: bool) -> (web::Data<AppState>, String) {
         let temp = tempfile::TempDir::new().unwrap();
         let manager = std::sync::Arc::new(atomic_core::DatabaseManager::new(temp.path()).unwrap());
         let (info, raw_token) = manager
@@ -216,7 +216,9 @@ mod tests {
             event_tx,
             public_url: None,
             log_buffer: crate::log_buffer::LogBuffer::new(16),
-            memu_session: None,
+            memu_session: integrated.then(|| crate::state::MemuSessionConfig {
+                base_url: "http://127.0.0.1:8099".to_string(),
+            }),
             export_jobs: crate::export_jobs::ExportJobManager::for_tests(
                 temp.path().join("exports"),
             ),
@@ -233,7 +235,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_valid_bearer_token() {
-        let (state, raw_token) = test_app_state().await;
+        let (state, raw_token) = test_app_state(false).await;
         let app = actix_test::init_service(
             App::new().service(
                 web::scope("/api")
@@ -255,7 +257,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_missing_auth_header() {
-        let (state, _) = test_app_state().await;
+        let (state, _) = test_app_state(false).await;
         let app = actix_test::init_service(
             App::new().service(
                 web::scope("/api")
@@ -274,7 +276,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_wrong_bearer_token() {
-        let (state, _) = test_app_state().await;
+        let (state, _) = test_app_state(false).await;
         let app = actix_test::init_service(
             App::new().service(
                 web::scope("/api")
@@ -296,7 +298,7 @@ mod tests {
 
     #[actix_web::test]
     async fn test_revoked_token_rejected() {
-        let (state, raw_token) = test_app_state().await;
+        let (state, raw_token) = test_app_state(false).await;
 
         // Get the token ID and revoke it
         let core = state.manager.active_core().await.unwrap();
@@ -322,5 +324,32 @@ mod tests {
             .to_request();
         let resp = actix_test::try_call_service(&app, req).await;
         assert!(resp.is_err());
+    }
+
+    #[actix_web::test]
+    async fn integrated_mode_blocks_local_route_after_authentication() {
+        let (state, raw_token) = test_app_state(true).await;
+        let app = actix_test::init_service(
+            App::new().service(
+                web::scope("/api")
+                    .wrap(BearerAuth {
+                        state: state.clone(),
+                    })
+                    .route("/wiki", web::get().to(protected_endpoint)),
+            ),
+        )
+        .await;
+
+        let request = actix_test::TestRequest::get()
+            .uri("/api/wiki")
+            .insert_header(("Authorization", format!("Bearer {raw_token}")))
+            .to_request();
+        let error = actix_test::try_call_service(&app, request)
+            .await
+            .expect_err("local route must be blocked");
+        assert_eq!(
+            error.as_response_error().status_code(),
+            actix_web::http::StatusCode::CONFLICT
+        );
     }
 }
