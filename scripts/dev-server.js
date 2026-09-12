@@ -24,9 +24,10 @@
  * Both processes are killed together on Ctrl+C.
  */
 
-import { spawn, execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { spawn, spawnSync, execSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -37,6 +38,7 @@ const rawArgs = process.argv.slice(2);
 let usePostgres = false;
 let noDocker = false;
 let databaseUrl = null;
+let production = false;
 const forwardArgs = [];
 
 for (let i = 0; i < rawArgs.length; i++) {
@@ -48,6 +50,8 @@ for (let i = 0; i < rawArgs.length; i++) {
   } else if (arg === '--database-url') {
     databaseUrl = rawArgs[++i];
     usePostgres = true;
+  } else if (arg === '--production') {
+    production = true;
   } else {
     forwardArgs.push(arg);
   }
@@ -63,7 +67,7 @@ if (usePostgres && !databaseUrl) {
 const hasServeSubcommand = forwardArgs.includes('serve');
 const serverArgs = hasServeSubcommand
   ? forwardArgs
-  : [...forwardArgs, 'serve', '--bind', '0.0.0.0'];
+  : [...forwardArgs, 'serve', '--bind', production ? '127.0.0.1' : '0.0.0.0'];
 
 const hasSetupBypassEnv = Object.prototype.hasOwnProperty.call(
   process.env,
@@ -71,6 +75,7 @@ const hasSetupBypassEnv = Object.prototype.hasOwnProperty.call(
 );
 
 if (
+  !production &&
   !hasSetupBypassEnv &&
   !serverArgs.includes('--setup-token') &&
   !serverArgs.includes('--dangerously-skip-setup-token')
@@ -89,6 +94,7 @@ if (usePostgres) {
 
 const children = [];
 let dockerStarted = false;
+let stopping = false;
 
 function startProcess(name, command, args, opts = {}) {
   const proc = spawn(command, args, {
@@ -114,6 +120,10 @@ function startProcess(name, command, args, opts = {}) {
 
   proc.on('exit', (code) => {
     console.log(`\x1b[90m[${prefix}] exited (code ${code})\x1b[0m`);
+    if (!stopping) {
+      cleanup();
+      process.exitCode = code || 1;
+    }
   });
 
   children.push(proc);
@@ -172,6 +182,44 @@ if (serverBin && !existsSync(serverBin)) {
   console.error(`Atomic server binary not found: ${serverBin}`);
   process.exit(1);
 }
+if (production && !serverBin) {
+  console.error('ATOMIC_SERVER_BIN is required in production mode');
+  process.exit(1);
+}
+
+if (production) {
+  const newestMtime = (path) => {
+    const stat = statSync(path);
+    return stat.isDirectory()
+      ? Math.max(stat.mtimeMs, ...readdirSync(path).map((name) => newestMtime(join(path, name))))
+      : stat.mtimeMs;
+  };
+  const sourcePaths = ['Cargo.toml', 'Cargo.lock', 'crates/atomic-core/Cargo.toml', 'crates/atomic-core/src', 'crates/atomic-server/Cargo.toml', 'crates/atomic-server/src'];
+  if (sourcePaths.some((path) => newestMtime(resolve(root, path)) > statSync(serverBin).mtimeMs)) {
+    console.warn(`Atomic Rust source is newer than ${serverBin}; rebuild the server profile.`);
+  }
+
+  const stateRoot = process.env.XDG_STATE_HOME
+    || (process.platform === 'win32' ? process.env.LOCALAPPDATA : join(homedir(), '.local', 'state'));
+  const tokenFile = join(stateRoot, 'openalma', 'atomic-token');
+  mkdirSync(dirname(tokenFile), { recursive: true });
+  let token = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '';
+  if (!token) {
+    const result = spawnSync(serverBin, ['token', 'create', '--name', 'openalma-launcher'], { cwd: root, encoding: 'utf8' });
+    token = result.stdout.match(/Token:\s*(\S+)/)?.[1] || '';
+    if (!token) {
+      console.error(result.stderr || 'Atomic token creation failed');
+      process.exit(1);
+    }
+    writeFileSync(tokenFile, `${token}\n`, { mode: 0o600 });
+  }
+  const portIndex = serverArgs.indexOf('--port');
+  const apiPort = portIndex >= 0 ? serverArgs[portIndex + 1] : '8080';
+  process.env.VITE_ATOMIC_SERVER_URL = `http://127.0.0.1:${apiPort}`;
+  process.env.VITE_ATOMIC_AUTH_TOKEN = token;
+  process.env.MEMU_SERVER_URL ||= 'http://127.0.0.1:8099';
+  process.env.RUST_LOG ||= 'warn,atomic_server=warn,atomic_core=warn';
+}
 const serverCommand = serverBin || 'cargo';
 const serverCommandArgs = serverBin
   ? serverArgs
@@ -180,13 +228,15 @@ const serverCommandArgs = serverBin
 startProcess('api', serverCommand, serverCommandArgs, { color: '\x1b[36m' });
 
 // Start Vite dev server in web mode
-startProcess('web', 'npx', ['vite', '--host'], {
+startProcess('web', process.execPath, [resolve(root, 'node_modules/vite/bin/vite.js'), '--host', production ? '127.0.0.1' : '0.0.0.0'], {
   env: { VITE_BUILD_TARGET: 'web' },
   color: '\x1b[32m',
 });
 
 // Clean shutdown on Ctrl+C
 function cleanup() {
+  if (stopping) return;
+  stopping = true;
   for (const child of children) {
     if (!child.killed) {
       child.kill('SIGTERM');
