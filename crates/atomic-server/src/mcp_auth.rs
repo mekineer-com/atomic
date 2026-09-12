@@ -135,6 +135,14 @@ where
                 let _ = core_clone.update_token_last_used(&token_id).await;
             });
 
+            if state.memu_session.is_some() {
+                return Ok(req
+                    .into_response(HttpResponse::Conflict().json(serde_json::json!({
+                        "error": "Local Atomic MCP is unavailable in OpenAlma mode"
+                    })))
+                    .map_into_right_body());
+            }
+
             svc.call(req).await.map(|res| res.map_into_left_body())
         })
     }

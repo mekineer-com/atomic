@@ -270,6 +270,7 @@ async fn run_server(
     let export_jobs = ExportJobManager::new(std::path::Path::new(data_dir).join("exports"))
         .expect("Failed to initialize export job manager");
 
+    let integrated_mode = memu_session.is_some();
     let app_state = web::Data::new(AppState {
         manager: Arc::clone(&manager),
         event_tx: event_tx.clone(),
@@ -327,7 +328,11 @@ async fn run_server(
 
     // Startup recovery: reset stuck atoms and process any pending work for ALL databases
     {
-        let (databases, _active_id) = manager.list_databases().await.unwrap_or_default();
+        let databases = if integrated_mode {
+            Vec::new()
+        } else {
+            manager.list_databases().await.unwrap_or_default().0
+        };
         for db_info in &databases {
             let db_core = match manager.get_core(&db_info.id).await {
                 Ok(c) => c,
@@ -390,7 +395,11 @@ async fn run_server(
     // never finds a half-migrated DB. A failure in one DB logs and skips
     // that DB; we deliberately do not abort startup on a per-DB error.
     {
-        let (databases, _) = manager.list_databases().await.unwrap_or_default();
+        let databases = if integrated_mode {
+            Vec::new()
+        } else {
+            manager.list_databases().await.unwrap_or_default().0
+        };
         for db_info in &databases {
             let core = match manager.get_core(&db_info.id).await {
                 Ok(c) => c,
@@ -434,6 +443,9 @@ async fn run_server(
     {
         let warm_manager = Arc::clone(&manager);
         tokio::spawn(async move {
+            if integrated_mode {
+                return;
+            }
             let (databases, _) = match warm_manager.list_databases().await {
                 Ok(d) => d,
                 Err(e) => {
@@ -476,6 +488,9 @@ async fn run_server(
         let poll_manager = Arc::clone(&manager);
         let poll_tx = event_tx.clone();
         tokio::spawn(async move {
+            if integrated_mode {
+                return;
+            }
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             interval.tick().await; // first tick fires immediately — skip it
             loop {
@@ -517,6 +532,9 @@ async fn run_server(
         let task_manager = Arc::clone(&manager);
         let task_tx = event_tx.clone();
         tokio::spawn(async move {
+            if integrated_mode {
+                return;
+            }
             let mut registry = atomic_core::scheduler::TaskRegistry::new();
             // DailyBriefingTask retired in phase 3 — the seeded Daily Briefing
             // report runs through the reports loop below, dispatched via the
@@ -582,6 +600,9 @@ async fn run_server(
         let reports_manager = Arc::clone(&manager);
         let reports_tx = event_tx.clone();
         tokio::spawn(async move {
+            if integrated_mode {
+                return;
+            }
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             interval.tick().await;
             loop {

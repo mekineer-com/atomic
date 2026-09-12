@@ -164,7 +164,8 @@ pub async fn find_similar(
             Err(response) => return response,
         };
         if !memu_proxy::is_memu_id(&atom_id) {
-            return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "memU atom not found"}));
         }
         return memu_find_similar(config, &atom_id, limit, threshold).await;
     }

@@ -28,7 +28,7 @@ pub async fn save_positions(
 ) -> HttpResponse {
     let positions = body.into_inner();
     if state.memu_session.is_some() {
-        return HttpResponse::Ok().json(serde_json::json!({"status": "ok"}));
+        return memu_proxy::readonly();
     }
     match db.0.save_atom_positions(&positions).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "ok"})),

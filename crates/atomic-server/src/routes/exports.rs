@@ -71,6 +71,11 @@ pub async fn download_export(
     path: web::Path<String>,
     query: web::Query<DownloadQuery>,
 ) -> HttpResponse {
+    if state.memu_session.is_some() {
+        return HttpResponse::Conflict().json(serde_json::json!({
+            "error": "Local Atomic exports are unavailable in OpenAlma mode"
+        }));
+    }
     let artifact = match state
         .export_jobs
         .validate_download(&path.into_inner(), &query.token)

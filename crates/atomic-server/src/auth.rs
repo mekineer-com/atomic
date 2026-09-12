@@ -2,7 +2,8 @@
 
 use crate::state::AppState;
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
-use actix_web::error::ErrorUnauthorized;
+use actix_web::error::{ErrorConflict, ErrorUnauthorized};
+use actix_web::http::Method;
 use actix_web::web;
 use actix_web::Error;
 use futures::future::{ok, LocalBoxFuture, Ready};
@@ -37,6 +38,53 @@ pub struct BearerAuthMiddleware<S> {
     state: web::Data<AppState>,
 }
 
+fn integrated_api_allowed(method: &Method, path: &str) -> bool {
+    let get = method == Method::GET;
+    let post = method == Method::POST;
+
+    if path == "/api/conversations" || path.starts_with("/api/conversations/") {
+        return true;
+    }
+    if path.starts_with("/api/memu/") {
+        return true;
+    }
+    if (path == "/api/search" || path == "/api/search/global") && post {
+        return true;
+    }
+    if path == "/api/atoms" && get {
+        return true;
+    }
+    if path.starts_with("/api/atoms/")
+        && path != "/api/atoms/sources"
+        && path != "/api/atoms/link-suggestions"
+        && path != "/api/atoms/by-source-url"
+        && !path.ends_with("/embedding-status")
+        && get
+    {
+        return true;
+    }
+    if (path == "/api/tags" || path.starts_with("/api/tags/") && path.ends_with("/children")) && get
+    {
+        return true;
+    }
+    if (path == "/api/canvas/global" && get) || (path == "/api/canvas/rebuild" && post) {
+        return true;
+    }
+    if path.starts_with("/api/graph/neighborhood/") && get {
+        return true;
+    }
+
+    path == "/api/provider/verify"
+        || path == "/api/utils/sqlite-vec"
+        || path == "/api/settings"
+        || path.starts_with("/api/settings/")
+        || path.starts_with("/api/ollama/")
+        || path == "/api/auth/tokens"
+        || path.starts_with("/api/auth/tokens/")
+        || (path == "/api/databases" || path.starts_with("/api/databases/"))
+            && !path.contains("/exports/")
+}
+
 impl<S, B> Service<ServiceRequest> for BearerAuthMiddleware<S>
 where
     S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
@@ -52,6 +100,8 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let state = self.state.clone();
+        let blocked =
+            state.memu_session.is_some() && !integrated_api_allowed(req.method(), req.path());
 
         // Extract the Authorization header
         let raw_token = req
@@ -94,6 +144,12 @@ where
                 let _ = core_clone.update_token_last_used(&token_id).await;
             });
 
+            if blocked {
+                return Err(ErrorConflict(
+                    "Local Atomic knowledge is unavailable in OpenAlma mode",
+                ));
+            }
+
             fut.await
         })
     }
@@ -108,6 +164,40 @@ mod tests {
 
     async fn protected_endpoint() -> HttpResponse {
         HttpResponse::Ok().json(serde_json::json!({"ok": true}))
+    }
+
+    #[test]
+    fn integrated_mode_allows_only_scoped_data_and_instance_controls() {
+        assert!(integrated_api_allowed(
+            &Method::GET,
+            "/api/conversations/example"
+        ));
+        assert!(integrated_api_allowed(&Method::POST, "/api/search"));
+        assert!(integrated_api_allowed(
+            &Method::GET,
+            "/api/atoms/memory:example"
+        ));
+        assert!(integrated_api_allowed(&Method::GET, "/api/settings/models"));
+        assert!(integrated_api_allowed(
+            &Method::PUT,
+            "/api/databases/example/activate"
+        ));
+
+        assert!(!integrated_api_allowed(&Method::GET, "/api/wiki"));
+        assert!(!integrated_api_allowed(&Method::POST, "/api/reports"));
+        assert!(!integrated_api_allowed(
+            &Method::POST,
+            "/api/databases/example/exports/markdown"
+        ));
+        assert!(!integrated_api_allowed(
+            &Method::GET,
+            "/api/canvas/positions"
+        ));
+        assert!(!integrated_api_allowed(&Method::GET, "/api/graph/edges"));
+        assert!(!integrated_api_allowed(
+            &Method::GET,
+            "/api/atoms/by-source-url"
+        ));
     }
 
     async fn test_app_state() -> (web::Data<AppState>, String) {

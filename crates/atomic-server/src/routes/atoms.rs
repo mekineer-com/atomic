@@ -268,11 +268,15 @@ pub async fn get_atom(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+    if state.memu_session.is_some() {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(config) => config,
             Err(response) => return response,
         };
+        if !memu_proxy::is_memu_id(&id) {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "memU atom not found"}));
+        }
         let client = match memu_proxy::client() {
             Ok(client) => client,
             Err(response) => return response,
@@ -309,12 +313,20 @@ pub async fn get_atom(
     tag = "atoms",
 )]
 pub async fn get_atom_links(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
+    if state.memu_session.is_some() {
+        if let Err(response) = memu_proxy::session(&state, &request).await {
+            return response;
+        }
+        if !memu_proxy::is_memu_id(&id) {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "memU atom not found"}));
+        }
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     }
     ok_or_error(db.0.get_atom_links(&id).await)
@@ -712,13 +724,21 @@ pub async fn get_tags(
     tag = "tags",
 )]
 pub async fn get_tag_children(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
     query: web::Query<GetTagChildrenQuery>,
 ) -> HttpResponse {
     let parent_id = path.into_inner();
-    if state.memu_session.is_some() && parent_id.starts_with("category:") {
+    if state.memu_session.is_some() {
+        if let Err(response) = memu_proxy::session(&state, &request).await {
+            return response;
+        }
+        if !parent_id.starts_with("category:") {
+            return HttpResponse::NotFound()
+                .json(serde_json::json!({"error": "memU category not found"}));
+        }
         return HttpResponse::Ok().json(serde_json::json!({
             "children": [],
             "total": 0,
