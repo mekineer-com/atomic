@@ -194,6 +194,13 @@ impl SpawnArg for Option<&str> {
     }
 }
 
+impl SpawnArg for Option<(&str, &str)> {
+    type Owned = Option<(String, String)>;
+    fn into_spawn_arg(self) -> Self::Owned {
+        self.map(|(first, second)| (first.to_string(), second.to_string()))
+    }
+}
+
 // Nested-optional encoding for partial updates that distinguish "leave
 // unchanged" (outer None) from "clear" (Some(None)) from "set" (Some(Some)).
 impl SpawnArg for Option<Option<&str>> {
@@ -243,6 +250,14 @@ impl<'a> ReborrowArg<'a> for Option<String> {
     type Out = Option<&'a str>;
     fn reborrow_arg(&'a self) -> Option<&'a str> {
         self.as_deref()
+    }
+}
+
+impl<'a> ReborrowArg<'a> for Option<(String, String)> {
+    type Out = Option<(&'a str, &'a str)>;
+    fn reborrow_arg(&'a self) -> Self::Out {
+        self.as_ref()
+            .map(|(first, second)| (first.as_str(), second.as_str()))
     }
 }
 
@@ -521,9 +536,9 @@ dispatch! {
         => sqlite: vector_search_chunks_sync, pg_trait: SearchStore, pg_method: vector_search_chunks;
 
     // ---- ChatStore ----
-    fn create_conversation_sync(&self, tag_ids: &[String], title: Option<&str>, user_id: &str, soul_id: &str) -> Result<ConversationWithTags, AtomicCoreError>
+    fn create_conversation_sync(&self, tag_ids: &[String], title: Option<&str>, owner: Option<(&str, &str)>) -> Result<ConversationWithTags, AtomicCoreError>
         => sqlite: create_conversation_sync, pg_trait: ChatStore, pg_method: create_conversation;
-    fn get_conversations_sync(&self, filter_tag_id: Option<&str>, limit: i32, offset: i32, user_id: &str, soul_id: &str) -> Result<Vec<ConversationWithTags>, AtomicCoreError>
+    fn get_conversations_sync(&self, filter_tag_id: Option<&str>, limit: i32, offset: i32, owner: Option<(&str, &str)>) -> Result<Vec<ConversationWithTags>, AtomicCoreError>
         => sqlite: get_conversations_sync, pg_trait: ChatStore, pg_method: get_conversations;
     fn get_conversation_sync(&self, conversation_id: &str) -> Result<Option<ConversationWithMessages>, AtomicCoreError>
         => sqlite: get_conversation_sync, pg_trait: ChatStore, pg_method: get_conversation;

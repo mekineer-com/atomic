@@ -263,8 +263,7 @@ async fn test_conversation_lifecycle() {
         .create_conversation(
             &[tag.id.clone()],
             Some("Test Chat"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .await
         .unwrap();
@@ -275,12 +274,12 @@ async fn test_conversation_lifecycle() {
 
     // List conversations
     let convs = core
-        .get_conversations(None, 10, 0, "Fictional User", "Fictional Soul")
+        .get_conversations(None, 10, 0, Some(("Fictional User", "Fictional Soul")))
         .await
         .unwrap();
     assert_eq!(convs.len(), 1);
     assert!(core
-        .get_conversations(None, 10, 0, "Fictional User", "Other Soul")
+        .get_conversations(None, 10, 0, Some(("Fictional User", "Other Soul")))
         .await
         .unwrap()
         .is_empty());
@@ -458,7 +457,7 @@ async fn test_empty_database_queries() {
     assert_eq!(page.total_count, 0);
     assert!(core.get_source_list().await.unwrap().is_empty());
     assert!(core
-        .get_conversations(None, 10, 0, "Fictional User", "Fictional Soul")
+        .get_conversations(None, 10, 0, Some(("Fictional User", "Fictional Soul")))
         .await
         .unwrap()
         .is_empty());

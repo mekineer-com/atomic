@@ -152,11 +152,24 @@ fn conversation_matches(conv: &atomic_core::ConversationWithMessages, scope: &Me
         && conv.conversation.soul_id.as_deref() == Some(scope.soul_id.as_str())
 }
 
+async fn request_scope(
+    state: &web::Data<AppState>,
+    request: &HttpRequest,
+) -> Result<Option<MemuScope>, HttpResponse> {
+    if state.memu_session.is_none() {
+        return Ok(None);
+    }
+    memu_proxy::session(state, request).await.map(Some)
+}
+
 async fn require_conversation_owner(
     db: &Db,
     id: &str,
-    scope: &MemuScope,
+    scope: Option<&MemuScope>,
 ) -> Result<(), HttpResponse> {
+    let Some(scope) = scope else {
+        return Ok(());
+    };
     match db.0.get_conversation(id).await {
         Ok(Some(conv)) if conversation_matches(&conv, scope) => Ok(()),
         Ok(_) => {
@@ -319,7 +332,7 @@ pub async fn create_conversation(
     state: web::Data<AppState>,
     body: web::Json<CreateConversationBody>,
 ) -> HttpResponse {
-    let memu_session = match memu_proxy::session(&state, &request).await {
+    let memu_session = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -329,13 +342,18 @@ pub async fn create_conversation(
         .create_conversation(
             &req.tag_ids,
             req.title.as_deref(),
-            &memu_session.user_id,
-            &memu_session.soul_id,
+            memu_session
+                .as_ref()
+                .map(|scope| (scope.user_id.as_str(), scope.soul_id.as_str())),
         )
         .await
     {
         Ok(conv) => conv,
         Err(e) => return crate::error::error_response(e),
+    };
+
+    let Some(memu_session) = memu_session else {
+        return HttpResponse::Created().json(conv);
     };
 
     let conv_id = conv.conversation.id.clone();
@@ -385,7 +403,7 @@ pub async fn get_conversations(
     db: Db,
     query: web::Query<GetConversationsQuery>,
 ) -> HttpResponse {
-    let scope = match memu_proxy::session(&state, &request).await {
+    let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -396,8 +414,9 @@ pub async fn get_conversations(
             query.filter_tag_id.as_deref(),
             limit,
             offset,
-            &scope.user_id,
-            &scope.soul_id,
+            scope
+                .as_ref()
+                .map(|scope| (scope.user_id.as_str(), scope.soul_id.as_str())),
         )
         .await,
     )
@@ -410,13 +429,17 @@ pub async fn get_conversation(
     db: Db,
     path: web::Path<String>,
 ) -> HttpResponse {
-    let scope = match memu_proxy::session(&state, &request).await {
+    let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
     let id = path.into_inner();
     match db.0.get_conversation(&id).await {
-        Ok(Some(conv)) if conversation_matches(&conv, &scope) => {
+        Ok(Some(conv))
+            if scope
+                .as_ref()
+                .map_or(true, |scope| conversation_matches(&conv, scope)) =>
+        {
             HttpResponse::Ok().json(hide_system_messages(conv))
         }
         Ok(Some(_)) => {
@@ -446,11 +469,11 @@ pub async fn update_conversation(
     body: web::Json<UpdateConversationBody>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    let scope = match memu_proxy::session(&state, &request).await {
+    let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, &scope).await {
+    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
         return response;
     }
     let req = body.into_inner();
@@ -468,11 +491,11 @@ pub async fn delete_conversation(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    let scope = match memu_proxy::session(&state, &request).await {
+    let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, &scope).await {
+    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
         return response;
     }
     ok_or_error(db.0.delete_conversation(&id).await)
@@ -494,11 +517,11 @@ pub async fn set_conversation_scope(
     body: web::Json<SetScopeBody>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    let scope = match memu_proxy::session(&state, &request).await {
+    let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, &scope).await {
+    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
         return response;
     }
     let tag_ids = body.into_inner().tag_ids;
@@ -520,11 +543,11 @@ pub async fn add_tag_to_scope(
     body: web::Json<AddTagBody>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    let scope = match memu_proxy::session(&state, &request).await {
+    let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, &scope).await {
+    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
         return response;
     }
     let tag_id = body.into_inner().tag_id;
@@ -539,11 +562,11 @@ pub async fn remove_tag_from_scope(
     path: web::Path<(String, String)>,
 ) -> HttpResponse {
     let (id, tag_id) = path.into_inner();
-    let scope = match memu_proxy::session(&state, &request).await {
+    let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &id, &scope).await {
+    if let Err(response) = require_conversation_owner(&db, &id, scope.as_ref()).await {
         return response;
     }
     ok_or_error(db.0.remove_tag_from_scope(&id, &tag_id).await)
@@ -571,26 +594,27 @@ pub async fn send_chat_message(
 ) -> HttpResponse {
     let conversation_id = path.into_inner();
     let body = body.into_inner();
-    let memu_session = match memu_proxy::session(&state, &request).await {
+    let memu_session = match request_scope(&state, &request).await {
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = require_conversation_owner(&db, &conversation_id, &memu_session).await {
+    if let Err(response) =
+        require_conversation_owner(&db, &conversation_id, memu_session.as_ref()).await
+    {
         return response;
     }
     let _work = CONVERSATION_WORK.lock().await;
     let on_event = chat_event_callback(state.event_tx.clone());
-    let settings = match fetch_atomic_chat_profile(&memu_session).await {
-        Ok(settings) => settings,
-        Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
-    };
-    let memu_tools = atomic_core::MemuToolConfig {
-        base_url: memu_session.base_url,
-        user_id: memu_session.user_id,
-        soul_id: memu_session.soul_id,
-    };
-
-    let result =
+    let result = if let Some(memu_session) = memu_session {
+        let settings = match fetch_atomic_chat_profile(&memu_session).await {
+            Ok(settings) => settings,
+            Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+        };
+        let memu_tools = atomic_core::MemuToolConfig {
+            base_url: memu_session.base_url,
+            user_id: memu_session.user_id,
+            soul_id: memu_session.soul_id,
+        };
         db.0.send_chat_message_with_external_settings(
             &conversation_id,
             &body.content,
@@ -600,7 +624,20 @@ pub async fn send_chat_message(
             body.canvas_context,
             body.page_context,
         )
-        .await;
+        .await
+    } else if body.canvas_context.is_some() || body.page_context.is_some() {
+        db.0.send_chat_message_with_canvas(
+            &conversation_id,
+            &body.content,
+            on_event,
+            body.canvas_context,
+            body.page_context,
+        )
+        .await
+    } else {
+        db.0.send_chat_message(&conversation_id, &body.content, on_event)
+            .await
+    };
 
     match result {
         Ok(message) => HttpResponse::Ok().json(message),
@@ -624,7 +661,9 @@ pub async fn end_memu_session(
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"error": "conversation_id is required"}));
     }
-    if let Err(response) = require_conversation_owner(&db, conversation_id, &memu_session).await {
+    if let Err(response) =
+        require_conversation_owner(&db, conversation_id, Some(&memu_session)).await
+    {
         return response;
     }
     let _work = CONVERSATION_WORK.lock().await;

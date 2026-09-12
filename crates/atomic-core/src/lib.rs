@@ -2426,11 +2426,10 @@ impl AtomicCore {
         &self,
         tag_ids: &[String],
         title: Option<&str>,
-        user_id: &str,
-        soul_id: &str,
+        owner: Option<(&str, &str)>,
     ) -> Result<ConversationWithTags, AtomicCoreError> {
         self.storage
-            .create_conversation_sync(tag_ids, title, user_id, soul_id)
+            .create_conversation_sync(tag_ids, title, owner)
             .await
     }
 
@@ -2440,11 +2439,10 @@ impl AtomicCore {
         filter_tag_id: Option<&str>,
         limit: i32,
         offset: i32,
-        user_id: &str,
-        soul_id: &str,
+        owner: Option<(&str, &str)>,
     ) -> Result<Vec<ConversationWithTags>, AtomicCoreError> {
         self.storage
-            .get_conversations_sync(filter_tag_id, limit, offset, user_id, soul_id)
+            .get_conversations_sync(filter_tag_id, limit, offset, owner)
             .await
     }
 

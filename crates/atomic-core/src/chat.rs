@@ -384,8 +384,7 @@ pub fn create_conversation(
     conn: &Connection,
     tag_ids: &[String],
     title: Option<&str>,
-    user_id: &str,
-    soul_id: &str,
+    owner: Option<(&str, &str)>,
 ) -> Result<ConversationWithTags, AtomicCoreError> {
     let now = chrono::Utc::now().to_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
@@ -393,7 +392,14 @@ pub fn create_conversation(
     conn.execute(
         "INSERT INTO conversations (id, title, user_id, soul_id, created_at, updated_at, is_archived)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-        rusqlite::params![&id, &title, user_id, soul_id, &now, &now],
+        rusqlite::params![
+            &id,
+            &title,
+            owner.map(|(user_id, _)| user_id),
+            owner.map(|(_, soul_id)| soul_id),
+            &now,
+            &now
+        ],
     )?;
 
     for tag_id in tag_ids {
@@ -409,8 +415,8 @@ pub fn create_conversation(
         conversation: Conversation {
             id,
             title: title.map(String::from),
-            user_id: Some(user_id.to_string()),
-            soul_id: Some(soul_id.to_string()),
+            user_id: owner.map(|(user_id, _)| user_id.to_string()),
+            soul_id: owner.map(|(_, soul_id)| soul_id.to_string()),
             created_at: now.clone(),
             updated_at: now,
             is_archived: false,
@@ -427,15 +433,18 @@ pub fn get_conversations(
     filter_tag_id: Option<&str>,
     limit: i32,
     offset: i32,
-    user_id: &str,
-    soul_id: &str,
+    owner: Option<(&str, &str)>,
 ) -> Result<Vec<ConversationWithTags>, AtomicCoreError> {
+    let user_id = owner.map(|(user_id, _)| user_id);
+    let soul_id = owner.map(|(_, soul_id)| soul_id);
     let conversations: Vec<Conversation> = if let Some(tag_id) = filter_tag_id {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT c.id, c.title, c.user_id, c.soul_id, c.created_at, c.updated_at, c.is_archived
              FROM conversations c
              JOIN conversation_tags ct ON ct.conversation_id = c.id
-             WHERE ct.tag_id = ?1 AND c.user_id = ?2 AND c.soul_id = ?3 AND c.is_archived = 0
+             WHERE ct.tag_id = ?1
+               AND (?2 IS NULL OR (c.user_id = ?2 AND c.soul_id = ?3))
+               AND c.is_archived = 0
              ORDER BY c.updated_at DESC
              LIMIT ?4 OFFSET ?5",
         )?;
@@ -461,7 +470,7 @@ pub fn get_conversations(
         let mut stmt = conn.prepare(
             "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
              FROM conversations
-             WHERE user_id = ?1 AND soul_id = ?2 AND is_archived = 0
+             WHERE (?1 IS NULL OR (user_id = ?1 AND soul_id = ?2)) AND is_archived = 0
              ORDER BY updated_at DESC
              LIMIT ?3 OFFSET ?4",
         )?;
@@ -954,8 +963,7 @@ mod tests {
             &conn,
             &[],
             Some("Test Chat"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
         assert_eq!(result.conversation.title, Some("Test Chat".to_string()));
@@ -981,8 +989,7 @@ mod tests {
             &conn,
             &[tag_id.clone()],
             Some("Tagged Chat"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
         assert_eq!(result.tags.len(), 1);
@@ -998,22 +1005,44 @@ mod tests {
             &conn,
             &[],
             Some("Chat 1"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
         create_conversation(
             &conn,
             &[],
             Some("Chat 2"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
 
-        let conversations =
-            get_conversations(&conn, None, 10, 0, "Fictional User", "Fictional Soul").unwrap();
+        let conversations = get_conversations(
+            &conn,
+            None,
+            10,
+            0,
+            Some(("Fictional User", "Fictional Soul")),
+        )
+        .unwrap();
         assert_eq!(conversations.len(), 2);
+
+        create_conversation(&conn, &[], Some("Standalone"), None).unwrap();
+        assert_eq!(
+            get_conversations(&conn, None, 10, 0, None).unwrap().len(),
+            3
+        );
+        assert_eq!(
+            get_conversations(
+                &conn,
+                None,
+                10,
+                0,
+                Some(("Fictional User", "Fictional Soul"))
+            )
+            .unwrap()
+            .len(),
+            2
+        );
     }
 
     #[test]
@@ -1021,9 +1050,13 @@ mod tests {
         let (db, _temp) = setup_db();
         let conn = db.conn.lock().unwrap();
 
-        let conv =
-            create_conversation(&conn, &[], Some("Chat"), "Fictional User", "Fictional Soul")
-                .unwrap();
+        let conv = create_conversation(
+            &conn,
+            &[],
+            Some("Chat"),
+            Some(("Fictional User", "Fictional Soul")),
+        )
+        .unwrap();
         save_message(&conn, &conv.conversation.id, "user", "Hello").unwrap();
         save_message(&conn, &conv.conversation.id, "assistant", "Hi there!").unwrap();
 
@@ -1040,9 +1073,13 @@ mod tests {
         let (db, _temp) = setup_db();
         let conn = db.conn.lock().unwrap();
 
-        let conv =
-            create_conversation(&conn, &[], Some("Chat"), "Fictional User", "Fictional Soul")
-                .unwrap();
+        let conv = create_conversation(
+            &conn,
+            &[],
+            Some("Chat"),
+            Some(("Fictional User", "Fictional Soul")),
+        )
+        .unwrap();
         save_message(&conn, &conv.conversation.id, "system", "Hidden snapshot").unwrap();
         save_message(&conn, &conv.conversation.id, "user", "Visible user message").unwrap();
 
@@ -1051,8 +1088,14 @@ mod tests {
         assert_eq!(message_count, 1);
         assert_eq!(preview.as_deref(), Some("Visible user message"));
 
-        let conversations =
-            get_conversations(&conn, None, 10, 0, "Fictional User", "Fictional Soul").unwrap();
+        let conversations = get_conversations(
+            &conn,
+            None,
+            10,
+            0,
+            Some(("Fictional User", "Fictional Soul")),
+        )
+        .unwrap();
         assert_eq!(conversations[0].message_count, 1);
         assert_eq!(
             conversations[0].last_message_preview.as_deref(),
@@ -1075,8 +1118,7 @@ mod tests {
             &conn,
             &[],
             Some("Original"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
         let updated =
@@ -1093,8 +1135,7 @@ mod tests {
             &conn,
             &[],
             Some("ToDelete"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
         delete_conversation(&conn, &conv.conversation.id).unwrap();
@@ -1124,7 +1165,8 @@ mod tests {
         .unwrap();
 
         let conv =
-            create_conversation(&conn, &[], None, "Fictional User", "Fictional Soul").unwrap();
+            create_conversation(&conn, &[], None, Some(("Fictional User", "Fictional Soul")))
+                .unwrap();
 
         // Add tag
         let result = add_tag_to_scope(&conn, &conv.conversation.id, &tag1_id).unwrap();
@@ -1186,8 +1228,7 @@ mod tests {
             &conn,
             &[],
             Some("Russian chat"),
-            "Fictional User",
-            "Fictional Soul",
+            Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
         save_message(&conn, &conv.conversation.id, "user", "Привет").unwrap();
@@ -1200,8 +1241,14 @@ mod tests {
         .unwrap();
 
         // Must not panic.
-        let conversations =
-            get_conversations(&conn, None, 10, 0, "Fictional User", "Fictional Soul").unwrap();
+        let conversations = get_conversations(
+            &conn,
+            None,
+            10,
+            0,
+            Some(("Fictional User", "Fictional Soul")),
+        )
+        .unwrap();
         assert_eq!(conversations.len(), 1);
         let preview = conversations[0]
             .last_message_preview
@@ -1219,7 +1266,8 @@ mod tests {
         let conn = db.conn.lock().unwrap();
 
         let conv =
-            create_conversation(&conn, &[], None, "Fictional User", "Fictional Soul").unwrap();
+            create_conversation(&conn, &[], None, Some(("Fictional User", "Fictional Soul")))
+                .unwrap();
         let (msg_id, msg_idx) =
             save_message(&conn, &conv.conversation.id, "user", "Hello").unwrap();
 

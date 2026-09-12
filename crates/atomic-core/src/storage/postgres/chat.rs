@@ -227,8 +227,7 @@ impl ChatStore for PostgresStorage {
         &self,
         tag_ids: &[String],
         title: Option<&str>,
-        user_id: &str,
-        soul_id: &str,
+        owner: Option<(&str, &str)>,
     ) -> StorageResult<ConversationWithTags> {
         let now = chrono::Utc::now().to_rfc3339();
         let id = uuid::Uuid::new_v4().to_string();
@@ -239,8 +238,8 @@ impl ChatStore for PostgresStorage {
         )
         .bind(&id)
         .bind(title)
-        .bind(user_id)
-        .bind(soul_id)
+        .bind(owner.map(|(user_id, _)| user_id))
+        .bind(owner.map(|(_, soul_id)| soul_id))
         .bind(&now)
         .bind(&now)
         .bind(&self.db_id)
@@ -266,8 +265,8 @@ impl ChatStore for PostgresStorage {
             conversation: Conversation {
                 id,
                 title: title.map(String::from),
-                user_id: Some(user_id.to_string()),
-                soul_id: Some(soul_id.to_string()),
+                user_id: owner.map(|(user_id, _)| user_id.to_string()),
+                soul_id: owner.map(|(_, soul_id)| soul_id.to_string()),
                 created_at: now.clone(),
                 updated_at: now,
                 is_archived: false,
@@ -283,15 +282,17 @@ impl ChatStore for PostgresStorage {
         filter_tag_id: Option<&str>,
         limit: i32,
         offset: i32,
-        user_id: &str,
-        soul_id: &str,
+        owner: Option<(&str, &str)>,
     ) -> StorageResult<Vec<ConversationWithTags>> {
+        let user_id = owner.map(|(user_id, _)| user_id);
+        let soul_id = owner.map(|(_, soul_id)| soul_id);
         let conversations: Vec<Conversation> = if let Some(tag_id) = filter_tag_id {
             let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, String, String, i32)>(
                 "SELECT DISTINCT c.id, c.title, c.user_id, c.soul_id, c.created_at, c.updated_at, c.is_archived
                  FROM conversations c
                  JOIN conversation_tags ct ON ct.conversation_id = c.id
-                 WHERE ct.tag_id = $1 AND c.user_id = $2 AND c.soul_id = $3
+                 WHERE ct.tag_id = $1
+                   AND ($2 IS NULL OR (c.user_id = $2 AND c.soul_id = $3))
                    AND c.is_archived = 0 AND c.db_id = $6 AND ct.db_id = $6
                  ORDER BY c.updated_at DESC
                  LIMIT $4 OFFSET $5",
@@ -336,7 +337,8 @@ impl ChatStore for PostgresStorage {
             >(
                 "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
                  FROM conversations
-                 WHERE user_id = $1 AND soul_id = $2 AND is_archived = 0 AND db_id = $5
+                 WHERE ($1 IS NULL OR (user_id = $1 AND soul_id = $2))
+                   AND is_archived = 0 AND db_id = $5
                  ORDER BY updated_at DESC
                  LIMIT $3 OFFSET $4",
             )

@@ -463,7 +463,7 @@ async fn test_delete_tag(storage: &dyn TagStore) {
 
 async fn test_create_conversation(storage: &dyn ChatStore) {
     let conv = storage
-        .create_conversation(&[], None, "Fictional User", "Fictional Soul")
+        .create_conversation(&[], None, Some(("Fictional User", "Fictional Soul")))
         .await
         .unwrap();
     assert!(!conv.conversation.id.is_empty());
@@ -477,7 +477,7 @@ async fn test_create_conversation(storage: &dyn ChatStore) {
 
 async fn test_save_and_get_messages(storage: &dyn ChatStore) {
     let conv = storage
-        .create_conversation(&[], Some("Test Chat"), "Fictional User", "Fictional Soul")
+        .create_conversation(&[], Some("Test Chat"), Some(("Fictional User", "Fictional Soul")))
         .await
         .unwrap();
 
@@ -498,7 +498,7 @@ async fn test_save_and_get_messages(storage: &dyn ChatStore) {
 
 async fn test_delete_conversation(storage: &dyn ChatStore) {
     let conv = storage
-        .create_conversation(&[], None, "Fictional User", "Fictional Soul")
+        .create_conversation(&[], None, Some(("Fictional User", "Fictional Soul")))
         .await
         .unwrap();
     storage
