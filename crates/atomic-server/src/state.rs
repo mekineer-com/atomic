@@ -601,11 +601,11 @@ impl From<atomic_core::EmbeddingEvent> for ServerEvent {
                 atom_id,
                 tags_extracted,
                 new_tags_created,
-                database_id: None,
             } => ServerEvent::TaggingComplete {
                 atom_id,
                 tags_extracted,
                 new_tags_created,
+                database_id: None,
             },
             atomic_core::EmbeddingEvent::TaggingFailed { atom_id, ref error } => {
                 tracing::warn!(atom_id, error = %error, "Tagging failed");
