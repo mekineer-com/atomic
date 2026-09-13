@@ -33,6 +33,8 @@ import { PendingReviewPanel } from '../memu/PendingReviewPanel';
 import { EntityManager, EntityReader } from '../memu/EntityManager';
 import { TabStrip } from './TabStrip';
 import { useAtomsStore } from '../../stores/atoms';
+import { useTagsStore } from '../../stores/tags';
+import { useCanvasStore } from '../../stores/canvas';
 import { useUIStore } from '../../stores/ui';
 import { isTauri } from '../../lib/platform';
 import { getTransport } from '../../lib/transport';
@@ -57,11 +59,14 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const sortOrder = useAtomsStore(s => s.sortOrder);
   const search = useAtomsStore(s => s.search);
   const clearSemanticSearch = useAtomsStore(s => s.clearSemanticSearch);
+  const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
+  const createAtom = useAtomsStore(s => s.createAtom);
 
-  const { viewMode, atomsLayout, searchQuery, activeTabId } = useUIStore(
+  const { viewMode, atomsLayout, knowledgeSource, searchQuery, activeTabId } = useUIStore(
     useShallow(s => ({
       viewMode: s.viewMode,
       atomsLayout: s.atomsLayout,
+      knowledgeSource: s.knowledgeSource,
       searchQuery: s.searchQuery,
       activeTabId: s.activeTabId,
     }))
@@ -72,7 +77,9 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const deactivateTabs = useUIStore(s => s.deactivateTabs);
   const setViewMode = useUIStore(s => s.setViewMode);
   const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
+  const setKnowledgeSource = useUIStore(s => s.setKnowledgeSource);
   const openReader = useUIStore(s => s.openReader);
+  const openReaderEditing = useUIStore(s => s.openReaderEditing);
   const readerState = useUIStore(s => s.readerState);
   const wikiReaderState = useUIStore(s => s.wikiReaderState);
   const reportsDetailState = useUIStore(s => s.reportsDetailState);
@@ -196,11 +203,31 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
 
   const handleNewAtom = useCallback(async () => {
     try {
+      if (knowledgeSource === 'workspace') {
+        const atom = await createAtom('');
+        openReaderEditing(atom.id);
+        return;
+      }
       await startNewAtom();
     } catch (error) {
       console.error('Failed to create atom:', error);
     }
-  }, []);
+  }, [createAtom, knowledgeSource, openReaderEditing]);
+
+  const handleKnowledgeSource = useCallback(async (source: 'memories' | 'workspace') => {
+    if (source === knowledgeSource) return;
+    deactivateTabs();
+    setKnowledgeSource(source);
+    getTransport().setWorkspaceMode(source === 'workspace');
+    if (source === 'workspace' && (viewMode === 'dashboard' || viewMode === 'reports')) {
+      setViewMode('atoms');
+    }
+    useAtomsStore.getState().reset();
+    useTagsStore.getState().reset();
+    useUIStore.getState().resetCanvasLayerState();
+    useCanvasStore.getState().invalidateCanvasData();
+    await Promise.all([fetchAtoms(), useTagsStore.getState().fetchTags()]);
+  }, [deactivateTabs, fetchAtoms, knowledgeSource, setKnowledgeSource, setViewMode, viewMode]);
 
   const handleRetryEmbedding = useCallback(async (atomId: string) => {
     try {
@@ -300,7 +327,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
                 ['canvas', Network, 'Canvas view'],
                 ['wiki', BookOpen, 'Wiki view'],
                 ['reports', Telescope, 'Reports'],
-              ] as const).map(([mode, IconCmp, label]) => {
+              ] as const).filter(([mode]) => knowledgeSource === 'memories' || !['dashboard', 'reports'].includes(mode)).map(([mode, IconCmp, label]) => {
                 const isActiveNav = onBaseView && viewMode === mode;
                 return (
                   <button
@@ -415,6 +442,21 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
           </div>
         )}
 
+        {memuReviewsEnabled && (
+          <div className="flex rounded-md border border-[var(--color-border)] p-0.5 text-xs">
+            {(['memories', 'workspace'] as const).map((source) => (
+              <button
+                key={source}
+                type="button"
+                onClick={() => void handleKnowledgeSource(source)}
+                className={`rounded px-2 py-1 capitalize ${knowledgeSource === source ? 'bg-[var(--color-accent)] text-white' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'}`}
+              >
+                {source}
+              </button>
+            ))}
+          </div>
+        )}
+
         {soulSelector}
 
         {memuReviewsEnabled && (
@@ -515,7 +557,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
         ) : viewMode === 'reports' ? (
           <ReportsFullView />
         ) : viewMode === 'canvas' ? (
-          <SigmaCanvas />
+          <SigmaCanvas key={knowledgeSource} />
         ) : atomsLayout === 'grid' ? (
           <AtomGrid
             atoms={displayAtoms}
@@ -542,7 +584,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
       </div>
 
       {/* FAB — on atoms + dashboard base views only (no active tab) */}
-      {!reviewPanelOpen && !entityPanelOpen && onBaseView && (viewMode === 'atoms' || viewMode === 'dashboard') && <FAB onClick={handleNewAtom} title="Create new atom" />}
+      {!reviewPanelOpen && !entityPanelOpen && onBaseView && (viewMode === 'atoms' || viewMode === 'dashboard') && <FAB onClick={handleNewAtom} title={knowledgeSource === 'workspace' ? 'Create new note' : 'Create new memory'} />}
     </main>
 
     {/* Chat sidebar backdrop — mobile only */}

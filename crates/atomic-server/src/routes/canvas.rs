@@ -22,12 +22,13 @@ pub async fn get_positions(db: Db) -> HttpResponse {
 
 #[utoipa::path(put, path = "/api/canvas/positions", request_body = Vec<AtomPosition>, responses((status = 200, description = "Positions saved")), tag = "canvas")]
 pub async fn save_positions(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     body: web::Json<Vec<AtomPosition>>,
 ) -> HttpResponse {
     let positions = body.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         return memu_proxy::readonly();
     }
     match db.0.save_atom_positions(&positions).await {
@@ -155,7 +156,7 @@ pub async fn get_global_canvas(
     db: Db,
     query: web::Query<GlobalCanvasQuery>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(value) => value,
             Err(response) => return response,
@@ -189,7 +190,7 @@ pub async fn rebuild_canvas(
 ) -> HttpResponse {
     let requested: HashSet<String> = body.into_inner().atom_ids.into_iter().collect();
 
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&req) {
         let config = match memu_proxy::session(&state, &req).await {
             Ok(value) => value,
             Err(response) => return response,

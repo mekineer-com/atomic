@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ui/ErrorBoundary'
 import './index.css'
 import { ensureOpenAlmaIdentity } from './lib/openalma-identity'
 import { getTransport, initTransport } from './lib/transport'
+import { useUIStore } from './stores/ui'
 
 async function clearStaleServiceWorkers() {
   if ('serviceWorker' in navigator) {
@@ -23,6 +24,7 @@ clearStaleServiceWorkers()
     if (!identity) return
     const workspace = await getTransport().invoke<{ database_id: string }>('ensure_openalma_workspace')
     getTransport().setDatabaseId(workspace.database_id)
+    getTransport().setWorkspaceMode(useUIStore.getState().knowledgeSource === 'workspace')
   })
   .then(() => getTransport().connect())
   .then(() => {

@@ -41,15 +41,11 @@ pub async fn get_atom_neighborhood(
     let atom_id = path.into_inner();
     let depth = query.depth.unwrap_or(1);
     let min_similarity = query.min_similarity.unwrap_or(0.5);
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&atom_id) {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(value) => value,
             Err(response) => return response,
         };
-        if !memu_proxy::is_memu_id(&atom_id) {
-            return HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "memU atom not found"}));
-        }
         let client = match memu_proxy::client() {
             Ok(client) => client,
             Err(response) => return response,

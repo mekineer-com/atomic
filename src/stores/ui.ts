@@ -6,6 +6,7 @@ import type { CanvasCameraState } from './canvas';
 
 export type ViewMode = 'dashboard' | 'atoms' | 'canvas' | 'wiki' | 'reports';
 export type AtomsLayout = 'grid' | 'list';
+export type KnowledgeSource = 'memories' | 'workspace';
 export const CANVAS_NONE_KEY = '__none__';
 
 interface LocalGraphState {
@@ -101,6 +102,7 @@ interface UIStore {
   nextTabOrdinal: number;
   viewMode: ViewMode;
   atomsLayout: AtomsLayout;
+  knowledgeSource: KnowledgeSource;
   searchQuery: string;
   loadingOperations: LoadingOperation[];
   // Panel state
@@ -203,6 +205,7 @@ interface UIStore {
   resetCanvasLayerState: () => void;
   setViewMode: (mode: ViewMode) => void;
   setAtomsLayout: (layout: AtomsLayout) => void;
+  setKnowledgeSource: (source: KnowledgeSource) => void;
   setSearchQuery: (query: string) => void;
   addLoadingOperation: (id: string, message: string) => void;
   removeLoadingOperation: (id: string) => void;
@@ -357,6 +360,7 @@ export const useUIStore = create<UIStore>()(
       nextTabOrdinal: 1,
       viewMode: 'atoms',
       atomsLayout: 'grid',
+      knowledgeSource: 'memories',
       searchQuery: '',
       loadingOperations: [],
       localGraph: {
@@ -943,6 +947,7 @@ export const useUIStore = create<UIStore>()(
       },
 
       setAtomsLayout: (layout: AtomsLayout) => set({ atomsLayout: layout }),
+      setKnowledgeSource: (source: KnowledgeSource) => set({ knowledgeSource: source }),
 
       setSearchQuery: (query: string) => set({ searchQuery: query }),
 
@@ -1078,6 +1083,7 @@ export const useUIStore = create<UIStore>()(
       partialize: (state) => ({
         viewMode: state.viewMode,
         atomsLayout: state.atomsLayout,
+        knowledgeSource: state.knowledgeSource,
         readerTheme: state.readerTheme,
         chatSidebarOpen: state.chatSidebarOpen,
         chatSidebarWidth: state.chatSidebarWidth,

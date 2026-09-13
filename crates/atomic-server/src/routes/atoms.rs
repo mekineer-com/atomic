@@ -2,7 +2,7 @@
 
 use crate::db_extractor::Db;
 use crate::error::{ApiErrorResponse, ok_or_error};
-use crate::event_bridge::embedding_event_callback;
+use crate::event_bridge::scoped_embedding_event_callback;
 use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
 use actix_web::{HttpRequest, HttpResponse, web};
@@ -94,7 +94,7 @@ pub async fn get_atoms(
     db: Db,
     query: web::Query<GetAtomsQuery>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(value) => value,
             Err(response) => return response,
@@ -242,8 +242,12 @@ mod tests {
     ),
     tag = "atoms",
 )]
-pub async fn get_source_list(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    if state.memu_session.is_some() {
+pub async fn get_source_list(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+    db: Db,
+) -> HttpResponse {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         return HttpResponse::Ok().json(Vec::<serde_json::Value>::new());
     }
     ok_or_error(db.0.get_source_list().await)
@@ -268,7 +272,7 @@ pub async fn get_atom(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(config) => config,
             Err(response) => return response,
@@ -319,7 +323,7 @@ pub async fn get_atom_links(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
         if let Err(response) = memu_proxy::session(&state, &request).await {
             return response;
         }
@@ -426,7 +430,7 @@ pub async fn create_atom(
     db: Db,
     body: web::Json<CreateAtomRequest>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         let req = body.into_inner();
         if req.content.trim().is_empty() {
             return HttpResponse::BadRequest()
@@ -460,7 +464,7 @@ pub async fn create_atom(
         };
     }
     let req = body.into_inner();
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     let event_tx = state.event_tx.clone();
     match db
         .0
@@ -481,7 +485,7 @@ pub async fn create_atom(
                 atom: atom.clone(),
                 user_id: None,
                 soul_id: None,
-                database_id: None,
+                database_id: Some(db.1.clone()),
             });
             HttpResponse::Created().json(atom)
         }
@@ -519,7 +523,7 @@ pub async fn bulk_create_atoms(
             skip_if_source_exists: r.skip_if_source_exists,
         })
         .collect();
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     let event_tx = state.event_tx.clone();
     match db.0.create_atoms_bulk(requests, on_event).await {
         Ok(result) => {
@@ -528,7 +532,7 @@ pub async fn bulk_create_atoms(
                     atom: atom.clone(),
                     user_id: None,
                     soul_id: None,
-                    database_id: None,
+                    database_id: Some(db.1.clone()),
                 });
             }
             HttpResponse::Created().json(result)
@@ -569,11 +573,11 @@ pub async fn update_atom(
     body: web::Json<UpdateAtomRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
         return memu_proxy::readonly();
     }
     let req = body.into_inner();
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     let event_tx = state.event_tx.clone();
     match db
         .0
@@ -594,7 +598,7 @@ pub async fn update_atom(
                 atom: atom.clone(),
                 user_id: None,
                 soul_id: None,
-                database_id: None,
+                database_id: Some(db.1.clone()),
             });
             HttpResponse::Ok().json(atom)
         }
@@ -624,7 +628,7 @@ pub async fn update_atom_content_only(
     body: web::Json<UpdateAtomRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
         return memu_proxy::readonly();
     }
     let req = body.into_inner();
@@ -660,11 +664,11 @@ pub async fn process_atom_pipeline(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
         return memu_proxy::readonly();
     }
     tracing::info!(atom_id = %id, "Received explicit atom pipeline request");
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     ok_or_error(db.0.process_atom_pipeline(&id, on_event).await)
 }
 
@@ -686,7 +690,7 @@ pub async fn delete_atom(
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&id) {
         return memu_proxy::readonly();
     }
     ok_or_error(db.0.delete_atom(&id).await)
@@ -727,7 +731,7 @@ pub async fn get_tags(
     db: Db,
     query: web::Query<GetTagsQuery>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(value) => value,
             Err(response) => return response,
@@ -777,7 +781,7 @@ pub async fn get_tag_children(
     query: web::Query<GetTagChildrenQuery>,
 ) -> HttpResponse {
     let parent_id = path.into_inner();
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && parent_id.starts_with("category:") {
         if let Err(response) = memu_proxy::session(&state, &request).await {
             return response;
         }
@@ -818,11 +822,12 @@ pub struct CreateTagRequest {
     tag = "tags",
 )]
 pub async fn create_tag(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     body: web::Json<CreateTagRequest>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         return memu_proxy::readonly();
     }
     let req = body.into_inner();
@@ -859,10 +864,10 @@ pub async fn update_tag(
     path: web::Path<String>,
     body: web::Json<UpdateTagRequest>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    let id = path.into_inner();
+    if state.memu_session.is_some() && id.starts_with("category:") {
         return memu_proxy::readonly();
     }
-    let id = path.into_inner();
     let req = body.into_inner();
     ok_or_error(
         db.0.update_tag(&id, &req.name, req.parent_id.as_deref())
@@ -889,10 +894,10 @@ pub async fn delete_tag(
     path: web::Path<String>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    let id = path.into_inner();
+    if state.memu_session.is_some() && id.starts_with("category:") {
         return memu_proxy::readonly();
     }
-    let id = path.into_inner();
     let recursive = query.get("recursive").map(|v| v == "true").unwrap_or(false);
     ok_or_error(db.0.delete_tag(&id, recursive).await)
 }
@@ -928,10 +933,10 @@ pub async fn set_tag_autotag_target(
     path: web::Path<String>,
     body: web::Json<SetAutotagTargetRequest>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    let id = path.into_inner();
+    if state.memu_session.is_some() && id.starts_with("category:") {
         return memu_proxy::readonly();
     }
-    let id = path.into_inner();
     let value = body.into_inner().value;
     match db.0.set_tag_autotag_target(&id, value).await {
         Ok(()) => HttpResponse::NoContent().finish(),
@@ -958,10 +963,10 @@ pub async fn set_tag_autotag_description(
     path: web::Path<String>,
     body: web::Json<SetAutotagDescriptionRequest>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    let id = path.into_inner();
+    if state.memu_session.is_some() && id.starts_with("category:") {
         return memu_proxy::readonly();
     }
-    let id = path.into_inner();
     let description = body.into_inner().description;
     match db.0.set_tag_autotag_description(&id, &description).await {
         Ok(()) => HttpResponse::NoContent().finish(),
@@ -989,11 +994,12 @@ pub struct ConfigureAutotagTargetsRequest {
     tag = "tags",
 )]
 pub async fn configure_autotag_targets(
+    request: HttpRequest,
     state: web::Data<AppState>,
     db: Db,
     body: web::Json<ConfigureAutotagTargetsRequest>,
 ) -> HttpResponse {
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         return memu_proxy::readonly();
     }
     let req = body.into_inner();

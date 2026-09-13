@@ -13,6 +13,7 @@ export function LeftPanel() {
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   const leftPanelOpen = useUIStore(s => s.leftPanelOpen);
   const setLeftPanelOpen = useUIStore(s => s.setLeftPanelOpen);
+  const knowledgeSource = useUIStore(s => s.knowledgeSource);
   const panelRef = useRef<HTMLDivElement>(null);
 
   // On mount, force-collapse on small screens (the sidebar covers content
@@ -86,7 +87,7 @@ export function LeftPanel() {
                 }}
               />
             </div>
-            <CanvasEntitiesSection />
+            {knowledgeSource === 'memories' && <CanvasEntitiesSection />}
           </div>
         </div>
 

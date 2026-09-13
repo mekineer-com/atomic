@@ -95,8 +95,9 @@ pub async fn ws_handler(
                             if !owned {
                                 continue;
                             }
-                        } else if event.owner()
-                            != Some((scope.user_id.as_str(), scope.soul_id.as_str()))
+                        } else if event.database_id().is_none()
+                            && event.owner()
+                                != Some((scope.user_id.as_str(), scope.soul_id.as_str()))
                         {
                             // Integrated sockets deny events without explicit provenance.
                             continue;

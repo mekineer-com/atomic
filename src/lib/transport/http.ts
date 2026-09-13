@@ -15,6 +15,7 @@ export class HttpTransport implements Transport {
   private wsUrl: string | null = null;
   private authExpired = false;
   private databaseId: string | null = null;
+  private workspaceMode = false;
   private visibilityHandler: (() => void) | null = null;
   private onlineHandler: (() => void) | null = null;
   onConnectionChange?: (connected: boolean) => void;
@@ -29,6 +30,10 @@ export class HttpTransport implements Transport {
 
   setDatabaseId(databaseId: string | null): void {
     this.databaseId = databaseId;
+  }
+
+  setWorkspaceMode(enabled: boolean): void {
+    this.workspaceMode = enabled;
   }
 
   async connect(): Promise<void> {
@@ -241,6 +246,7 @@ export class HttpTransport implements Transport {
       headers['X-OpenAlma-Soul'] = encodeURIComponent(identity.soulId);
     }
     if (this.databaseId) headers['X-Atomic-Database'] = this.databaseId;
+    if (this.workspaceMode) headers['X-Atomic-Source'] = 'workspace';
 
     const fetchOpts: RequestInit = { method: spec.method, headers };
 

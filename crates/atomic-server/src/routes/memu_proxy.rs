@@ -203,6 +203,14 @@ pub fn is_memu_id(id: &str) -> bool {
     id.starts_with("memory:") || id.starts_with("category:") || id.starts_with("entity:")
 }
 
+pub fn workspace_requested(request: &HttpRequest) -> bool {
+    request
+        .headers()
+        .get("X-Atomic-Source")
+        .and_then(|value| value.to_str().ok())
+        == Some("workspace")
+}
+
 pub fn scope_query(config: &MemuScope) -> [(&str, &str); 2] {
     [
         ("user_id", config.user_id.as_str()),

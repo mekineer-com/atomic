@@ -5,6 +5,7 @@ export interface Transport {
   disconnect(): void;
   isConnected(): boolean;
   setDatabaseId(databaseId: string | null): void;
+  setWorkspaceMode(enabled: boolean): void;
   readonly mode: 'http';
   onConnectionChange?: (connected: boolean) => void;
 }

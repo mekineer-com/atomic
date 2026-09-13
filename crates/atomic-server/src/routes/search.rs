@@ -63,7 +63,7 @@ pub async fn search(
             }));
         }
     };
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && !memu_proxy::workspace_requested(&request) {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(value) => value,
             Err(response) => return response,
@@ -158,15 +158,11 @@ pub async fn find_similar(
     let atom_id = path.into_inner();
     let limit = query.limit.unwrap_or(10);
     let threshold = query.threshold.unwrap_or(0.7);
-    if state.memu_session.is_some() {
+    if state.memu_session.is_some() && memu_proxy::is_memu_id(&atom_id) {
         let config = match memu_proxy::session(&state, &request).await {
             Ok(value) => value,
             Err(response) => return response,
         };
-        if !memu_proxy::is_memu_id(&atom_id) {
-            return HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "memU atom not found"}));
-        }
         return memu_find_similar(config, &atom_id, limit, threshold).await;
     }
     ok_or_error(db.0.find_similar(&atom_id, limit, threshold).await)

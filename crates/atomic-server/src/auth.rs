@@ -38,9 +38,25 @@ pub struct BearerAuthMiddleware<S> {
     state: web::Data<AppState>,
 }
 
-fn integrated_api_allowed(method: &Method, path: &str) -> bool {
+fn integrated_api_allowed(method: &Method, path: &str, workspace: bool) -> bool {
     let get = method == Method::GET;
     let post = method == Method::POST;
+
+    if workspace && path == "/api/atoms/bulk" {
+        return false;
+    }
+    if workspace
+        && (path == "/api/atoms"
+            || path.starts_with("/api/atoms/")
+            || path == "/api/tags"
+            || path.starts_with("/api/tags/")
+            || path.starts_with("/api/canvas/")
+            || path.starts_with("/api/graph/")
+            || path == "/api/wiki"
+            || path.starts_with("/api/wiki/"))
+    {
+        return true;
+    }
 
     if path == "/api/conversations" || path.starts_with("/api/conversations/") {
         return true;
@@ -99,8 +115,13 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let state = self.state.clone();
-        let blocked =
-            state.memu_session.is_some() && !integrated_api_allowed(req.method(), req.path());
+        let workspace = req
+            .headers()
+            .get("X-Atomic-Source")
+            .and_then(|value| value.to_str().ok())
+            == Some("workspace");
+        let blocked = state.memu_session.is_some()
+            && !integrated_api_allowed(req.method(), req.path(), workspace);
 
         // Extract the Authorization header
         let raw_token = req
@@ -169,34 +190,53 @@ mod tests {
     fn integrated_mode_allows_only_scoped_data_and_instance_controls() {
         assert!(integrated_api_allowed(
             &Method::GET,
-            "/api/conversations/example"
+            "/api/conversations/example",
+            false
         ));
-        assert!(integrated_api_allowed(&Method::POST, "/api/search"));
+        assert!(integrated_api_allowed(&Method::POST, "/api/search", false));
         assert!(integrated_api_allowed(
             &Method::GET,
-            "/api/atoms/memory:example"
+            "/api/atoms/memory:example",
+            false
         ));
-        assert!(integrated_api_allowed(&Method::POST, "/api/atoms"));
-        assert!(integrated_api_allowed(&Method::GET, "/api/settings/models"));
+        assert!(integrated_api_allowed(&Method::POST, "/api/atoms", false));
+        assert!(integrated_api_allowed(
+            &Method::GET,
+            "/api/settings/models",
+            false
+        ));
         assert!(!integrated_api_allowed(
             &Method::PUT,
-            "/api/databases/example/activate"
+            "/api/databases/example/activate",
+            false
         ));
 
-        assert!(!integrated_api_allowed(&Method::GET, "/api/wiki"));
-        assert!(!integrated_api_allowed(&Method::POST, "/api/reports"));
+        assert!(!integrated_api_allowed(&Method::GET, "/api/wiki", false));
+        assert!(integrated_api_allowed(&Method::GET, "/api/wiki", true));
         assert!(!integrated_api_allowed(
             &Method::POST,
-            "/api/databases/example/exports/markdown"
+            "/api/reports",
+            false
+        ));
+        assert!(!integrated_api_allowed(
+            &Method::POST,
+            "/api/databases/example/exports/markdown",
+            false
         ));
         assert!(!integrated_api_allowed(
             &Method::GET,
-            "/api/canvas/positions"
+            "/api/canvas/positions",
+            false
         ));
-        assert!(!integrated_api_allowed(&Method::GET, "/api/graph/edges"));
         assert!(!integrated_api_allowed(
             &Method::GET,
-            "/api/atoms/by-source-url"
+            "/api/graph/edges",
+            false
+        ));
+        assert!(!integrated_api_allowed(
+            &Method::GET,
+            "/api/atoms/by-source-url",
+            false
         ));
     }
 

@@ -260,25 +260,37 @@ pub enum ServerEvent {
     // Embedding pipeline events
     EmbeddingStarted {
         atom_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        database_id: Option<String>,
     },
     EmbeddingComplete {
         atom_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        database_id: Option<String>,
     },
     EmbeddingFailed {
         atom_id: String,
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        database_id: Option<String>,
     },
     TaggingComplete {
         atom_id: String,
         tags_extracted: Vec<String>,
         new_tags_created: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        database_id: Option<String>,
     },
     TaggingFailed {
         atom_id: String,
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        database_id: Option<String>,
     },
     TaggingSkipped {
         atom_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        database_id: Option<String>,
     },
     BatchProgress {
         batch_id: String,
@@ -451,6 +463,12 @@ impl ServerEvent {
             Self::AtomCreated { database_id, .. } | Self::AtomUpdated { database_id, .. } => {
                 database_id.as_deref()
             }
+            Self::EmbeddingStarted { database_id, .. }
+            | Self::EmbeddingComplete { database_id, .. }
+            | Self::EmbeddingFailed { database_id, .. }
+            | Self::TaggingComplete { database_id, .. }
+            | Self::TaggingFailed { database_id, .. }
+            | Self::TaggingSkipped { database_id, .. } => database_id.as_deref(),
             _ => None,
         }
     }
@@ -465,6 +483,19 @@ impl ServerEvent {
             } => Some((user_id.as_deref()?, soul_id.as_deref()?)),
             _ => None,
         }
+    }
+
+    pub fn with_database_id(mut self, value: String) -> Self {
+        match &mut self {
+            Self::EmbeddingStarted { database_id, .. }
+            | Self::EmbeddingComplete { database_id, .. }
+            | Self::EmbeddingFailed { database_id, .. }
+            | Self::TaggingComplete { database_id, .. }
+            | Self::TaggingFailed { database_id, .. }
+            | Self::TaggingSkipped { database_id, .. } => *database_id = Some(value),
+            _ => {}
+        }
+        self
     }
 
     pub fn from_chat(
@@ -549,19 +580,28 @@ impl ServerEvent {
 impl From<atomic_core::EmbeddingEvent> for ServerEvent {
     fn from(event: atomic_core::EmbeddingEvent) -> Self {
         match event {
-            atomic_core::EmbeddingEvent::Started { atom_id } => {
-                ServerEvent::EmbeddingStarted { atom_id }
-            }
+            atomic_core::EmbeddingEvent::Started { atom_id } => ServerEvent::EmbeddingStarted {
+                atom_id,
+                database_id: None,
+            },
             atomic_core::EmbeddingEvent::EmbeddingComplete { atom_id } => {
-                ServerEvent::EmbeddingComplete { atom_id }
+                ServerEvent::EmbeddingComplete {
+                    atom_id,
+                    database_id: None,
+                }
             }
             atomic_core::EmbeddingEvent::EmbeddingFailed { atom_id, error } => {
-                ServerEvent::EmbeddingFailed { atom_id, error }
+                ServerEvent::EmbeddingFailed {
+                    atom_id,
+                    error,
+                    database_id: None,
+                }
             }
             atomic_core::EmbeddingEvent::TaggingComplete {
                 atom_id,
                 tags_extracted,
                 new_tags_created,
+                database_id: None,
             } => ServerEvent::TaggingComplete {
                 atom_id,
                 tags_extracted,
@@ -572,10 +612,14 @@ impl From<atomic_core::EmbeddingEvent> for ServerEvent {
                 ServerEvent::TaggingFailed {
                     atom_id,
                     error: error.clone(),
+                    database_id: None,
                 }
             }
             atomic_core::EmbeddingEvent::TaggingSkipped { atom_id } => {
-                ServerEvent::TaggingSkipped { atom_id }
+                ServerEvent::TaggingSkipped {
+                    atom_id,
+                    database_id: None,
+                }
             }
             atomic_core::EmbeddingEvent::BatchProgress {
                 batch_id,
@@ -703,7 +747,7 @@ mod tests {
         };
         let server_event = ServerEvent::from(event);
         match server_event {
-            ServerEvent::EmbeddingStarted { atom_id } => assert_eq!(atom_id, "a1"),
+            ServerEvent::EmbeddingStarted { atom_id, .. } => assert_eq!(atom_id, "a1"),
             _ => panic!("Wrong variant"),
         }
     }
@@ -714,7 +758,7 @@ mod tests {
             atom_id: "a2".into(),
         };
         match ServerEvent::from(event) {
-            ServerEvent::EmbeddingComplete { atom_id } => assert_eq!(atom_id, "a2"),
+            ServerEvent::EmbeddingComplete { atom_id, .. } => assert_eq!(atom_id, "a2"),
             _ => panic!("Wrong variant"),
         }
     }
@@ -726,7 +770,7 @@ mod tests {
             error: "timeout".into(),
         };
         match ServerEvent::from(event) {
-            ServerEvent::EmbeddingFailed { atom_id, error } => {
+            ServerEvent::EmbeddingFailed { atom_id, error, .. } => {
                 assert_eq!(atom_id, "a3");
                 assert_eq!(error, "timeout");
             }
@@ -746,6 +790,7 @@ mod tests {
                 atom_id,
                 tags_extracted,
                 new_tags_created,
+                ..
             } => {
                 assert_eq!(atom_id, "a4");
                 assert_eq!(tags_extracted, vec!["t1"]);
@@ -821,6 +866,7 @@ mod tests {
     fn test_server_event_serializes_with_type_tag() {
         let event = ServerEvent::EmbeddingComplete {
             atom_id: "a1".into(),
+            database_id: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "EmbeddingComplete");
@@ -832,12 +878,13 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<ServerEvent>(16);
         let event = ServerEvent::EmbeddingStarted {
             atom_id: "a1".into(),
+            database_id: None,
         };
         tx.send(event).unwrap();
 
         let received = rx.try_recv().unwrap();
         match received {
-            ServerEvent::EmbeddingStarted { atom_id } => assert_eq!(atom_id, "a1"),
+            ServerEvent::EmbeddingStarted { atom_id, .. } => assert_eq!(atom_id, "a1"),
             _ => panic!("Wrong variant"),
         }
     }
