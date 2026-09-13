@@ -8,6 +8,7 @@ import { DossierMarkdown, MemoryCitationLinks } from './DossierMarkdown';
 type MemoryReview = {
   id: string;
   summary: string;
+  memory_type: string;
   category_names?: string[];
   similar_to?: string[];
   similarity?: number;
@@ -209,6 +210,7 @@ function MemoryRow({
       style={accentClass ? { borderLeft: `4px solid ${accentClass.bar}` } : undefined}
     >
       <div className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+        <span className="rounded-full border border-[var(--color-border)] px-2 py-0.5">{item.memory_type}</span>
         <span>{item.category_names?.join(', ')}</span>
         {item.similarity != null && (
           <span
