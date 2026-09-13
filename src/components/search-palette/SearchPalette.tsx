@@ -124,7 +124,7 @@ function PaletteItem({
         indented ? 'py-1.5 pl-12 pr-4' : 'py-3 px-4'
       } ${
         selected
-          ? 'bg-[var(--color-bg-hover)] border-l-2 border-[var(--color-accent)]'
+          ? 'bg-[var(--color-accent)] border-l-2 border-[var(--color-accent)]'
           : unselectedClass
       }`}
     >
@@ -472,11 +472,13 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
       data-modal="true"
       className="fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50 backdrop-blur-sm safe-area-padding"
     >
-      <div className="w-full max-w-2xl mx-4 bg-[var(--color-bg-panel)] rounded-xl shadow-2xl border border-[var(--color-border)] animate-in fade-in zoom-in-95 duration-200 overflow-hidden">
+      <div
+        onKeyDown={handleKeyDownWrapped}
+        className="w-full max-w-2xl mx-4 bg-[var(--color-bg-panel)] rounded-xl shadow-2xl border border-[var(--color-border)] animate-in fade-in zoom-in-95 duration-200 overflow-hidden"
+      >
         <CommandInput
           query={searchQuery}
           onChange={handleInputChange}
-          onKeyDown={handleKeyDownWrapped}
           isSearching={isSearching}
           prefix={prefix}
           onClearPrefix={handleClearPrefix}

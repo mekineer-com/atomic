@@ -4,7 +4,7 @@ import { Search, Loader2 } from 'lucide-react';
 interface CommandInputProps {
   query: string;
   onChange: (value: string) => void;
-  onKeyDown: (e: React.KeyboardEvent) => void;
+  onKeyDown?: (e: React.KeyboardEvent) => void;
   isSearching: boolean;
   shortcutHint?: string;
   placeholder?: string;
@@ -68,7 +68,7 @@ export function CommandInput({
             onClearPrefix?.();
             return;
           }
-          onKeyDown(e);
+          onKeyDown?.(e);
         }}
         placeholder={placeholder}
         className="flex-1 min-w-0 bg-transparent text-[var(--color-text-primary)] placeholder-[var(--color-text-tertiary)] outline-none text-base"
