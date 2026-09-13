@@ -6,7 +6,7 @@ interface CommandInputProps {
   onChange: (value: string) => void;
   onKeyDown?: (e: React.KeyboardEvent) => void;
   isSearching: boolean;
-  shortcutHint?: string;
+  shortcutHint?: string | null;
   placeholder?: string;
   prefix?: {
     token: string;
@@ -78,11 +78,13 @@ export function CommandInput({
         spellCheck={false}
       />
 
-      <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-        <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-hover)] border border-[var(--color-border-hover)] rounded text-[10px] font-mono text-[var(--color-text-primary)]">
-          {shortcutHint}
-        </kbd>
-      </div>
+      {shortcutHint ? (
+        <div className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+          <kbd className="px-1.5 py-0.5 bg-[var(--color-bg-hover)] border border-[var(--color-border-hover)] rounded text-[10px] font-mono text-[var(--color-text-primary)]">
+            {shortcutHint}
+          </kbd>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -205,7 +205,9 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
     searchQuery,
     selectedIndex,
     isSearching,
-    globalResults,
+    visibleGlobalResults,
+    searchSources,
+    toggleSearchSource,
     hybridAtomResults,
     tagResults,
     expandedAtomIds,
@@ -214,6 +216,7 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
     toggleWikiExpanded,
     handleKeyDown,
     handleSelect,
+    canExpandSelected,
   } = useSearchPalette({ isOpen, onClose, initialQuery });
 
   useEffect(() => {
@@ -459,10 +462,10 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
     ((mode === 'tags' && tagResults.length === 0) ||
       (mode === 'atoms-hybrid' && hybridAtomResults.length === 0) ||
       (mode === 'global' &&
-        globalResults.atoms.length === 0 &&
-        globalResults.wiki.length === 0 &&
-        globalResults.chats.length === 0 &&
-        globalResults.tags.length === 0));
+        visibleGlobalResults.atoms.length === 0 &&
+        visibleGlobalResults.wiki.length === 0 &&
+        visibleGlobalResults.chats.length === 0 &&
+        visibleGlobalResults.tags.length === 0));
 
   return createPortal(
     <KeyboardNavContext.Provider value={usingKeyboard}>
@@ -476,13 +479,28 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
         onKeyDown={handleKeyDownWrapped}
         className="w-full max-w-2xl mx-4 bg-[var(--color-bg-panel)] rounded-xl shadow-2xl border border-[var(--color-border)] animate-in fade-in zoom-in-95 duration-200 overflow-hidden"
       >
+        {mode === 'global' ? (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 px-4 pt-3 text-xs text-[var(--color-text-secondary)]">
+            {(['atoms', 'wiki', 'chats', 'tags'] as const).map((source) => (
+              <label key={source} className="flex cursor-pointer items-center gap-1.5 capitalize">
+                <input
+                  type="checkbox"
+                  checked={searchSources[source]}
+                  onChange={() => toggleSearchSource(source)}
+                  className="accent-[var(--color-accent)]"
+                />
+                {source}
+              </label>
+            ))}
+          </div>
+        ) : null}
         <CommandInput
           query={searchQuery}
           onChange={handleInputChange}
           isSearching={isSearching}
           prefix={prefix}
           onClearPrefix={handleClearPrefix}
-          shortcutHint="⌘P"
+          shortcutHint={null}
           placeholder={
             mode === 'tags'
               ? 'Search tags...'
@@ -509,10 +527,10 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
 
           {mode === 'global' && searchQuery.trim().length >= 2 ? (
             <>
-              {renderAtoms(globalResults.atoms)}
-              {renderWiki(globalResults.wiki)}
-              {renderChats(globalResults.chats)}
-              {renderTags(globalResults.tags)}
+              {renderAtoms(visibleGlobalResults.atoms)}
+              {renderWiki(visibleGlobalResults.wiki)}
+              {renderChats(visibleGlobalResults.chats)}
+              {renderTags(visibleGlobalResults.tags)}
             </>
           ) : null}
 
@@ -537,10 +555,12 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
               <kbd className="px-1 py-0.5 bg-[var(--color-bg-hover)] border border-[var(--color-border-hover)] rounded text-[var(--color-text-primary)]">↵</kbd>
               open
             </span>
-            <span className="flex items-center gap-1">
-              <kbd className="px-1 py-0.5 bg-[var(--color-bg-hover)] border border-[var(--color-border-hover)] rounded text-[var(--color-text-primary)]">→</kbd>
-              expand matches
-            </span>
+            {canExpandSelected ? (
+              <span className="flex items-center gap-1">
+                <kbd className="px-1 py-0.5 bg-[var(--color-bg-hover)] border border-[var(--color-border-hover)] rounded text-[var(--color-text-primary)]">→</kbd>
+                expand matches
+              </span>
+            ) : null}
             <span className="flex items-center gap-1">
               <kbd className="px-1 py-0.5 bg-[var(--color-bg-hover)] border border-[var(--color-border-hover)] rounded text-[var(--color-text-primary)]">esc</kbd>
               close
