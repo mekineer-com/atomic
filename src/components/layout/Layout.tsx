@@ -241,8 +241,9 @@ export function Layout() {
   return (
     <div className="flex h-full overflow-hidden bg-[var(--color-bg-main)]">
       <RouterBridge />
-      {identity && souls.length > 0 && (
-        <label className="fixed right-4 top-3 z-40 flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
+      <LeftPanel />
+      <MainView soulSelector={identity && souls.length > 0 ? (
+        <label className="flex shrink-0 items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
           Soul
           <select
             aria-label="Active Soul"
@@ -256,9 +257,7 @@ export function Layout() {
             New Soul
           </button>
         </label>
-      )}
-      <LeftPanel />
-      <MainView />
+      ) : undefined} />
       <LoadingIndicator />
       <ServerConnectionStatus />
       <CommandPalette

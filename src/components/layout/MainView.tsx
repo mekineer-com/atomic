@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
+import { useMemo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import {
   PanelLeft,
@@ -40,7 +40,7 @@ import { useIsMobile } from '../../hooks';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
 import { startNewAtom } from '../../lib/new-atom';
 
-export function MainView() {
+export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const atoms = useAtomsStore(s => s.atoms);
   const totalCount = useAtomsStore(s => s.totalCount);
   const hasMore = useAtomsStore(s => s.hasMore);
@@ -414,6 +414,8 @@ export function MainView() {
             </button>
           </div>
         )}
+
+        {soulSelector}
 
         {memuReviewsEnabled && (
           <button
