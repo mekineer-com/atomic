@@ -414,7 +414,7 @@ async fn memu_search(req: HttpRequest) -> HttpResponse {
     if query.contains("q=memory") {
         assert!(query.contains("mode=hybrid"));
     }
-    if query.contains("q=global") {
+    if query.contains("q=Core") {
         assert!(query.contains("mode=keyword"));
     }
     HttpResponse::Ok().json(json!({
@@ -788,10 +788,11 @@ async fn test_memu_read_routes_proxy() {
         .insert_header(ctx.auth_header())
         .insert_header(("X-OpenAlma-User", "TestOwner"))
         .insert_header(("X-OpenAlma-Soul", "TestSoul"))
-        .set_json(json!({"query": "global", "section_limit": 5}))
+        .set_json(json!({"query": "Core", "section_limit": 5}))
         .to_request();
     let search: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(search["atoms"][0]["id"], "memory:m1");
+    assert_eq!(search["tags"][0]["id"], "category:c1");
 
     let req = actix_test::TestRequest::get()
         .uri("/api/canvas/global")

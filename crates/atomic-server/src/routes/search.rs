@@ -110,21 +110,92 @@ pub async fn global_search(
             exclude_entity_id: None,
             exclude_category_id: None,
         };
-        let atoms = match memu_search_value(config, &search_req).await {
+        let atoms = match memu_search_value(config.clone(), &search_req).await {
             Ok(atoms) => atoms,
             Err(response) => return response,
         };
-        return HttpResponse::Ok().json(serde_json::json!({
-            "atoms": atoms,
-            "wiki": [],
-            "chats": [],
-            "tags": [],
-        }));
+        let section_limit = req.section_limit.unwrap_or(5).max(1) as usize;
+        let tags = match memu_tags_value(&config, &search_req.query, section_limit as i32).await {
+            Ok(tags) => tags,
+            Err(response) => return response,
+        };
+        let local = match db
+            .0
+            .search_global_keyword(&search_req.query, section_limit as i32)
+            .await
+        {
+            Ok(local) => local,
+            Err(error) => return crate::error::error_response(error),
+        };
+        let mut response = match serde_json::to_value(local) {
+            Ok(response) => response,
+            Err(error) => {
+                return HttpResponse::InternalServerError()
+                    .json(serde_json::json!({"error": error.to_string()}));
+            }
+        };
+        if let Some(local_atoms) = response["atoms"].as_array_mut() {
+            local_atoms.splice(0..0, atoms);
+            local_atoms.truncate(section_limit);
+        }
+        if let Some(local_tags) = response["tags"].as_array_mut() {
+            local_tags.splice(0..0, tags);
+            local_tags.truncate(section_limit);
+        }
+        return HttpResponse::Ok().json(response);
     }
     ok_or_error(
         db.0.search_global_keyword(&req.query, req.section_limit.unwrap_or(5))
             .await,
     )
+}
+
+async fn memu_tags_value(
+    config: &memu_proxy::MemuScope,
+    query: &str,
+    limit: i32,
+) -> Result<Vec<serde_json::Value>, HttpResponse> {
+    let body = memu_proxy::memu_json(
+        memu_proxy::client()?
+            .get(format!("{}/integration/atomic/tags", config.base_url))
+            .query(&[
+                ("user_id", config.user_id.as_str()),
+                ("soul_id", config.soul_id.as_str()),
+                ("min_count", "0"),
+            ]),
+        "memU tags",
+    )
+    .await?;
+    let query = query.trim().to_lowercase();
+    let mut tags: Vec<_> = body
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tag| {
+            let name = tag["name"].as_str()?.to_lowercase();
+            let score = if name == query {
+                1.0
+            } else if name.starts_with(&query) {
+                0.95
+            } else if name.contains(&query) {
+                0.8
+            } else {
+                return None;
+            };
+            let mut tag = tag.clone();
+            tag.as_object_mut()?
+                .insert("score".to_string(), serde_json::json!(score));
+            Some(tag)
+        })
+        .collect();
+    tags.sort_by(|a, b| {
+        b["score"]
+            .as_f64()
+            .unwrap_or_default()
+            .total_cmp(&a["score"].as_f64().unwrap_or_default())
+    });
+    tags.truncate(limit.max(1) as usize);
+    Ok(tags)
 }
 
 #[derive(Deserialize, IntoParams)]
