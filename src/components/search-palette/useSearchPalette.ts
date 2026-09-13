@@ -28,6 +28,14 @@ const MATCH_REVEAL_PAD = 30;
 type SearchPaletteMode = 'global' | 'tags' | 'atoms-hybrid';
 export type GlobalSearchSource = 'atoms' | 'wiki' | 'chats' | 'tags';
 
+export function nextFullSearchLimit(
+  results: GlobalSearchResponse,
+  enabledSources: GlobalSearchSource[],
+  limit: number,
+): number | null {
+  return enabledSources.some((source) => results[source].length === limit) ? limit * 2 : null;
+}
+
 type SearchPalettePrefix =
   | { token: '#'; label: 'tags' }
   | { token: '>'; label: 'atoms' }
@@ -140,6 +148,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   });
   const [hybridAtomResults, setHybridAtomResults] = useState<SemanticSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isFullSearch, setIsFullSearch] = useState(false);
   const [searchSources, setSearchSources] = useState<Record<GlobalSearchSource, boolean>>({
     atoms: true,
     wiki: true,
@@ -148,6 +157,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   });
 
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchRequestRef = useRef(0);
   const tags = useTagsStore((state) => state.tags);
 
   useEffect(() => {
@@ -172,6 +182,8 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   const searchQuery = prefix ? query.slice(prefix.token.length) : query;
 
   useEffect(() => {
+    const requestId = ++searchRequestRef.current;
+    setIsFullSearch(false);
     // Every query/mode change resets expansion — stale expanded state from a
     // previous query is never useful and would confuse the selection index.
     setExpandedAtomIds(new Set());
@@ -205,22 +217,28 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
             limit: HYBRID_ATOM_LIMIT,
             threshold: HYBRID_ATOM_THRESHOLD,
           });
-          setHybridAtomResults(results);
-          setGlobalResults({ atoms: [], wiki: [], chats: [], tags: [] });
+          if (requestId === searchRequestRef.current) {
+            setHybridAtomResults(results);
+            setGlobalResults({ atoms: [], wiki: [], chats: [], tags: [] });
+          }
         } else {
           const results = await getTransport().invoke<GlobalSearchResponse>('search_global_keyword', {
             query: trimmed,
             sectionLimit: SECTION_LIMIT,
           });
-          setGlobalResults(results);
-          setHybridAtomResults([]);
+          if (requestId === searchRequestRef.current) {
+            setGlobalResults(results);
+            setHybridAtomResults([]);
+          }
         }
       } catch (error) {
         console.error('Global search failed:', error);
-        setGlobalResults({ atoms: [], wiki: [], chats: [], tags: [] });
-        setHybridAtomResults([]);
+        if (requestId === searchRequestRef.current) {
+          setGlobalResults({ atoms: [], wiki: [], chats: [], tags: [] });
+          setHybridAtomResults([]);
+        }
       } finally {
-        setIsSearching(false);
+        if (requestId === searchRequestRef.current) setIsSearching(false);
       }
     }, SEARCH_DEBOUNCE_MS);
 
@@ -230,6 +248,36 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
       }
     };
   }, [mode, searchQuery]);
+
+  const submitSearch = useCallback(async () => {
+    const trimmed = searchQuery.trim();
+    const enabledSources = (Object.keys(searchSources) as GlobalSearchSource[])
+      .filter((source) => searchSources[source]);
+    if (mode !== 'global' || trimmed.length < 2 || enabledSources.length === 0 || isFullSearch) return;
+
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    const requestId = ++searchRequestRef.current;
+    setIsSearching(true);
+    try {
+      let limit = 20;
+      while (requestId === searchRequestRef.current) {
+        const results = await getTransport().invoke<GlobalSearchResponse>('search_global_keyword', {
+          query: trimmed,
+          sectionLimit: limit,
+        });
+        if (requestId !== searchRequestRef.current) return;
+        setGlobalResults(results);
+        const nextLimit = nextFullSearchLimit(results, enabledSources, limit);
+        if (nextLimit === null) break;
+        limit = nextLimit;
+      }
+      if (requestId === searchRequestRef.current) setIsFullSearch(true);
+    } catch (error) {
+      console.error('Full search failed:', error);
+    } finally {
+      if (requestId === searchRequestRef.current) setIsSearching(false);
+    }
+  }, [isFullSearch, mode, searchQuery, searchSources]);
 
   const tagResults = useMemo(() => {
     if (mode !== 'tags') return [];
@@ -582,7 +630,8 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
         }
         case 'Enter':
           e.preventDefault();
-          handleSelect(selectedIndex);
+          if (mode === 'global') void submitSearch();
+          else handleSelect(selectedIndex);
           break;
         case 'Escape':
           e.preventDefault();
@@ -590,7 +639,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
           break;
       }
     },
-    [selectedIndex, totalItems, flatItems, handleSelect, onClose]
+    [selectedIndex, totalItems, flatItems, handleSelect, mode, onClose, submitSearch]
   );
 
   const selectedItem = flatItems[selectedIndex];
@@ -607,6 +656,8 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     searchQuery,
     selectedIndex,
     isSearching,
+    isFullSearch,
+    submitSearch,
     visibleGlobalResults,
     searchSources,
     toggleSearchSource,

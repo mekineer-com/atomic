@@ -106,7 +106,7 @@ pub async fn global_search(
             mode: "keyword".to_string(),
             limit: req.section_limit,
             threshold: None,
-            memory_only: false,
+            memory_only: true,
             exclude_entity_id: None,
             exclude_category_id: None,
         };
