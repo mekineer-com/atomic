@@ -26,6 +26,32 @@ pub async fn soul_create(state: web::Data<AppState>, body: web::Json<Value>) -> 
     identity_proxy(&state, "/souls", Some(body.into_inner())).await
 }
 
+pub async fn workspace_ensure(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let scope = match session(&state, &request).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let database_id = match state.workspace_database_id(&scope.user_id, &scope.soul_id) {
+        Ok(Some(id)) => id,
+        Ok(None) => match state.manager.create_database(&scope.soul_id).await {
+            Ok(database) => {
+                if let Err(error) =
+                    state.bind_workspace_database(&scope.user_id, &scope.soul_id, &database.id)
+                {
+                    return crate::error::error_response(error);
+                }
+                database.id
+            }
+            Err(error) => return crate::error::error_response(error),
+        },
+        Err(error) => return crate::error::error_response(error),
+    };
+    match state.manager.get_core(&database_id).await {
+        Ok(_) => HttpResponse::Ok().json(json!({"database_id": database_id})),
+        Err(error) => crate::error::error_response(error),
+    }
+}
+
 async fn identity_proxy(state: &AppState, path: &str, body: Option<Value>) -> HttpResponse {
     let Some(config) = state.memu_session.as_ref() else {
         return HttpResponse::InternalServerError()

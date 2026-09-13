@@ -308,6 +308,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/memu/owner", web::post().to(memu_proxy::owner_create));
     cfg.route("/memu/souls", web::get().to(memu_proxy::souls_get));
     cfg.route("/memu/souls", web::post().to(memu_proxy::soul_create));
+    cfg.route(
+        "/memu/workspace/ensure",
+        web::post().to(memu_proxy::workspace_ensure),
+    );
 
     // memU entity proxy
     cfg.route("/memu/entities", web::get().to(memu_entities::list));

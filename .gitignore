@@ -16,6 +16,7 @@ registry.db
 registry.db-journal
 registry.db-wal
 registry.db-shm
+*.db.orig
 databases/
 data/
 bench/runs/

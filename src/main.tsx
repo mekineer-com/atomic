@@ -19,6 +19,11 @@ clearStaleServiceWorkers()
   .catch((err) => console.warn('Stale service worker cleanup failed:', err))
   .then(initTransport)
   .then(() => ensureOpenAlmaIdentity(getTransport()))
+  .then(async (identity) => {
+    if (!identity) return
+    const workspace = await getTransport().invoke<{ database_id: string }>('ensure_openalma_workspace')
+    getTransport().setDatabaseId(workspace.database_id)
+  })
   .then(() => getTransport().connect())
   .then(() => {
     const app = (

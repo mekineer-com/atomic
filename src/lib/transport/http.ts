@@ -14,6 +14,7 @@ export class HttpTransport implements Transport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private wsUrl: string | null = null;
   private authExpired = false;
+  private databaseId: string | null = null;
   private visibilityHandler: (() => void) | null = null;
   private onlineHandler: (() => void) | null = null;
   onConnectionChange?: (connected: boolean) => void;
@@ -26,6 +27,10 @@ export class HttpTransport implements Transport {
     return this.config;
   }
 
+  setDatabaseId(databaseId: string | null): void {
+    this.databaseId = databaseId;
+  }
+
   async connect(): Promise<void> {
     if (!this.config.baseUrl) return;
     this.shouldReconnect = true;
@@ -33,10 +38,11 @@ export class HttpTransport implements Transport {
     const identityQuery = identity
       ? `&user_id=${encodeURIComponent(identity.userId)}&soul_id=${encodeURIComponent(identity.soulId)}`
       : '';
+    const databaseQuery = this.databaseId ? `&db=${encodeURIComponent(this.databaseId)}` : '';
     this.wsUrl = this.config.baseUrl
       .replace(/^http/, 'ws')
       .replace(/\/$/, '')
-      + `/ws?token=${encodeURIComponent(this.config.authToken)}${identityQuery}`;
+      + `/ws?token=${encodeURIComponent(this.config.authToken)}${identityQuery}${databaseQuery}`;
     this.attachLifecycleListeners();
     try {
       await this.connectWs();
@@ -234,6 +240,7 @@ export class HttpTransport implements Transport {
       headers['X-OpenAlma-User'] = encodeURIComponent(identity.userId);
       headers['X-OpenAlma-Soul'] = encodeURIComponent(identity.soulId);
     }
+    if (this.databaseId) headers['X-Atomic-Database'] = this.databaseId;
 
     const fetchOpts: RequestInit = { method: spec.method, headers };
 

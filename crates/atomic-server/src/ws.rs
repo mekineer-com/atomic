@@ -14,17 +14,6 @@ pub async fn ws_handler(
     state: web::Data<AppState>,
     query: web::Query<WsQuery>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    // Authenticate via query param
-    let fixed_database = query.db.clone();
-    let core = match fixed_database.as_deref() {
-        Some(id) => state.manager.get_core(id).await,
-        None => state.manager.active_core().await,
-    }
-    .map_err(|_| actix_web::error::ErrorBadRequest("Database not found"))?;
-    match core.verify_api_token(&query.token).await {
-        Ok(Some(_)) => {}
-        _ => return Ok(HttpResponse::Unauthorized().finish()),
-    }
     let scope = if state.memu_session.is_some() {
         let Some(user_id) = query.user_id.clone().filter(|value| !value.is_empty()) else {
             return Ok(HttpResponse::BadRequest()
@@ -41,6 +30,26 @@ pub async fn ws_handler(
     } else {
         None
     };
+    let (core, fixed_database) = if let Some(scope) = scope.as_ref() {
+        match state
+            .resolve_workspace_core(&scope.user_id, &scope.soul_id, query.db.as_deref())
+            .await
+        {
+            Ok((core, database_id)) => (core, Some(database_id)),
+            Err(error) => return Ok(crate::error::error_response(error)),
+        }
+    } else {
+        let core = match query.db.as_deref() {
+            Some(id) => state.manager.get_core(id).await,
+            None => state.manager.active_core().await,
+        }
+        .map_err(|_| actix_web::error::ErrorBadRequest("Database not found"))?;
+        (core, query.db.clone())
+    };
+    match core.verify_api_token(&query.token).await {
+        Ok(Some(_)) => {}
+        _ => return Ok(HttpResponse::Unauthorized().finish()),
+    }
 
     let (response, mut session, _msg_stream) = actix_ws::handle(&req, stream)?;
 

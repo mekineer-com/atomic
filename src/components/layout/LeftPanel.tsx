@@ -5,6 +5,7 @@ import { SettingsButton, SettingsModal, type SettingsTab } from '../settings';
 import { DatabaseSwitcher } from '../DatabaseSwitcher';
 import { useUIStore } from '../../stores/ui';
 import { isTauri } from '../../lib/platform';
+import { currentIdentity } from '../../lib/openalma-identity';
 
 const COLLAPSE_BREAKPOINT = 768;
 export function LeftPanel() {
@@ -71,7 +72,7 @@ export function LeftPanel() {
         >
           {/* Titlebar row with settings button */}
           <div className={`h-[52px] flex items-center px-3 flex-shrink-0 gap-1 ${isTauri() ? 'pl-[78px]' : ''}`} data-tauri-drag-region>
-            <DatabaseSwitcher />
+            {!currentIdentity() && <DatabaseSwitcher />}
             <SettingsButton onClick={() => { setSettingsInitialTab(undefined); setIsSettingsOpen(true); }} />
           </div>
 

@@ -77,6 +77,7 @@ import { formatRelativeDate } from '../../lib/date';
 import { getBrowserTimeZone, getSupportedTimeZones } from '../../lib/tz';
 import { useDatabasesStore, type DatabaseInfo, type DatabaseStats } from '../../stores/databases';
 import { OverrideControls } from './OverrideControls';
+import { currentIdentity } from '../../lib/openalma-identity';
 
 export type SettingsTab = 'general' | 'ai' | 'tag-categories' | 'connection' | 'integrations' | 'databases' | 'prompts';
 
@@ -899,6 +900,9 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProps) {
+  const settingsTabs = currentIdentity()
+    ? SETTINGS_TABS.filter((tab) => tab.id !== 'databases')
+    : SETTINGS_TABS;
   const settings = useSettingsStore(s => s.settings);
   const fetchSettings = useSettingsStore(s => s.fetchSettings);
   const setSetting = useSettingsStore(s => s.setSetting);
@@ -1690,7 +1694,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
           <nav className="md:hidden border-b border-[var(--color-border)] bg-[var(--color-bg-main)]/35 overflow-x-auto">
             <div className="flex gap-1 p-2 min-w-max">
-              {SETTINGS_TABS.map((tab) => (
+              {settingsTabs.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
@@ -1708,7 +1712,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
 
           <nav className="hidden md:block w-48 flex-shrink-0 border-r border-[var(--color-border)] bg-[var(--color-bg-main)]/35 p-2 overflow-y-auto">
             <div className="space-y-1">
-              {SETTINGS_TABS.map((tab) => (
+              {settingsTabs.map((tab) => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}

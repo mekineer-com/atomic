@@ -81,8 +81,7 @@ fn integrated_api_allowed(method: &Method, path: &str) -> bool {
         || path.starts_with("/api/ollama/")
         || path == "/api/auth/tokens"
         || path.starts_with("/api/auth/tokens/")
-        || (path == "/api/databases" || path.starts_with("/api/databases/"))
-            && !path.contains("/exports/")
+        || path == "/api/databases" && get
 }
 
 impl<S, B> Service<ServiceRequest> for BearerAuthMiddleware<S>
@@ -179,7 +178,7 @@ mod tests {
         ));
         assert!(integrated_api_allowed(&Method::POST, "/api/atoms"));
         assert!(integrated_api_allowed(&Method::GET, "/api/settings/models"));
-        assert!(integrated_api_allowed(
+        assert!(!integrated_api_allowed(
             &Method::PUT,
             "/api/databases/example/activate"
         ));

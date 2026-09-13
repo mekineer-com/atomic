@@ -117,6 +117,13 @@ impl AppState {
         &self,
         req: &actix_web::HttpRequest,
     ) -> Result<(AtomicCore, String), atomic_core::AtomicCoreError> {
+        if self.memu_session.is_some() {
+            let (user_id, soul_id) = openalma_identity(req)?;
+            return self
+                .resolve_workspace_core(&user_id, &soul_id, requested_database(req).as_deref())
+                .await;
+        }
+
         // Check X-Atomic-Database header
         if let Some(db_id) = req
             .headers()
@@ -142,6 +149,108 @@ impl AppState {
         let db_id = self.manager.active_id()?;
         Ok((self.manager.get_core(&db_id).await?, db_id))
     }
+
+    pub fn workspace_database_id(
+        &self,
+        user_id: &str,
+        soul_id: &str,
+    ) -> Result<Option<String>, atomic_core::AtomicCoreError> {
+        let registry = self.manager.registry().ok_or_else(|| {
+            atomic_core::AtomicCoreError::Configuration(
+                "OpenAlma Soul workspaces require SQLite".to_string(),
+            )
+        })?;
+        Ok(registry
+            .get_all_settings()?
+            .remove(&workspace_setting_key(user_id, soul_id)))
+    }
+
+    pub fn bind_workspace_database(
+        &self,
+        user_id: &str,
+        soul_id: &str,
+        database_id: &str,
+    ) -> Result<(), atomic_core::AtomicCoreError> {
+        let registry = self.manager.registry().ok_or_else(|| {
+            atomic_core::AtomicCoreError::Configuration(
+                "OpenAlma Soul workspaces require SQLite".to_string(),
+            )
+        })?;
+        registry.set_setting(&workspace_setting_key(user_id, soul_id), database_id)
+    }
+
+    pub async fn resolve_workspace_core(
+        &self,
+        user_id: &str,
+        soul_id: &str,
+        requested: Option<&str>,
+    ) -> Result<(AtomicCore, String), atomic_core::AtomicCoreError> {
+        let expected_id = self
+            .workspace_database_id(user_id, soul_id)?
+            .ok_or_else(|| {
+                atomic_core::AtomicCoreError::Configuration(
+                    "OpenAlma Soul workspace is not initialized".to_string(),
+                )
+            })?;
+        if let Some(requested) = requested {
+            let (databases, _) = self.manager.list_databases().await?;
+            let resolved = databases
+                .iter()
+                .find(|db| db.id == requested || db.name.eq_ignore_ascii_case(requested))
+                .map(|db| db.id.as_str())
+                .ok_or_else(|| {
+                    atomic_core::AtomicCoreError::NotFound(format!("Database '{}'", requested))
+                })?;
+            if resolved != expected_id {
+                return Err(atomic_core::AtomicCoreError::Configuration(
+                    "Database does not belong to the selected OpenAlma Soul".to_string(),
+                ));
+            }
+        }
+        Ok((self.manager.get_core(&expected_id).await?, expected_id))
+    }
+}
+
+fn requested_database(req: &actix_web::HttpRequest) -> Option<String> {
+    req.headers()
+        .get("X-Atomic-Database")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            req.query_string().split('&').find_map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                (parts.next()? == "db").then(|| parts.next().unwrap_or_default().to_string())
+            })
+        })
+}
+
+pub(crate) fn openalma_identity(
+    req: &actix_web::HttpRequest,
+) -> Result<(String, String), atomic_core::AtomicCoreError> {
+    let value = |name| {
+        req.headers()
+            .get(name)
+            .and_then(|header| header.to_str().ok())
+            .filter(|header| !header.is_empty())
+            .and_then(|header| {
+                reqwest::Url::parse(&format!("http://localhost/?value={header}"))
+                    .ok()?
+                    .query_pairs()
+                    .find_map(|(key, value)| (key == "value").then(|| value.into_owned()))
+            })
+            .ok_or_else(|| {
+                atomic_core::AtomicCoreError::Configuration(format!("{name} is required"))
+            })
+    };
+    Ok((value("X-OpenAlma-User")?, value("X-OpenAlma-Soul")?))
+}
+
+fn workspace_setting_key(user_id: &str, soul_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(user_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(soul_id.as_bytes());
+    format!("openalma.soul_database.{:x}", hasher.finalize())
 }
 
 /// Events broadcast to WebSocket clients

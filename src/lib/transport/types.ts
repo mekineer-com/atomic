@@ -4,6 +4,7 @@ export interface Transport {
   connect(): Promise<void>;
   disconnect(): void;
   isConnected(): boolean;
+  setDatabaseId(databaseId: string | null): void;
   readonly mode: 'http';
   onConnectionChange?: (connected: boolean) => void;
 }

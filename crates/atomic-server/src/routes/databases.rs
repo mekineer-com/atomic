@@ -2,12 +2,25 @@
 
 use crate::error::ApiErrorResponse;
 use crate::state::AppState;
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[utoipa::path(get, path = "/api/databases", responses((status = 200, description = "List of databases with active ID")), tag = "databases")]
-pub async fn list_databases(state: web::Data<AppState>) -> HttpResponse {
+pub async fn list_databases(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    if state.memu_session.is_some() {
+        let (_, database_id) = match state.resolve_core_with_id(&request).await {
+            Ok(value) => value,
+            Err(error) => return crate::error::error_response(error),
+        };
+        return match state.manager.list_databases().await {
+            Ok((databases, _)) => HttpResponse::Ok().json(serde_json::json!({
+                "databases": databases.into_iter().filter(|db| db.id == database_id).collect::<Vec<_>>(),
+                "active_id": database_id,
+            })),
+            Err(error) => crate::error::error_response(error),
+        };
+    }
     match state.manager.list_databases().await {
         Ok((databases, active_id)) => HttpResponse::Ok().json(serde_json::json!({
             "databases": databases,

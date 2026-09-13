@@ -22,6 +22,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   create_openalma_owner: { method: 'POST', path: '/api/memu/owner', argsMode: 'body' },
   get_openalma_souls: { method: 'GET', path: '/api/memu/souls' },
   create_openalma_soul: { method: 'POST', path: '/api/memu/souls', argsMode: 'body' },
+  ensure_openalma_workspace: { method: 'POST', path: '/api/memu/workspace/ensure' },
   // ==================== Atoms ====================
   get_all_atoms: {
     method: 'GET',
