@@ -199,3 +199,17 @@ Computed from sqlite-vec's Euclidean distance on normalized vectors: `similarity
 Dark theme (Obsidian-inspired). Backgrounds: `#1e1e1e`/`#252525`/`#2d2d2d`. Accent: purple (`#7c3aed`). Three-panel layout: fixed-width left panel (tag tree, navigation), flexible main view (canvas/grid/list), overlay right drawer (editor, viewer, wiki, chat).
 
 Frontend state is managed by Zustand stores: `atoms`, `tags`, `ui`, `settings`, `wiki`, `chat`, `databases`. The `ui` store tracks selected tag filter, drawer state, view mode, and search query. View mode (canvas/grid/list) persists to localStorage.
+
+## OpenAlma fork additions (not upstream)
+
+This fork wires Atomic into OpenAlma. Upstream guidance above still applies; this section is fork-only.
+
+**Two modes.** The OpenAlma layer is gated by the memU review status (`get_memu_review_status`): **standalone** keeps Atomic fully self-contained (local knowledge, local conversations); **integrated (OpenAlma) mode** takes knowledge from the owner's memU memory via mcp-memu-server instead of a local brain, while conversations and transcripts stay in Atomic, scoped to one exact owner + soul. In integrated mode, local HTTP/MCP/export/worker access is default-denied — every route must earn its scope. Conversations from before the owner existed have no recoverable identity and stay sealed in integrated mode (deliberate; never guess-stamp them).
+
+**Identity.** Frontend identity lives in `src/lib/openalma-identity.ts` — owner + souls are fetched from the server (`get_openalma_owner`, `get_openalma_souls`); first use confirms owner + first soul together; soul selection persists in `localStorage`, per-tab identity in `sessionStorage`. Soul creation goes through `create_openalma_soul`.
+
+**mcp integration surface.** Atomic calls mcp-memu-server's `/integration/atomic/*` endpoints (session bootstrap/end, atoms, tags, entities, canvas source, approved human memory creation) — inventory in `mcp-memu-server/INDEX.md`. Per-request owner+soul validation is intentionally uncached.
+
+**Lifecycle.** When started through the OpenAlma launcher, Atomic owns its child lifecycle directly (no implicit Cargo). Production prefers `atomic/target/server/atomic-server`; an existing `atomic/target/debug/atomic-server` is the readiness/Settings/Start fallback.
+
+**Fork-modified paths.** `src/` (React UI), `src-tauri/`, and since the owner cutover also `crates/atomic-core` (storage: owner/soul columns on conversations) and `crates/atomic-server` (scoped routes, WS, event bridge, export). The remainder tracks upstream `kenforthewin/atomic` (remote `origin`, fetch-only). Push only to `mekineer` on `buildfix`.
