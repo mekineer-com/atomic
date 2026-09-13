@@ -15,7 +15,7 @@ import {
 import { markdownToPlainText } from './markdownToPlainText';
 
 const SEARCH_DEBOUNCE_MS = 250;
-const SECTION_LIMIT = 5;
+const SECTION_LIMIT = 12;
 const HYBRID_ATOM_LIMIT = 12;
 const HYBRID_ATOM_THRESHOLD = 0.3;
 /** Padding (in bytes/chars) to pull into a per-match snippet on each side. */
