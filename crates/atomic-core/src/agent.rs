@@ -775,17 +775,47 @@ async fn execute_search_atoms(
 const GET_ATOM_DEFAULT_LIMIT: usize = 500;
 const GET_ATOM_MAX_LIMIT: usize = 2000;
 
+async fn atom_matches_scope(
+    storage: &StorageBackend,
+    atom_id: &str,
+    scope_tag_ids: &[String],
+) -> Result<bool, String> {
+    if scope_tag_ids.is_empty() {
+        return Ok(true);
+    }
+    let atom_tags = storage
+        .get_tag_ids_for_atoms_batch_impl(&[atom_id.to_string()])
+        .await
+        .map_err(|e| e.to_string())?;
+    for scope_tag_id in scope_tag_ids {
+        let hierarchy = storage
+            .get_tag_hierarchy_impl(scope_tag_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if hierarchy.iter().any(|tag_id| atom_tags.contains(tag_id)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 async fn execute_get_atom(
     storage: &StorageBackend,
     atom_id: &str,
     offset: usize,
     limit: usize,
+    scope_tag_ids: &[String],
     memu_tool_config: Option<&MemuToolConfig>,
 ) -> Result<Option<String>, String> {
     if let Some(config) = memu_tool_config.filter(|_| is_memu_id(atom_id)) {
         return Ok(fetch_memu_node(config, atom_id)
             .await?
             .map(|node| slice_text(&render_memu_node(&node), offset, limit)));
+    }
+    if !atom_matches_scope(storage, atom_id, scope_tag_ids).await? {
+        return Err(format!(
+            "Atom {atom_id} is outside this conversation's scope"
+        ));
     }
 
     let Some(content) = storage
@@ -1490,6 +1520,7 @@ async fn run_agent_loop(
                             atom_id,
                             offset,
                             limit,
+                            &ctx.scope_tag_ids,
                             memu_tool_config.as_ref(),
                         )
                         .await
@@ -1926,6 +1957,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AtomicCore, CreateAtomRequest};
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn get_atom_enforces_conversation_tag_scope() {
+        let dir = TempDir::new().expect("create tempdir");
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).expect("open core");
+        let birds = core
+            .create_tag("Birds", None)
+            .await
+            .expect("create scope tag");
+        let pelicans = core
+            .create_tag("Pelicans", Some(&birds.id))
+            .await
+            .expect("create child tag");
+        let private = core
+            .create_tag("Private", None)
+            .await
+            .expect("create private tag");
+        let atom = core
+            .create_atom(
+                CreateAtomRequest {
+                    content: "Pelicans dive for fish.".to_string(),
+                    tag_ids: vec![pelicans.id],
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .await
+            .expect("create atom")
+            .expect("atom was not skipped");
+
+        let allowed = execute_get_atom(
+            &core.storage,
+            &atom.atom.id,
+            0,
+            GET_ATOM_DEFAULT_LIMIT,
+            &[birds.id],
+            None,
+        )
+        .await
+        .expect("parent scope admits child-tagged atom")
+        .expect("atom exists");
+        assert!(allowed.contains("Pelicans dive for fish."));
+
+        let refused = execute_get_atom(
+            &core.storage,
+            &atom.atom.id,
+            0,
+            GET_ATOM_DEFAULT_LIMIT,
+            &[private.id],
+            None,
+        )
+        .await
+        .expect_err("out-of-scope atom must be refused");
+        assert!(refused.contains("outside this conversation's scope"));
+        assert!(!refused.contains("Pelicans dive for fish."));
+    }
 
     #[test]
     fn truncate_keeps_all_leading_system_messages() {
