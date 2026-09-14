@@ -2062,18 +2062,19 @@ where
     process_queued_pipeline_jobs_inner(storage, on_event, Some(settings_map), canvas_cache).await
 }
 
-async fn process_queued_pipeline_jobs_inner<F>(
-    storage: StorageBackend,
-    on_event: F,
-    external_settings: Option<HashMap<String, String>>,
-    canvas_cache: Option<CanvasCache>,
-) -> Result<i32, String>
-where
-    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
-{
-    let run_id = Uuid::new_v4().to_string();
+/// One drain cycle's worth of claimed work.
+struct ClaimedRun {
+    run_id: String,
+    batches: Vec<Vec<crate::models::AtomPipelineJob>>,
+    total: usize,
+    embedding_total: usize,
+}
+
+/// Claim every currently-due job into batches. Claiming starts the 30-minute
+/// leases, so this must only run when the caller is about to process the work.
+async fn claim_due_batches(storage: &StorageBackend) -> Result<ClaimedRun, String> {
     let mut batches = Vec::new();
-    let mut total_count = 0usize;
+    let mut total = 0usize;
     let mut embedding_total = 0usize;
 
     loop {
@@ -2089,62 +2090,121 @@ where
             break;
         }
 
-        total_count += jobs.len();
+        total += jobs.len();
         embedding_total += jobs.iter().filter(|job| job.embed_requested).count();
         batches.push(jobs);
     }
 
-    if total_count == 0 {
-        return Ok(0);
-    }
-
-    on_event(EmbeddingEvent::PipelineQueueStarted {
-        run_id: run_id.clone(),
-        total_jobs: total_count,
+    Ok(ClaimedRun {
+        run_id: Uuid::new_v4().to_string(),
+        batches,
+        total,
         embedding_total,
+    })
+}
+
+async fn run_claimed<F>(
+    run: ClaimedRun,
+    storage: &StorageBackend,
+    on_event: &F,
+    settings: &Option<HashMap<String, String>>,
+    canvas_cache: &Option<CanvasCache>,
+) where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
+    on_event(EmbeddingEvent::PipelineQueueStarted {
+        run_id: run.run_id.clone(),
+        total_jobs: run.total,
+        embedding_total: run.embedding_total,
     });
-    if embedding_total > 0 {
+    if run.embedding_total > 0 {
         on_event(EmbeddingEvent::PipelineQueueProgress {
-            run_id: run_id.clone(),
+            run_id: run.run_id.clone(),
             stage: "embedding".to_string(),
             completed: 0,
-            total: embedding_total,
+            total: run.embedding_total,
         });
     }
 
-    let storage = storage.clone();
-    let on_event = on_event.clone();
-    let settings = external_settings.clone();
-    let canvas_cache = canvas_cache.clone();
-    let progress = Arc::new(QueueRunProgress::new(run_id.clone()));
+    let progress = Arc::new(QueueRunProgress::new(run.run_id.clone()));
+    for jobs in run.batches {
+        process_pipeline_jobs_batch(
+            storage.clone(),
+            jobs,
+            on_event.clone(),
+            settings.clone(),
+            canvas_cache.clone(),
+            progress.clone(),
+            run.embedding_total,
+        )
+        .await;
+    }
 
-    crate::executor::spawn(async move {
-        let _permit = crate::executor::EMBEDDING_BATCH_SEMAPHORE
-            .acquire()
-            .await
-            .expect("Embedding batch semaphore closed unexpectedly");
-
-        for jobs in batches {
-            process_pipeline_jobs_batch(
-                storage.clone(),
-                jobs,
-                on_event.clone(),
-                settings.clone(),
-                canvas_cache.clone(),
-                progress.clone(),
-                embedding_total,
-            )
-            .await;
-        }
-
-        on_event(EmbeddingEvent::PipelineQueueCompleted {
-            run_id,
-            total_jobs: total_count,
-            failed_jobs: progress.failed_jobs(),
-        });
+    on_event(EmbeddingEvent::PipelineQueueCompleted {
+        run_id: run.run_id,
+        total_jobs: run.total,
+        failed_jobs: progress.failed_jobs(),
     });
+}
 
-    Ok(total_count as i32)
+async fn process_queued_pipeline_jobs_inner<F>(
+    storage: StorageBackend,
+    on_event: F,
+    external_settings: Option<HashMap<String, String>>,
+    canvas_cache: Option<CanvasCache>,
+) -> Result<i32, String>
+where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
+    match crate::executor::EMBEDDING_BATCH_SEMAPHORE.try_acquire() {
+        Ok(permit) => {
+            let first = claim_due_batches(&storage).await?;
+            if first.total == 0 {
+                return Ok(0);
+            }
+            let admitted = first.total;
+
+            crate::executor::spawn(async move {
+                let _permit = permit;
+                let mut run = first;
+                loop {
+                    run_claimed(run, &storage, &on_event, &external_settings, &canvas_cache).await;
+                    match claim_due_batches(&storage).await {
+                        Ok(next) if next.total > 0 => run = next,
+                        _ => break,
+                    }
+                }
+            });
+
+            Ok(admitted as i32)
+        }
+        Err(_) => {
+            // Wait without claiming jobs or starting their leases.
+            crate::executor::spawn(async move {
+                let _permit = crate::executor::EMBEDDING_BATCH_SEMAPHORE
+                    .acquire()
+                    .await
+                    .expect("Embedding batch semaphore closed unexpectedly");
+                loop {
+                    match claim_due_batches(&storage).await {
+                        Ok(run) if run.total > 0 => {
+                            run_claimed(
+                                run,
+                                &storage,
+                                &on_event,
+                                &external_settings,
+                                &canvas_cache,
+                            )
+                            .await;
+                        }
+                        _ => break,
+                    }
+                }
+            });
+
+            Ok(0)
+        }
+    }
 }
 
 /// Convert L2 distance to cosine similarity for normalized vectors
