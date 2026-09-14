@@ -39,8 +39,8 @@ import { useUIStore } from '../../stores/ui';
 import { isTauri } from '../../lib/platform';
 import { getTransport } from '../../lib/transport';
 import { useIsMobile } from '../../hooks';
-import { readerEditorActions } from '../../lib/reader-editor-bridge';
 import { startNewAtom } from '../../lib/new-atom';
+import { readerEditorActions } from '../../lib/reader-editor-bridge';
 
 export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const atoms = useAtomsStore(s => s.atoms);
@@ -274,7 +274,8 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   }, [setChatSidebarWidth]);
 
   const handleOpenSearch = useCallback(() => {
-    if (readerState.atomId) {
+    const atomId = readerState.atomId;
+    if (atomId && !atomId.startsWith('memory:') && !atomId.startsWith('category:') && !atomId.startsWith('entity:')) {
       readerEditorActions.current?.openSearch(readerState.highlightText ?? undefined);
       return;
     }
@@ -356,7 +357,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
             </div>
           )}
 
-          {/* Search button — find-in-note when an atom tab is active, else palette. */}
+          {/* memU readers have no inline editor, so their search stays global. */}
           <button
             onClick={handleOpenSearch}
             className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
