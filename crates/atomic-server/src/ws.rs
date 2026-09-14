@@ -3,8 +3,12 @@
 use crate::routes::memu_proxy;
 use crate::state::{AppState, ServerEvent};
 use actix_web::{web, HttpRequest, HttpResponse};
+use futures::StreamExt;
 use std::collections::HashMap;
 use tokio::sync::broadcast;
+
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// WebSocket upgrade handler
 /// Auth via query param: /ws?token=xxx
@@ -51,7 +55,7 @@ pub async fn ws_handler(
         _ => return Ok(HttpResponse::Unauthorized().finish()),
     }
 
-    let (response, mut session, _msg_stream) = actix_ws::handle(&req, stream)?;
+    let (response, mut session, mut msg_stream) = actix_ws::handle(&req, stream)?;
 
     // Subscribe to broadcast channel
     let mut rx = state.event_tx.subscribe();
@@ -60,8 +64,12 @@ pub async fn ws_handler(
     // Spawn task to forward broadcast events to this WebSocket client
     actix_web::rt::spawn(async move {
         let mut ownership = HashMap::<(String, String), bool>::new();
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_seen = tokio::time::Instant::now();
         loop {
-            match rx.recv().await {
+            tokio::select! {
+            broadcast = rx.recv() => match broadcast {
                 Ok(event) => {
                     if let Some(scope) = scope.as_ref() {
                         let selected_database =
@@ -120,8 +128,30 @@ pub async fn ws_handler(
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
+            },
+            inbound = msg_stream.next() => match inbound {
+                Some(Ok(actix_ws::Message::Close(_))) | None => break,
+                Some(Ok(actix_ws::Message::Ping(bytes))) => {
+                    last_seen = tokio::time::Instant::now();
+                    if session.pong(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(_)) => last_seen = tokio::time::Instant::now(),
+                Some(Err(_)) => break,
+            },
+            _ = heartbeat.tick() => {
+                if last_seen.elapsed() > CLIENT_TIMEOUT {
+                    let _ = session.close(None).await;
+                    return;
+                }
+                if session.ping(b"").await.is_err() {
+                    break;
+                }
+            }
             }
         }
+        let _ = session.close(None).await;
     });
 
     Ok(response)
