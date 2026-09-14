@@ -15,7 +15,7 @@ import { formatDate } from '../../lib/date';
 import { getTransport } from '../../lib/transport';
 import { findSimilarAtoms } from '../../lib/api';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
-import { DossierMarkdown, MemoryCitationLinks } from '../memu/DossierMarkdown';
+import { DossierMarkdown, DossierUsageLinks, MemoryCitationLinks } from '../memu/DossierMarkdown';
 import { MemoryEntityControls } from '../memu/EntityManager';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
 import type {
@@ -320,6 +320,7 @@ function AtomReaderContent({
   const isMemuCategory = atom.id.startsWith('category:');
   const isMemuEntity = atom.id.startsWith('entity:');
   const isMemuAtom = isMemuMemory || isMemuCategory || isMemuEntity;
+  const memoryIsCited = atom.dossier_usages?.some(usage => usage.cited) ?? false;
   const [memuTitle, setMemuTitle] = useState(atom.title);
   const [memuDescription, setMemuDescription] = useState(atom.description ?? '');
   const [memuSummary, setMemuSummary] = useState(atom.content);
@@ -627,13 +628,14 @@ function AtomReaderContent({
                         <h1 className="text-2xl font-semibold text-[var(--color-text-primary)]">{atom.title}</h1>
                         {atom.description && <p className="text-sm leading-6 text-[var(--color-text-secondary)]">{atom.description}</p>}
                         <div className="prose prose-sm prose-invert max-w-none leading-6 prose-headings:text-[var(--color-text-primary)] prose-p:text-[var(--color-text-primary)] prose-strong:text-[var(--color-text-primary)] prose-li:text-[var(--color-text-primary)]">
-                          <DossierMarkdown citations={atom.citations}>{atom.content}</DossierMarkdown>
+                          <DossierMarkdown citations={atom.citations} highlightRef={highlightText}>{atom.content}</DossierMarkdown>
                         </div>
                       </>
                     )}
                     {memuError && (
                       <p className="rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{memuError}</p>
                     )}
+                    {isMemuMemory && <DossierUsageLinks usages={atom.dossier_usages} />}
                     {isMemuCategory && memuEditing && <MemoryCitationLinks citations={atom.citations} />}
                     {isMemuCategory && (
                       <DossierMembershipControls
@@ -675,7 +677,8 @@ function AtomReaderContent({
                       {isMemuMemory ? (
                         <button
                           onClick={() => setShowDeleteModal(true)}
-                          disabled={memuStatus !== 'idle'}
+                          disabled={memuStatus !== 'idle' || memoryIsCited}
+                          title={memoryIsCited ? 'Review current dossier citations before deleting' : undefined}
                           className="rounded border border-red-500/50 px-3 py-1.5 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]"
                         >
                           Delete

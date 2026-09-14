@@ -24,6 +24,13 @@ export interface DossierMember {
   cited: boolean;
 }
 
+export interface DossierUsage {
+  id: string;
+  name: string;
+  cited: boolean;
+  ref?: string | null;
+}
+
 export interface DossierFields {
   description?: string | null;
   approved_description?: string | null;
@@ -36,6 +43,7 @@ export interface DossierFields {
   last_revised_at?: string | null;
   citations?: MemoryCitation[];
   members?: DossierMember[];
+  dossier_usages?: DossierUsage[];
   summaries_revision?: number;
 }
 

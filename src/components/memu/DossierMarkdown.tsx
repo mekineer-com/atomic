@@ -1,6 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import type { MemoryCitation } from '../../stores/atoms';
+import type { DossierUsage, MemoryCitation } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
 
 export const safeDossierHref = (href?: string) => href && /^(https?:|mailto:|#)/i.test(href) ? href : undefined;
@@ -8,9 +8,11 @@ export const safeDossierHref = (href?: string) => href && /^(https?:|mailto:|#)/
 export function DossierMarkdown({
   children,
   citations = [],
+  highlightRef,
 }: {
   children: string;
   citations?: MemoryCitation[];
+  highlightRef?: string | null;
 }) {
   const openReader = useUIStore(s => s.openReader);
   const byRef = new Map(citations.map((citation) => [citation.ref, citation]));
@@ -26,7 +28,8 @@ export function DossierMarkdown({
           return citation ? (
             <button
               type="button"
-              className="cursor-pointer bg-transparent p-0 [font:inherit] text-inherit underline decoration-dotted"
+              autoFocus={citation.ref === highlightRef}
+              className={`cursor-pointer p-0 [font:inherit] text-inherit underline decoration-dotted ${citation.ref === highlightRef ? 'rounded bg-amber-500/25' : 'bg-transparent'}`}
               title={citation.summary}
               onClick={(event) => openReader(`memory:${citation.memory_id}`, undefined, {
                 newTab: event.metaKey || event.ctrlKey,
@@ -62,6 +65,29 @@ export function MemoryCitationLinks({ citations = [] }: { citations?: MemoryCita
           })}
         >
           {citation.ref}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function DossierUsageLinks({ usages = [] }: { usages?: DossierUsage[] }) {
+  const openReader = useUIStore(s => s.openReader);
+  if (usages.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-xs text-[var(--color-text-tertiary)]">
+      <span>Used by</span>
+      {usages.map(usage => (
+        <button
+          key={usage.id}
+          type="button"
+          onClick={event => openReader(usage.id, usage.cited ? usage.ref ?? undefined : undefined, {
+            newTab: event.metaKey || event.ctrlKey,
+            background: event.metaKey || event.ctrlKey,
+          })}
+          className={`rounded-full border px-2 py-0.5 hover:text-[var(--color-text-primary)] ${usage.cited ? 'border-amber-500/50 text-amber-400' : 'border-[var(--color-border)]'}`}
+        >
+          {usage.name}{usage.cited ? ' · cited' : ''}
         </button>
       ))}
     </div>

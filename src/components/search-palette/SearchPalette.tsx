@@ -205,6 +205,7 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
     searchQuery,
     selectedIndex,
     isSearching,
+    searchError,
     isFullSearch,
     submitSearch,
     visibleGlobalResults,
@@ -460,6 +461,7 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
 
   const showEmptyState =
     !isSearching &&
+    !searchError &&
     searchQuery.trim().length >= 2 &&
     ((mode === 'tags' && tagResults.length === 0) ||
       (mode === 'atoms-hybrid' && hybridAtomResults.length === 0) ||
@@ -551,6 +553,12 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
           {mode === 'atoms-hybrid' && searchQuery.trim().length >= 2 ? renderAtoms(hybridAtomResults) : null}
 
           {mode === 'tags' && searchQuery.trim().length >= 2 ? renderTags(tagResults) : null}
+
+          {searchError ? (
+            <div className="mx-4 my-3 rounded border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-500">
+              Search failed: {searchError}
+            </div>
+          ) : null}
 
           {showEmptyState ? (
             <div className="px-4 py-8 text-center text-[var(--color-text-tertiary)] text-sm">

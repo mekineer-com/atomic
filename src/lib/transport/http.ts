@@ -275,6 +275,8 @@ export class HttpTransport implements Transport {
           ? error
           : Array.isArray(error?.conflicts)
             ? error.conflicts.join('; ')
+            : typeof error?.message === 'string' && Array.isArray(error?.dossiers)
+              ? `${error.message}: ${error.dossiers.map((dossier: { name?: string }) => dossier.name).filter(Boolean).join(', ')}`
             : JSON.stringify(error ?? errJson);
       } catch {
         errorMsg = text;

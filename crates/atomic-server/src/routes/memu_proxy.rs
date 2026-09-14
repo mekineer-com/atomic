@@ -273,6 +273,7 @@ pub fn atom_from_node(node: &Value) -> Value {
         "last_evidence_at": node["last_evidence_at"].clone(),
         "last_revised_at": node["last_revised_at"].clone(),
         "citations": node["citations"].clone(),
+        "dossier_usages": node["dossier_usages"].clone(),
         "entity_ids": entity_ids,
         "entity_names": entity_names,
         "summaries_revision": node["summaries_revision"].clone(),

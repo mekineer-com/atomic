@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getTransport } from '../../lib/transport';
 import { useCanvasStore } from '../../stores/canvas';
-import type { MemoryCitation } from '../../stores/atoms';
+import type { DossierUsage, MemoryCitation } from '../../stores/atoms';
 import { formatDate } from '../../lib/date';
-import { DossierMarkdown, MemoryCitationLinks } from './DossierMarkdown';
+import { DossierMarkdown, DossierUsageLinks, MemoryCitationLinks } from './DossierMarkdown';
 
 type MemoryReview = {
   id: string;
   summary: string;
   memory_type: string;
   category_names?: string[];
+  dossier_usages?: DossierUsage[];
   similar_to?: string[];
   similarity?: number;
 };
@@ -192,6 +193,7 @@ function MemoryRow({
   const [summary, setSummary] = useState(item.summary);
   const [busy, setBusy] = useState(false);
   const edited = summary !== item.summary;
+  const cited = item.dossier_usages?.some(usage => usage.cited) ?? false;
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -222,9 +224,10 @@ function MemoryRow({
         )}
       </div>
       <textarea className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
+      <DossierUsageLinks usages={item.dossier_usages} />
       <div className="mt-2 flex gap-2">
         <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary } : { id: item.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
-        <button disabled={busy} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
+        <button disabled={busy || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
       </div>
     </article>
   );

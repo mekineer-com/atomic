@@ -148,6 +148,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   });
   const [hybridAtomResults, setHybridAtomResults] = useState<SemanticSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [isFullSearch, setIsFullSearch] = useState(false);
   const [searchSources, setSearchSources] = useState<Record<GlobalSearchSource, boolean>>({
     atoms: true,
@@ -184,6 +185,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   useEffect(() => {
     const requestId = ++searchRequestRef.current;
     setIsFullSearch(false);
+    setSearchError(null);
     // Every query/mode change resets expansion — stale expanded state from a
     // previous query is never useful and would confuse the selection index.
     setExpandedAtomIds(new Set());
@@ -234,8 +236,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
       } catch (error) {
         console.error('Global search failed:', error);
         if (requestId === searchRequestRef.current) {
-          setGlobalResults({ atoms: [], wiki: [], chats: [], tags: [] });
-          setHybridAtomResults([]);
+          setSearchError(String(error));
         }
       } finally {
         if (requestId === searchRequestRef.current) setIsSearching(false);
@@ -258,6 +259,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
     const requestId = ++searchRequestRef.current;
     setIsSearching(true);
+    setSearchError(null);
     try {
       let limit = 20;
       while (requestId === searchRequestRef.current) {
@@ -274,6 +276,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
       if (requestId === searchRequestRef.current) setIsFullSearch(true);
     } catch (error) {
       console.error('Full search failed:', error);
+      if (requestId === searchRequestRef.current) setSearchError(String(error));
     } finally {
       if (requestId === searchRequestRef.current) setIsSearching(false);
     }
@@ -656,6 +659,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     searchQuery,
     selectedIndex,
     isSearching,
+    searchError,
     isFullSearch,
     submitSearch,
     visibleGlobalResults,
