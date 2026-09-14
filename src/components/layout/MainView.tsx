@@ -9,6 +9,7 @@ import {
   Library,
   Network,
   BookOpen,
+  Pencil,
   Search,
   Filter,
   Telescope,
@@ -378,6 +379,22 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
             <TabStrip />
           </div>
         </LayoutGroup>
+
+        {readerState.atomId &&
+          !readerState.atomId.startsWith('memory:') &&
+          !readerState.atomId.startsWith('category:') &&
+          !readerState.atomId.startsWith('entity:') && (
+          <button
+            onClick={() => useUIStore.getState().setReaderEditing(!readerState.editing)}
+            className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
+            title={readerState.editing ? 'Reading view (Ctrl+E)' : 'Edit note (Ctrl+E)'}
+            aria-label={readerState.editing ? 'Switch to reading view' : 'Edit note'}
+          >
+            {readerState.editing
+              ? <BookOpen className="w-4 h-4" strokeWidth={2} />
+              : <Pencil className="w-4 h-4" strokeWidth={2} />}
+          </button>
+        )}
 
         {/* Save status — visible whenever an atom tab is active and saving */}
         {readerState.atomId && readerState.saveStatus !== 'idle' && (

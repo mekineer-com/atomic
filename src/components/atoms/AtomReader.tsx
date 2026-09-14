@@ -309,7 +309,9 @@ function AtomReaderContent({
   onDismiss, onDelete, onTagClick, onRelatedAtomClick, onViewGraph, onAtomUpdated, onReload,
 }: AtomReaderContentProps) {
   const readerTheme = useUIStore(s => s.readerTheme);
-  const setReaderEditState = useUIStore(s => s.setReaderEditState);
+  const isEditing = useUIStore(s => s.readerState.editing);
+  const setReaderEditing = useUIStore(s => s.setReaderEditing);
+  const setReaderSaveStatus = useUIStore(s => s.setReaderSaveStatus);
   const retryTagging = useAtomsStore(s => s.retryTagging);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const editorHandleRef = useRef<AtomicCodeMirrorEditorHandle | null>(null);
@@ -427,28 +429,37 @@ function AtomReaderContent({
   }, [atom, isMemuCategory, isMemuMemory, onAtomUpdated]);
 
   useEffect(() => {
-    setReaderEditState(Boolean(initialEditing), saveStatus);
-    return () => {
-      setReaderEditState(false, 'idle');
-    };
-  }, [initialEditing, saveStatus, setReaderEditState]);
+    setReaderSaveStatus(saveStatus);
+  }, [saveStatus, setReaderSaveStatus]);
 
   useEffect(() => {
     if (!isMemuAtom) startEditing();
   }, [isMemuAtom, startEditing]);
 
   useEffect(() => {
-    if (!initialEditing) return;
-    const id = requestAnimationFrame(() => {
-      editorHandleRef.current?.focus();
-    });
-    return () => cancelAnimationFrame(id);
-  }, [initialEditing]);
+    if (!isMemuAtom && !atom.content.trim() && !useUIStore.getState().readerState.editing) {
+      setReaderEditing(true);
+    }
+  }, [atom.id, atom.content, isMemuAtom, setReaderEditing]);
 
+  const flushDraftRef = useRef(flushDraft);
+  useEffect(() => { flushDraftRef.current = flushDraft; }, [flushDraft]);
+
+  const prevEditingRef = useRef(isEditing);
+  const prevAtomIdRef = useRef(atom.id);
   useEffect(() => {
-    if (initialEditing) return;
+    if (isMemuAtom) return;
+    const wasEditing = prevEditingRef.current;
+    const sameAtom = prevAtomIdRef.current === atom.id;
+    prevEditingRef.current = isEditing;
+    prevAtomIdRef.current = atom.id;
+    if (isEditing) {
+      const id = requestAnimationFrame(() => editorHandleRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+    if (wasEditing && sameAtom) void flushDraftRef.current();
     containerRef.current?.focus({ preventScroll: true });
-  }, [initialEditing, atom.id]);
+  }, [atom.id, isEditing, isMemuAtom]);
 
   useEffect(() => {
     readerEditorActions.current = {
@@ -486,8 +497,25 @@ function AtomReaderContent({
         editorHandleRef.current?.openSearch();
         return;
       }
+      if (!isMemuAtom && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') {
+        e.preventDefault();
+        setReaderEditing(!isEditing);
+        return;
+      }
+      if (
+        !isMemuAtom && e.key === 'i' && !isEditing && !showDeleteModal &&
+        !e.metaKey && !e.ctrlKey && !e.altKey && !isTypingTarget(e.target)
+      ) {
+        e.preventDefault();
+        setReaderEditing(true);
+        return;
+      }
       if (e.key === 'Escape' && !showDeleteModal) {
         e.preventDefault();
+        if (!isMemuAtom && isEditing) {
+          setReaderEditing(false);
+          return;
+        }
         void (async () => {
           await flushDraft();
           onDismiss();
@@ -496,7 +524,7 @@ function AtomReaderContent({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [approveMemuSummary, flushDraft, isMemuAtom, memuEdited, memuSummaryApproved, onDismiss, saveMemuSummary, saveNow, showDeleteModal]);
+  }, [approveMemuSummary, flushDraft, isEditing, isMemuAtom, memuEdited, memuSummaryApproved, onDismiss, saveMemuSummary, saveNow, setReaderEditing, showDeleteModal]);
 
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {
@@ -703,7 +731,8 @@ function AtomReaderContent({
                   documentId={atom.id}
                   markdownSource={editContent}
                   initialRevealText={highlightText}
-                  blurEditorOnMount={!initialEditing}
+                  readOnly={!isEditing}
+                  blurEditorOnMount={!isEditing}
                   onMarkdownChange={setEditContent}
                   onLinkClick={(url) => {
                     void openExternalUrl(url);
@@ -846,6 +875,11 @@ function AtomReaderContent({
       </Modal>
     </div>
   );
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
 }
 
 function searchResultsToAtomLinkSuggestions(

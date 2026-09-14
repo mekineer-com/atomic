@@ -160,7 +160,8 @@ interface UIStore {
   // Legacy public openers (delegate to openEntry)
   openReader: (atomId: string, highlightText?: string, opts?: { newTab?: boolean; background?: boolean }) => void;
   openReaderEditing: (atomId: string, opts?: { newTab?: boolean }) => void;
-  setReaderEditState: (editing: boolean, saveStatus?: 'idle' | 'saving' | 'saved' | 'error') => void;
+  setReaderEditing: (editing: boolean) => void;
+  setReaderSaveStatus: (saveStatus: 'idle' | 'saving' | 'saved' | 'error') => void;
   closeReader: () => void;
   openWikiReader: (tagId: string, tagName: string, highlightText?: string, opts?: { newTab?: boolean }) => void;
   openReportDetail: (reportId: string, opts?: { newTab?: boolean; title?: string }) => void;
@@ -762,9 +763,22 @@ export const useUIStore = create<UIStore>()(
         );
       },
 
-      setReaderEditState: (editing, saveStatus) =>
+      setReaderEditing: (editing) =>
+        set((state) => {
+          const tabs = state.tabs.map((tab) => {
+            if (tab.id !== state.activeTabId) return tab;
+            const entry = tab.stack[tab.stackIndex];
+            if (!entry || entry.type !== 'atom' || entry.editing === editing) return tab;
+            const stack = [...tab.stack];
+            stack[tab.stackIndex] = { ...entry, editing };
+            return { ...tab, stack };
+          });
+          return { tabs, readerState: { ...state.readerState, editing } };
+        }),
+
+      setReaderSaveStatus: (saveStatus) =>
         set((state) => ({
-          readerState: { ...state.readerState, editing, ...(saveStatus !== undefined ? { saveStatus } : {}) },
+          readerState: { ...state.readerState, saveStatus },
         })),
 
       closeReader: () => {

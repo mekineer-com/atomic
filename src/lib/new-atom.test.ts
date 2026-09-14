@@ -32,3 +32,34 @@ describe('startNewAtom', () => {
     expect(openReaderEditing).toHaveBeenCalledWith('atom:test');
   });
 });
+
+describe('reader edit mode', () => {
+  it('persists the mode in the active note tab', () => {
+    useUIStore.setState({
+      activeTabId: 'tab-field-notes',
+      tabs: [{
+        id: 'tab-field-notes',
+        ordinal: 1,
+        stackIndex: 0,
+        stack: [{
+          type: 'atom',
+          atomId: 'atom:field-notes',
+          tagId: null,
+          highlightText: null,
+          editing: false,
+        }],
+      }],
+      readerState: {
+        atomId: 'atom:field-notes',
+        highlightText: null,
+        editing: false,
+        saveStatus: 'idle',
+      },
+    });
+
+    useUIStore.getState().setReaderEditing(true);
+
+    expect(useUIStore.getState().readerState.editing).toBe(true);
+    expect(useUIStore.getState().tabs[0].stack[0]).toMatchObject({ editing: true });
+  });
+});
