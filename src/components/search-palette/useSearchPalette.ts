@@ -149,7 +149,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   const [hybridAtomResults, setHybridAtomResults] = useState<SemanticSearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [isFullSearch, setIsFullSearch] = useState(false);
+  const [globalLimit, setGlobalLimit] = useState(SECTION_LIMIT);
   const [searchSources, setSearchSources] = useState<Record<GlobalSearchSource, boolean>>({
     atoms: true,
     wiki: true,
@@ -186,7 +186,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   useEffect(() => {
     searchAbortRef.current?.abort();
     const requestId = ++searchRequestRef.current;
-    setIsFullSearch(false);
+    setGlobalLimit(SECTION_LIMIT);
     setSearchError(null);
     // Every query/mode change resets expansion — stale expanded state from a
     // previous query is never useful and would confuse the selection index.
@@ -257,42 +257,49 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     };
   }, [mode, searchQuery]);
 
-  const submitSearch = useCallback(async () => {
-    const trimmed = searchQuery.trim();
-    const enabledSources = (Object.keys(searchSources) as GlobalSearchSource[])
-      .filter((source) => searchSources[source]);
-    if (mode !== 'global' || trimmed.length < 2 || enabledSources.length === 0 || isFullSearch) return;
-
+  useEffect(() => {
+    if (isOpen) return;
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
     searchAbortRef.current?.abort();
+    searchRequestRef.current += 1;
+    setIsSearching(false);
+  }, [isOpen]);
+
+  const enabledSources = useMemo(
+    () => (Object.keys(searchSources) as GlobalSearchSource[]).filter((source) => searchSources[source]),
+    [searchSources],
+  );
+  const canLoadMore = mode === 'global' && !isSearching && enabledSources.length > 0
+    && nextFullSearchLimit(globalResults, enabledSources, globalLimit) !== null;
+
+  const loadMore = useCallback(async () => {
+    const trimmed = searchQuery.trim();
+    if (mode !== 'global' || trimmed.length < 2 || !canLoadMore || searchAbortRef.current) return;
+
+    if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
     const requestId = ++searchRequestRef.current;
     const controller = new AbortController();
     searchAbortRef.current = controller;
     setIsSearching(true);
     setSearchError(null);
     try {
-      let limit = 20;
-      while (requestId === searchRequestRef.current) {
-        const results = await getTransport().invoke<GlobalSearchResponse>('search_global_keyword', {
-          query: trimmed,
-          sectionLimit: limit,
-        }, { signal: controller.signal });
-        if (requestId !== searchRequestRef.current) return;
-        setGlobalResults(results);
-        const nextLimit = nextFullSearchLimit(results, enabledSources, limit);
-        if (nextLimit === null) break;
-        limit = nextLimit;
-      }
-      if (requestId === searchRequestRef.current) setIsFullSearch(true);
+      const nextLimit = globalLimit * 2;
+      const results = await getTransport().invoke<GlobalSearchResponse>('search_global_keyword', {
+        query: trimmed,
+        sectionLimit: nextLimit,
+      }, { signal: controller.signal });
+      if (requestId !== searchRequestRef.current) return;
+      setGlobalResults(results);
+      setGlobalLimit(nextLimit);
     } catch (error) {
       if (controller.signal.aborted) return;
-      console.error('Full search failed:', error);
+      console.error('Loading more search results failed:', error);
       if (requestId === searchRequestRef.current) setSearchError(String(error));
     } finally {
       if (searchAbortRef.current === controller) searchAbortRef.current = null;
       if (requestId === searchRequestRef.current) setIsSearching(false);
     }
-  }, [isFullSearch, mode, searchQuery, searchSources]);
+  }, [canLoadMore, globalLimit, mode, searchQuery]);
 
   const tagResults = useMemo(() => {
     if (mode !== 'tags') return [];
@@ -649,8 +656,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
         }
         case 'Enter':
           e.preventDefault();
-          if (mode === 'global') void submitSearch();
-          else handleSelect(selectedIndex);
+          handleSelect(selectedIndex);
           break;
         case 'Escape':
           e.preventDefault();
@@ -658,7 +664,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
           break;
       }
     },
-    [selectedIndex, totalItems, flatItems, handleSelect, mode, onClose, submitSearch]
+    [selectedIndex, totalItems, flatItems, handleSelect, onClose]
   );
 
   const selectedItem = flatItems[selectedIndex];
@@ -676,8 +682,8 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     selectedIndex,
     isSearching,
     searchError,
-    isFullSearch,
-    submitSearch,
+    canLoadMore,
+    loadMore,
     visibleGlobalResults,
     searchSources,
     toggleSearchSource,

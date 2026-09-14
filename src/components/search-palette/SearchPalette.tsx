@@ -1,6 +1,6 @@
 import { createContext, Fragment, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { BookOpen, FileText, Hash, MessageCircle, Minus, Plus, Send } from 'lucide-react';
+import { BookOpen, FileText, Hash, MessageCircle, Minus, Plus } from 'lucide-react';
 import { CommandInput } from '../command-palette/CommandInput';
 import { byteOffsetsToUtf16, MATCH_SNIPPET_PAD, useSearchPalette } from './useSearchPalette';
 import { MATCH_END, MATCH_START, markdownToPlainText } from './markdownToPlainText';
@@ -206,8 +206,8 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
     selectedIndex,
     isSearching,
     searchError,
-    isFullSearch,
-    submitSearch,
+    canLoadMore,
+    loadMore,
     visibleGlobalResults,
     searchSources,
     toggleSearchSource,
@@ -257,6 +257,19 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
   const handleMouseMove = useCallback(() => {
     if (usingKeyboard) setUsingKeyboard(false);
   }, [usingKeyboard]);
+  const handleScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    if (canLoadMore && element.scrollHeight - element.scrollTop - element.clientHeight < 80) {
+      void loadMore();
+    }
+  }, [canLoadMore, loadMore]);
+
+  useEffect(() => {
+    const element = scrollContainerRef.current;
+    if (isOpen && canLoadMore && element && element.scrollHeight <= element.clientHeight) {
+      void loadMore();
+    }
+  }, [canLoadMore, isOpen, loadMore, visibleGlobalResults]);
 
   if (!isOpen) return null;
 
@@ -505,18 +518,6 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
           prefix={prefix}
           onClearPrefix={handleClearPrefix}
           shortcutHint={null}
-          action={mode === 'global' ? (
-            <button
-              type="button"
-              onClick={() => void submitSearch()}
-              disabled={isSearching || isFullSearch || searchQuery.trim().length < 2}
-              className="rounded p-1.5 text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-hover)] hover:text-[var(--color-text-primary)] disabled:cursor-default disabled:opacity-40"
-              title={isFullSearch ? 'All results shown' : 'Show all results'}
-              aria-label={isFullSearch ? 'All results shown' : 'Show all results'}
-            >
-              <Send className="h-4 w-4" strokeWidth={2} />
-            </button>
-          ) : undefined}
           placeholder={
             mode === 'tags'
               ? 'Search tags...'
@@ -529,6 +530,7 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
         <div
           ref={scrollContainerRef}
           onMouseMove={handleMouseMove}
+          onScroll={handleScroll}
           className="overflow-y-auto max-h-[50vh] py-2"
         >
           {!searchQuery.trim() ? (
@@ -575,7 +577,7 @@ export function SearchPalette({ isOpen, onClose, initialQuery = '' }: SearchPale
             </span>
             <span className="flex items-center gap-1">
               <kbd className="px-1 py-0.5 bg-[var(--color-bg-hover)] border border-[var(--color-border-hover)] rounded text-[var(--color-text-primary)]">↵</kbd>
-              {mode === 'global' ? 'show all' : 'open'}
+              open
             </span>
             {canExpandSelected ? (
               <span className="flex items-center gap-1">
