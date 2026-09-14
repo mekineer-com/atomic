@@ -222,7 +222,7 @@ export class HttpTransport implements Transport {
     return this.connected;
   }
 
-  async invoke<T>(command: string, args?: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<T> {
+  async invoke<T>(command: string, args?: Record<string, unknown>, options?: { signal?: AbortSignal; workspace?: boolean }): Promise<T> {
     if (this.authExpired) {
       throw new Error('Authentication expired. Please reconnect with a valid token.');
     }
@@ -246,7 +246,7 @@ export class HttpTransport implements Transport {
       headers['X-OpenAlma-Soul'] = encodeURIComponent(identity.soulId);
     }
     if (this.databaseId) headers['X-Atomic-Database'] = this.databaseId;
-    if (this.workspaceMode) headers['X-Atomic-Source'] = 'workspace';
+    if (this.workspaceMode || options?.workspace) headers['X-Atomic-Source'] = 'workspace';
 
     const fetchOpts: RequestInit = { method: spec.method, headers, signal: options?.signal };
 

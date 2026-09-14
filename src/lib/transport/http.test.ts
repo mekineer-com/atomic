@@ -17,4 +17,19 @@ describe('HttpTransport cancellation', () => {
 
     await expect(request).rejects.toMatchObject({ name: 'AbortError' });
   });
+
+  it('can identify a request as a Workspace operation independently of the selected source', async () => {
+    const fetchMock = vi.fn(async (_url, _init: RequestInit) => new Response('{}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
+
+    await transport.invoke('update_atom_content_only', {
+      id: 'fictional-note', content: 'Fictional content', tagIds: [],
+    }, { workspace: true });
+
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-Atomic-Source': 'workspace' });
+  });
 });

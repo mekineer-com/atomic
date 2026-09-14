@@ -276,7 +276,7 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
                 };
               });
             } else {
-              await deleteAtom(atomId);
+              await deleteAtom(atomId, { workspace: true });
             }
             await fetchTags();
             removeAtomFromTabs(atomId);
@@ -490,7 +490,7 @@ function AtomReaderContent({
 
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
-        void (isMemuAtom ? (memuEdited ? saveMemuSummary() : (!memuSummaryApproved && approveMemuSummary())) : saveNow());
+        void Promise.resolve(isMemuAtom ? (memuEdited ? saveMemuSummary() : (!memuSummaryApproved && approveMemuSummary())) : saveNow()).catch(() => undefined);
         return;
       }
       if (!isMemuAtom && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {

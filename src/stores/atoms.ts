@@ -196,9 +196,9 @@ interface AtomsStore {
   fetchNextPage: () => Promise<void>;
   createAtom: (content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
   updateAtom: (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
-  updateAtomContentOnly: (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
-  processAtomPipeline: (atomId: string) => Promise<void>;
-  deleteAtom: (id: string) => Promise<void>;
+  updateAtomContentOnly: (id: string, content: string, sourceUrl?: string, tagIds?: string[], options?: { workspace?: boolean }) => Promise<AtomWithTags>;
+  processAtomPipeline: (atomId: string, options?: { workspace?: boolean }) => Promise<void>;
+  deleteAtom: (id: string, options?: { workspace?: boolean }) => Promise<void>;
   clearError: () => void;
 
   // Offline cache
@@ -488,14 +488,14 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
 
   /** Save content/metadata without triggering embedding or tagging pipeline.
    *  Used by auto-save during inline editing. */
-  updateAtomContentOnly: async (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => {
+  updateAtomContentOnly: async (id: string, content: string, sourceUrl?: string, tagIds?: string[], options?: { workspace?: boolean }) => {
     try {
       const atom = await getTransport().invoke<AtomWithTags>('update_atom_content_only', {
         id,
         content,
         sourceUrl: sourceUrl || null,
         tagIds: tagIds || [],
-      });
+      }, options);
       const summary = toSummary(atom);
       set((state) => ({
         atoms: state.atoms.map((a) => (a.id === id ? summary : a)),
@@ -507,9 +507,9 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
     }
   },
 
-  processAtomPipeline: async (atomId: string) => {
+  processAtomPipeline: async (atomId: string, options?: { workspace?: boolean }) => {
     try {
-      await getTransport().invoke('process_atom_pipeline', { id: atomId });
+      await getTransport().invoke('process_atom_pipeline', { id: atomId }, options);
       set((state) => ({
         atoms: state.atoms.map((a) =>
           a.id === atomId
@@ -523,10 +523,10 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
     }
   },
 
-  deleteAtom: async (id: string) => {
+  deleteAtom: async (id: string, options?: { workspace?: boolean }) => {
     set({ error: null });
     try {
-      await getTransport().invoke('delete_atom', { id });
+      await getTransport().invoke('delete_atom', { id }, options);
       useCanvasStore.getState().invalidateCanvasData();
       set((state) => ({
         atoms: state.atoms.filter((a) => a.id !== id),

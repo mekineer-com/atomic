@@ -154,6 +154,7 @@ export function useInlineEditor({
           content,
           sourceUrl || undefined,
           tagIds,
+          { workspace: true },
         );
         lastSavedRef.current = {
           content,
@@ -165,8 +166,9 @@ export function useInlineEditor({
         }
         setSaveStatus('saved');
         onAtomUpdated?.(saved);
-      } catch {
+      } catch (error) {
         setSaveStatus('error');
+        throw error;
       } finally {
         isSavingRef.current = false;
       }
@@ -179,14 +181,14 @@ export function useInlineEditor({
   const finalizeDraft = useCallback(async () => {
     if (readOnly) return;
     // Wait for any in-flight content-only save to complete first
-    await savingPromiseRef.current;
+    await savingPromiseRef.current.catch(() => undefined);
     setSaveStatus('saving');
     try {
       if (isDirty()) {
         await doContentSave();
       }
       if (needsPipelineRef.current) {
-        await processAtomPipeline(atom.id);
+        await processAtomPipeline(atom.id, { workspace: true });
         needsPipelineRef.current = false;
       }
       setSaveStatus('saved');
@@ -202,7 +204,7 @@ export function useInlineEditor({
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       debounceRef.current = null;
-      doContentSave();
+      void doContentSave().catch(() => undefined);
     }, AUTO_SAVE_DELAY);
   }, [doContentSave, readOnly]);
 
@@ -245,7 +247,7 @@ export function useInlineEditor({
     // removeAtomFromTabs both closes the now-orphaned tab AND navigates to
     // the atoms list — so we don't need a separate dismiss call.
     if (wasCreatedEmpty.current && !editContent.trim()) {
-      deleteAtom(atom.id).catch(console.error);
+      deleteAtom(atom.id, { workspace: true }).catch(console.error);
       fetchTags().catch(console.error);
       useUIStore.getState().removeAtomFromTabs(atom.id);
       return;
@@ -318,7 +320,7 @@ export function useInlineEditor({
           // Never had content — clean up the empty atom and any tab still
           // referencing it (the user may have navigated to a base view via
           // main nav, leaving an orphan pill pointing at the deleted atom).
-          useAtomsStore.getState().deleteAtom(atom.id).catch(console.error);
+          useAtomsStore.getState().deleteAtom(atom.id, { workspace: true }).catch(console.error);
           useUIStore.getState().removeAtomFromTabs(atom.id);
         } else if (hasDraftChanges) {
           savingPromiseRef.current
@@ -333,6 +335,7 @@ export function useInlineEditor({
                 latestContent,
                 latestSourceUrl || undefined,
                 tagIds,
+                { workspace: true },
               );
             })
             .catch(console.error);
