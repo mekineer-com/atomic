@@ -546,7 +546,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
           <FindingReader atomId={findingReaderState.atomId} />
         ) : reportsDetailState.reportId ? (
           <ReportDetailView reportId={reportsDetailState.reportId} />
-        ) : viewMode === 'dashboard' ? (
+        ) : !onBaseView ? null : viewMode === 'dashboard' ? (
           <DashboardView />
         ) : viewMode === 'wiki' ? (
           <WikiFullView />
