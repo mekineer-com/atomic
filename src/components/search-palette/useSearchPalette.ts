@@ -518,6 +518,10 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
           break;
         case 'tag': {
           activateIdSource(item.result.id);
+          if (item.result.id.startsWith('category:')) {
+            useUIStore.getState().openReader(item.result.id);
+            break;
+          }
           const ancestorIds: string[] = [];
           const allTags = flattenTags(tags);
           const tagMap = new Map(allTags.map((tag) => [tag.id, tag]));

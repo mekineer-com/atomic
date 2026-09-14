@@ -26,6 +26,7 @@ function entriesEquivalent(a: TabEntry, parsed: ParsedRoute): boolean {
   if (parsed.kind === 'wiki-reader') return a.type === 'wiki' && a.tagId === parsed.tagId;
   if (parsed.kind === 'reports-detail') return a.type === 'report' && a.reportId === parsed.reportId;
   if (parsed.kind === 'finding-reader') return a.type === 'finding' && a.atomId === parsed.atomId;
+  if (parsed.kind === 'tool') return a.type === 'tool' && a.tool === parsed.tool;
   return false;
 }
 
@@ -65,6 +66,7 @@ function entryFromRoute(parsed: ParsedRoute, fallbackEntry?: TabEntry): TabEntry
       : undefined;
     return { type: 'finding', atomId: parsed.atomId, title };
   }
+  if (parsed.kind === 'tool') return { type: 'tool', tool: parsed.tool };
   return null;
 }
 
@@ -121,6 +123,15 @@ function projectActiveEntry(entry: TabEntry | null) {
       wikiReaderState: emptyWiki,
       reportsDetailState: emptyReport,
       findingReaderState: { atomId: entry.atomId },
+      localGraphPatch: { isOpen: false },
+    };
+  }
+  if (entry.type === 'tool') {
+    return {
+      readerState: emptyReader,
+      wikiReaderState: emptyWiki,
+      reportsDetailState: emptyReport,
+      findingReaderState: emptyFinding,
       localGraphPatch: { isOpen: false },
     };
   }
@@ -267,6 +278,7 @@ export function RouterBridge() {
         tabs: reconciled.tabs,
         activeTabId: reconciled.activeTabId,
         selectedTagId:
+          parsed.kind === 'tool' ||
           parsed.kind === 'wiki-reader' ||
           parsed.kind === 'reports-detail' ||
           parsed.kind === 'finding-reader'
@@ -296,6 +308,7 @@ export function RouterBridge() {
       activeTabId: tabId,
       nextTabOrdinal: s.nextTabOrdinal + 1,
       selectedTagId:
+        parsed.kind === 'tool' ||
         parsed.kind === 'wiki-reader' ||
         parsed.kind === 'reports-detail' ||
         parsed.kind === 'finding-reader'

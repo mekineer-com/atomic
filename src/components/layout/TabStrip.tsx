@@ -15,7 +15,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { motion } from 'motion/react';
-import { ChevronLeft, ChevronRight, X, BookOpen, Network, FileText, Telescope, Quote } from 'lucide-react';
+import { ChevronLeft, ChevronRight, X, BookOpen, Network, FileText, Telescope, Quote, ClipboardCheck, Users } from 'lucide-react';
 import { useUIStore, type Tab, type TabEntry } from '../../stores/ui';
 import { useAtomsStore } from '../../stores/atoms';
 import { useReportsStore } from '../../stores/reports';
@@ -52,7 +52,7 @@ function fetchAtomTitle(atomId: string, onResolved: (title: string) => void): vo
     });
 }
 
-function useResolvedTitle(entry: TabEntry, ordinal: number): { label: string; icon: 'atom' | 'wiki' | 'graph' | 'report' | 'finding' } {
+function useResolvedTitle(entry: TabEntry, ordinal: number): { label: string; icon: 'atom' | 'wiki' | 'graph' | 'report' | 'finding' | 'approvals' | 'entities' } {
   const atomFromStore = useAtomsStore(
     useShallow((s) => {
       if (entry.type === 'atom' || entry.type === 'graph') {
@@ -99,7 +99,7 @@ function useResolvedTitle(entry: TabEntry, ordinal: number): { label: string; ic
   });
 
   useEffect(() => {
-    if (entry.type === 'wiki' || entry.type === 'report' || entry.type === 'finding') return;
+    if (entry.type === 'wiki' || entry.type === 'report' || entry.type === 'finding' || entry.type === 'tool') return;
     if (atomFromStore && atomFromStore.trim().length > 0) return;
     if (entry.title && entry.title.trim().length > 0) return;
     fetchAtomTitle(entry.atomId, (title) => setResolved(title));
@@ -128,6 +128,10 @@ function useResolvedTitle(entry: TabEntry, ordinal: number): { label: string; ic
       (entry.title && entry.title.trim()) ||
       `Finding ${ordinal}`;
     return { label, icon: 'finding' };
+  }
+
+  if (entry.type === 'tool') {
+    return { label: entry.tool === 'approvals' ? 'Approvals' : 'Entities', icon: entry.tool };
   }
 
   const candidate =
@@ -163,6 +167,8 @@ function SortablePill({ tab, isActive, onSwitch, onClose, onBack, onForward, onM
     icon === 'graph' ? Network :
     icon === 'report' ? Telescope :
     icon === 'finding' ? Quote :
+    icon === 'approvals' ? ClipboardCheck :
+    icon === 'entities' ? Users :
     FileText;
 
   const style: React.CSSProperties = {

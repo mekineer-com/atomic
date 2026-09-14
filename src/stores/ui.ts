@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { navigateTo } from '../router/navigate-ref';
-import { viewPath, atomReaderPath, wikiReaderPath, atomGraphPath, reportDetailPath, findingReaderPath } from '../router/routes';
+import { viewPath, atomReaderPath, wikiReaderPath, atomGraphPath, reportDetailPath, findingReaderPath, toolPath } from '../router/routes';
 import type { CanvasCameraState } from './canvas';
 
 export type ViewMode = 'dashboard' | 'atoms' | 'canvas' | 'wiki' | 'reports';
@@ -62,7 +62,8 @@ export type TabEntry =
   | { type: 'wiki'; tagId: string; tagName: string; highlightText: string | null }
   | { type: 'graph'; atomId: string; tagId: string | null; title?: string }
   | { type: 'report'; reportId: string; title?: string }
-  | { type: 'finding'; atomId: string; title?: string };
+  | { type: 'finding'; atomId: string; title?: string }
+  | { type: 'tool'; tool: 'approvals' | 'entities' };
 
 export interface Tab {
   id: string;
@@ -148,6 +149,7 @@ interface UIStore {
   toggleTagExpanded: (tagId: string) => void;
   // Tab actions
   openEntry: (entry: TabEntry, opts?: { newTab?: boolean; background?: boolean }) => void;
+  openToolTab: (tool: 'approvals' | 'entities') => void;
   switchToTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
@@ -245,6 +247,7 @@ function entriesEquivalent(a: TabEntry, b: TabEntry): boolean {
   if (a.type === 'graph' && b.type === 'graph') return a.atomId === b.atomId;
   if (a.type === 'report' && b.type === 'report') return a.reportId === b.reportId;
   if (a.type === 'finding' && b.type === 'finding') return a.atomId === b.atomId;
+  if (a.type === 'tool' && b.type === 'tool') return a.tool === b.tool;
   return false;
 }
 
@@ -253,6 +256,7 @@ function entryUrl(entry: TabEntry): string {
   if (entry.type === 'wiki') return wikiReaderPath(entry.tagId, entry.tagName);
   if (entry.type === 'report') return reportDetailPath(entry.reportId);
   if (entry.type === 'finding') return findingReaderPath(entry.atomId);
+  if (entry.type === 'tool') return toolPath(entry.tool);
   return atomGraphPath(entry.atomId, entry.tagId);
 }
 
@@ -317,6 +321,15 @@ function projectActiveEntry(entry: TabEntry | null): {
       wikiReaderState: emptyWiki,
       reportsDetailState: emptyReport,
       findingReaderState: { atomId: entry.atomId },
+      localGraphPatch: { isOpen: false },
+    };
+  }
+  if (entry.type === 'tool') {
+    return {
+      readerState: emptyReader,
+      wikiReaderState: emptyWiki,
+      reportsDetailState: emptyReport,
+      findingReaderState: emptyFinding,
       localGraphPatch: { isOpen: false },
     };
   }
@@ -554,6 +567,25 @@ export const useUIStore = create<UIStore>()(
           };
         });
         navigateTo(entryUrl(entry));
+      },
+
+      openToolTab: (tool) => {
+        const state = get();
+        for (const tab of state.tabs) {
+          const index = tab.stack.findIndex((entry) => entry.type === 'tool' && entry.tool === tool);
+          if (index < 0) continue;
+          const entry = tab.stack[index];
+          const projected = projectActiveEntry(entry);
+          set((s) => ({
+            tabs: s.tabs.map((candidate) => candidate.id === tab.id ? { ...candidate, stackIndex: index } : candidate),
+            activeTabId: tab.id,
+            ...projected,
+            localGraph: { ...s.localGraph, ...projected.localGraphPatch },
+          }));
+          navigateTo(entryUrl(entry));
+          return;
+        }
+        state.openEntry({ type: 'tool', tool }, { newTab: true });
       },
 
       switchToTab: (tabId) => {

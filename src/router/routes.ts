@@ -17,7 +17,8 @@ export type ParsedRoute =
   | { kind: 'graph'; atomId: string; tagId: string | null }
   | { kind: 'wiki-reader'; tagId: string; tagName: string | null }
   | { kind: 'reports-detail'; reportId: string }
-  | { kind: 'finding-reader'; atomId: string };
+  | { kind: 'finding-reader'; atomId: string }
+  | { kind: 'tool'; tool: 'approvals' | 'entities' };
 
 const VIEW_MODES: ViewMode[] = ['dashboard', 'atoms', 'canvas', 'wiki', 'reports'];
 
@@ -62,6 +63,10 @@ export function findingReaderPath(atomId: string): string {
   return `/findings/${encodeURIComponent(atomId)}`;
 }
 
+export function toolPath(tool: 'approvals' | 'entities'): string {
+  return `/${tool}`;
+}
+
 /// Parse a pathname + search string into one of our known route shapes.
 /// Unknown paths fall back to `dashboard` — no dedicated 404 for now.
 export function parseLocation(pathname: string, search: string): ParsedRoute {
@@ -72,6 +77,10 @@ export function parseLocation(pathname: string, search: string): ParsedRoute {
   const path = pathname !== '/' && pathname.endsWith('/')
     ? pathname.slice(0, -1)
     : pathname;
+
+  if (path === '/approvals' || path === '/entities') {
+    return { kind: 'tool', tool: path.slice(1) as 'approvals' | 'entities' };
+  }
 
   // Local-graph overlay: /atoms/<id>/graph  (checked before reader so the
   // more specific path wins).

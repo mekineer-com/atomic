@@ -62,19 +62,21 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
   const createAtom = useAtomsStore(s => s.createAtom);
 
-  const { viewMode, atomsLayout, knowledgeSource, searchQuery, activeTabId } = useUIStore(
+  const { viewMode, atomsLayout, knowledgeSource, searchQuery, activeTabId, tabs } = useUIStore(
     useShallow(s => ({
       viewMode: s.viewMode,
       atomsLayout: s.atomsLayout,
       knowledgeSource: s.knowledgeSource,
       searchQuery: s.searchQuery,
       activeTabId: s.activeTabId,
+      tabs: s.tabs,
     }))
   );
   const leftPanelOpen = useUIStore(s => s.leftPanelOpen);
   const setLeftPanelOpen = useUIStore(s => s.setLeftPanelOpen);
   const toggleLeftPanel = useUIStore(s => s.toggleLeftPanel);
   const deactivateTabs = useUIStore(s => s.deactivateTabs);
+  const openToolTab = useUIStore(s => s.openToolTab);
   const setViewMode = useUIStore(s => s.setViewMode);
   const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
   const setKnowledgeSource = useUIStore(s => s.setKnowledgeSource);
@@ -96,8 +98,12 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
 
   const [filterBarOpen, setFilterBarOpen] = useState(false);
   const [memuReviewsEnabled, setMemuReviewsEnabled] = useState(false);
-  const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
-  const [entityPanelOpen, setEntityPanelOpen] = useState(false);
+  const activeTab = tabs.find(tab => tab.id === activeTabId);
+  const activeEntry = activeTab?.stack[activeTab.stackIndex];
+  const reviewPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'approvals';
+  const entityPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'entities';
+  const reviewPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'approvals'));
+  const entityPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'entities'));
   const isMobile = useIsMobile();
   const hasActiveFilter = sourceFilter !== 'all' || !!sourceValue || sortBy !== 'updated' || sortOrder !== 'desc';
 
@@ -120,13 +126,6 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
       ignore = true;
     };
   }, []);
-
-  useEffect(() => {
-    if (activeTabId !== null) {
-      setReviewPanelOpen(false);
-      setEntityPanelOpen(false);
-    }
-  }, [activeTabId]);
 
   // Debounced server-side search when searchQuery changes
   const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -333,8 +332,6 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
                   <button
                     key={mode}
                     onClick={() => {
-                      setReviewPanelOpen(false);
-                      setEntityPanelOpen(false);
                       setViewMode(mode);
                     }}
                     className={`relative p-1.5 rounded-md ${
@@ -462,10 +459,8 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
         {memuReviewsEnabled && (
           <button
             onClick={() => {
-              deactivateTabs();
               setLeftPanelOpen(false);
-              setEntityPanelOpen(false);
-              setReviewPanelOpen(true);
+              openToolTab('approvals');
             }}
             className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
             title="Review memU changes"
@@ -477,10 +472,8 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
         {memuReviewsEnabled && (
           <button
             onClick={() => {
-              deactivateTabs();
               setLeftPanelOpen(false);
-              setReviewPanelOpen(false);
-              setEntityPanelOpen(true);
+              openToolTab('entities');
             }}
             className={`p-1.5 rounded-md transition-colors shrink-0 ${entityPanelOpen ? 'text-white bg-[var(--color-accent)]' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'}`}
             title="Entities"
@@ -530,11 +523,13 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
 
       {/* Content */}
       <div className="flex-1 overflow-hidden relative">
-        {reviewPanelOpen ? (
-          <PendingReviewPanel />
-        ) : entityPanelOpen ? (
-          <EntityManager />
-        ) : localGraph.isOpen && localGraph.centerAtomId ? (
+        {reviewPanelMounted && (
+          <div className={`absolute inset-0 ${reviewPanelOpen ? '' : 'hidden'}`}><PendingReviewPanel /></div>
+        )}
+        {entityPanelMounted && (
+          <div className={`absolute inset-0 ${entityPanelOpen ? '' : 'hidden'}`}><EntityManager /></div>
+        )}
+        {!reviewPanelOpen && !entityPanelOpen && (localGraph.isOpen && localGraph.centerAtomId ? (
           <LocalGraphView />
         ) : readerState.atomId ? (
           readerState.atomId.startsWith('entity:')
@@ -580,7 +575,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
             isLoading={isLoadingInitial}
             isLoadingMore={isLoadingMore}
           />
-        )}
+        ))}
       </div>
 
       {/* FAB — on atoms + dashboard base views only (no active tab) */}
