@@ -38,11 +38,13 @@ import { useCanvasStore } from '../../stores/canvas';
 import { useUIStore } from '../../stores/ui';
 import { isTauri } from '../../lib/platform';
 import { getTransport } from '../../lib/transport';
+import { currentIdentity } from '../../lib/openalma-identity';
 import { useIsMobile } from '../../hooks';
 import { startNewAtom } from '../../lib/new-atom';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
 
 export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
+  const openAlmaMode = currentIdentity() !== null;
   const atoms = useAtomsStore(s => s.atoms);
   const totalCount = useAtomsStore(s => s.totalCount);
   const hasMore = useAtomsStore(s => s.hasMore);
@@ -111,6 +113,10 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   // matches. Once a tab is active, the pill carries the active styling and
   // the main nav goes back to a neutral state.
   const onBaseView = activeTabId === null;
+
+  useEffect(() => {
+    if (openAlmaMode && onBaseView && viewMode === 'reports') setViewMode('atoms');
+  }, [onBaseView, openAlmaMode, setViewMode, viewMode]);
 
   useEffect(() => {
     let ignore = false;
@@ -327,7 +333,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
                 ['canvas', Network, 'Canvas view'],
                 ['wiki', BookOpen, 'Wiki view'],
                 ['reports', Telescope, 'Reports'],
-              ] as const).filter(([mode]) => knowledgeSource === 'memories' || !['dashboard', 'reports'].includes(mode)).map(([mode, IconCmp, label]) => {
+              ] as const).filter(([mode]) => (!openAlmaMode || mode !== 'reports') && (knowledgeSource === 'memories' || !['dashboard', 'reports'].includes(mode))).map(([mode, IconCmp, label]) => {
                 const isActiveNav = onBaseView && viewMode === mode;
                 return (
                   <button
@@ -550,7 +556,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
           <DashboardView />
         ) : viewMode === 'wiki' ? (
           <WikiFullView />
-        ) : viewMode === 'reports' ? (
+        ) : viewMode === 'reports' && !openAlmaMode ? (
           <ReportsFullView />
         ) : viewMode === 'canvas' ? (
           <SigmaCanvas key={knowledgeSource} />
