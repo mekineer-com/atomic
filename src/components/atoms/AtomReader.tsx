@@ -18,6 +18,7 @@ import { readerEditorActions } from '../../lib/reader-editor-bridge';
 import { DossierMarkdown, DossierUsageLinks, MemoryCitationLinks } from '../memu/DossierMarkdown';
 import { MemoryEntityControls } from '../memu/EntityManager';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
+import { placeholder } from '@codemirror/view';
 import type {
   AtomicCodeMirrorEditorHandle,
   AtomicCodeMirrorEditorProps,
@@ -594,12 +595,15 @@ function AtomReaderContent({
   }, []);
 
   const atomLinkExtensions = useMemo(
-    () => atomLinkExtension({
-      currentAtomId: atom.id,
-      suggestAtoms: suggestAtomLinks,
-      resolveAtom: resolveAtomLink,
-      openAtom: (id, opts) => onRelatedAtomClick(id, opts),
-    }),
+    () => [
+      ...atomLinkExtension({
+        currentAtomId: atom.id,
+        suggestAtoms: suggestAtomLinks,
+        resolveAtom: resolveAtomLink,
+        openAtom: (id, opts) => onRelatedAtomClick(id, opts),
+      }),
+      placeholder('Start writing...'),
+    ],
     [atom.id, onRelatedAtomClick, resolveAtomLink, suggestAtomLinks],
   );
 
