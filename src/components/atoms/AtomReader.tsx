@@ -481,7 +481,7 @@ function AtomReaderContent({
         void (isMemuAtom ? (memuEdited ? saveMemuSummary() : (!memuSummaryApproved && approveMemuSummary())) : saveNow());
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+      if (!isMemuAtom && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         editorHandleRef.current?.openSearch();
         return;
