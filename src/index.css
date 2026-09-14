@@ -122,6 +122,11 @@
   color: var(--color-text-tertiary);
 }
 
+.atomic-cm-editor .cm-editor.cm-focused .cm-cursor,
+.atomic-cm-editor .cm-editor.cm-focused .cm-dropCursor {
+  border-left-color: currentColor;
+}
+
 [data-reader-theme="light"] {
   --color-bg-main: #fafafa;
   --color-bg-panel: #ffffff;

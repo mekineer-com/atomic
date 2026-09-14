@@ -249,9 +249,9 @@ export function Layout() {
             aria-label="Active Soul"
             value={identity.soulId}
             onChange={(event) => switchSoul(event.target.value)}
-            className="bg-transparent font-medium text-[var(--color-text-primary)] outline-none"
+            className="bg-[#2d2d2d] font-medium text-[#eeeeee] outline-none [color-scheme:dark]"
           >
-            {souls.map((soul) => <option key={soul} value={soul}>{soul}</option>)}
+            {souls.map((soul) => <option key={soul} value={soul} className="bg-[#2d2d2d] text-[#eeeeee]">{soul}</option>)}
           </select>
           <button type="button" onClick={() => void createSoul()} className="font-medium text-[var(--color-accent)]">
             New Soul
