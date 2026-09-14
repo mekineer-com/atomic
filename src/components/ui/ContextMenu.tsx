@@ -150,6 +150,8 @@ export function ContextMenu({ items, position, onClose, autoFocus = false }: Con
       ref={menuRef}
       role="menu"
       onKeyDown={onMenuKeyDown}
+      onClick={(e) => e.stopPropagation()}
+      onAuxClick={(e) => e.stopPropagation()}
       className="fixed z-50 min-w-[160px] bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg shadow-xl py-1 animate-in fade-in zoom-in-95 duration-100"
       style={{
         left: adjustedPosition?.x ?? position.x,
