@@ -159,6 +159,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
 
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRequestRef = useRef(0);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const tags = useTagsStore((state) => state.tags);
 
   useEffect(() => {
@@ -183,6 +184,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
   const searchQuery = prefix ? query.slice(prefix.token.length) : query;
 
   useEffect(() => {
+    searchAbortRef.current?.abort();
     const requestId = ++searchRequestRef.current;
     setIsFullSearch(false);
     setSearchError(null);
@@ -212,13 +214,15 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
 
     setIsSearching(true);
     searchTimeoutRef.current = setTimeout(async () => {
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
       try {
         if (mode === 'atoms-hybrid') {
           const results = await getTransport().invoke<SemanticSearchResult[]>('search_atoms_hybrid', {
             query: trimmed,
             limit: HYBRID_ATOM_LIMIT,
             threshold: HYBRID_ATOM_THRESHOLD,
-          });
+          }, { signal: controller.signal });
           if (requestId === searchRequestRef.current) {
             setHybridAtomResults(results);
             setGlobalResults({ atoms: [], wiki: [], chats: [], tags: [] });
@@ -227,18 +231,20 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
           const results = await getTransport().invoke<GlobalSearchResponse>('search_global_keyword', {
             query: trimmed,
             sectionLimit: SECTION_LIMIT,
-          });
+          }, { signal: controller.signal });
           if (requestId === searchRequestRef.current) {
             setGlobalResults(results);
             setHybridAtomResults([]);
           }
         }
       } catch (error) {
+        if (controller.signal.aborted) return;
         console.error('Global search failed:', error);
         if (requestId === searchRequestRef.current) {
           setSearchError(String(error));
         }
       } finally {
+        if (searchAbortRef.current === controller) searchAbortRef.current = null;
         if (requestId === searchRequestRef.current) setIsSearching(false);
       }
     }, SEARCH_DEBOUNCE_MS);
@@ -247,6 +253,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
       if (searchTimeoutRef.current) {
         clearTimeout(searchTimeoutRef.current);
       }
+      searchAbortRef.current?.abort();
     };
   }, [mode, searchQuery]);
 
@@ -257,7 +264,10 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     if (mode !== 'global' || trimmed.length < 2 || enabledSources.length === 0 || isFullSearch) return;
 
     if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
+    searchAbortRef.current?.abort();
     const requestId = ++searchRequestRef.current;
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
     setIsSearching(true);
     setSearchError(null);
     try {
@@ -266,7 +276,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
         const results = await getTransport().invoke<GlobalSearchResponse>('search_global_keyword', {
           query: trimmed,
           sectionLimit: limit,
-        });
+        }, { signal: controller.signal });
         if (requestId !== searchRequestRef.current) return;
         setGlobalResults(results);
         const nextLimit = nextFullSearchLimit(results, enabledSources, limit);
@@ -275,9 +285,11 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
       }
       if (requestId === searchRequestRef.current) setIsFullSearch(true);
     } catch (error) {
+      if (controller.signal.aborted) return;
       console.error('Full search failed:', error);
       if (requestId === searchRequestRef.current) setSearchError(String(error));
     } finally {
+      if (searchAbortRef.current === controller) searchAbortRef.current = null;
       if (requestId === searchRequestRef.current) setIsSearching(false);
     }
   }, [isFullSearch, mode, searchQuery, searchSources]);
