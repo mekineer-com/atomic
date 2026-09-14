@@ -768,6 +768,7 @@ async fn run_server(
             )
     })
     .workers(4)
+    .shutdown_timeout(2)
     .bind((bind_owned.as_str(), port))?
     .run()
     .await?;
