@@ -3,6 +3,8 @@ use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+static WORKSPACE_ENSURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Clone)]
 pub struct MemuScope {
     pub base_url: String,
@@ -31,6 +33,8 @@ pub async fn workspace_ensure(request: HttpRequest, state: web::Data<AppState>) 
         Ok(scope) => scope,
         Err(response) => return response,
     };
+    // ponytail: one-time setup is rare; use a process-wide lock unless startup contention appears.
+    let _guard = WORKSPACE_ENSURE_LOCK.lock().await;
     let database_id = match state.workspace_database_id(&scope.user_id, &scope.soul_id) {
         Ok(Some(id)) => id,
         Ok(None) => match state.manager.create_database(&scope.soul_id).await {

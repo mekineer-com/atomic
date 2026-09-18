@@ -48,6 +48,8 @@ fn integrated_api_allowed(method: &Method, path: &str, workspace: bool) -> bool 
     if workspace
         && (path == "/api/atoms"
             || path.starts_with("/api/atoms/")
+            || path.starts_with("/api/embeddings/")
+            || path.starts_with("/api/tagging/")
             || path == "/api/tags"
             || path.starts_with("/api/tags/")
             || path.starts_with("/api/canvas/")
@@ -213,6 +215,16 @@ mod tests {
 
         assert!(!integrated_api_allowed(&Method::GET, "/api/wiki", false));
         assert!(integrated_api_allowed(&Method::GET, "/api/wiki", true));
+        assert!(integrated_api_allowed(
+            &Method::POST,
+            "/api/embeddings/retry/example",
+            true
+        ));
+        assert!(!integrated_api_allowed(
+            &Method::POST,
+            "/api/embeddings/retry/example",
+            false
+        ));
         assert!(!integrated_api_allowed(
             &Method::POST,
             "/api/reports",

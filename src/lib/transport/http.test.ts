@@ -32,4 +32,20 @@ describe('HttpTransport cancellation', () => {
 
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-Atomic-Source': 'workspace' });
   });
+
+  it('surfaces cited-memory conflicts with dossier names', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        message: 'Memory is cited in dossier prose',
+        dossiers: [{ name: 'Fictional dossier' }],
+      },
+    }), {
+      status: 409,
+      headers: { 'Content-Type': 'application/json' },
+    })));
+    const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
+
+    await expect(transport.invoke('delete_memory', { id: 'memory:fictional' }))
+      .rejects.toBe('Memory is cited in dossier prose: Fictional dossier');
+  });
 });

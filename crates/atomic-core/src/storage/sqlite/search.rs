@@ -359,6 +359,7 @@ impl SqliteStorage {
         &self,
         query: &str,
         section_limit: i32,
+        owner: Option<(&str, &str)>,
     ) -> StorageResult<GlobalSearchResponse> {
         let conn = self.db.read_conn()?;
         let escaped_query = escape_fts5_query(query);
@@ -382,7 +383,8 @@ impl SqliteStorage {
             &crate::models::KindFilter::All,
         )?;
         let wiki = keyword_search_wiki(&conn, &escaped_query, section_limit)?;
-        let chats = keyword_search_chats(&conn, &escaped_query, &trimmed_query, section_limit)?;
+        let chats =
+            keyword_search_chats(&conn, &escaped_query, &trimmed_query, section_limit, owner)?;
         let tags = keyword_search_tags(&conn, &trimmed_query, section_limit)?;
 
         Ok(GlobalSearchResponse {
@@ -889,6 +891,7 @@ fn keyword_search_chats(
     escaped_query: &str,
     trimmed_query: &str,
     limit: i32,
+    owner: Option<(&str, &str)>,
 ) -> Result<Vec<GlobalChatSearchResult>, AtomicCoreError> {
     let mut conversation_best: HashMap<String, (f32, String)> = HashMap::new();
 
@@ -897,19 +900,29 @@ fn keyword_search_chats(
             "SELECT chat_messages_fts.conversation_id, chat_messages_fts.content, bm25(chat_messages_fts) AS score
              FROM chat_messages_fts
              JOIN chat_messages m ON m.id = chat_messages_fts.id
+             JOIN conversations c ON c.id = m.conversation_id
              WHERE chat_messages_fts MATCH ?1 AND m.role != 'system'
+               AND (?2 IS NULL OR (c.user_id = ?2 AND c.soul_id = ?3))
              ORDER BY bm25(chat_messages_fts)
-             LIMIT ?2",
+             LIMIT ?4",
         )
         .map_err(|e| AtomicCoreError::Search(format!("Failed to prepare chat FTS query: {}", e)))?;
     let msg_rows = msg_stmt
-        .query_map(rusqlite::params![escaped_query, limit * 4], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                normalize_bm25_score(row.get::<_, f64>(2)?),
-            ))
-        })
+        .query_map(
+            rusqlite::params![
+                escaped_query,
+                owner.map(|value| value.0),
+                owner.map(|value| value.1),
+                limit * 4
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    normalize_bm25_score(row.get::<_, f64>(2)?),
+                ))
+            },
+        )
         .map_err(|e| AtomicCoreError::Search(format!("Failed to query chat FTS: {}", e)))?;
     for row in msg_rows {
         let (conversation_id, content, score) =
@@ -928,15 +941,22 @@ fn keyword_search_chats(
             "SELECT id, COALESCE(title, '')
              FROM conversations
              WHERE is_archived = 0 AND title IS NOT NULL AND lower(title) LIKE ?1
-             LIMIT ?2",
+               AND (?2 IS NULL OR (user_id = ?2 AND soul_id = ?3))
+             LIMIT ?4",
         )
         .map_err(|e| {
             AtomicCoreError::Search(format!("Failed to prepare chat title query: {}", e))
         })?;
     let title_rows = title_stmt
-        .query_map(rusqlite::params![title_pattern, limit], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
+        .query_map(
+            rusqlite::params![
+                title_pattern,
+                owner.map(|value| value.0),
+                owner.map(|value| value.1),
+                limit
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
         .map_err(|e| AtomicCoreError::Search(format!("Failed to query chat titles: {}", e)))?;
     for row in title_rows {
         let (conversation_id, title) = row.map_err(|e| AtomicCoreError::Search(e.to_string()))?;

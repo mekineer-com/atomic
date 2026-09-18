@@ -213,8 +213,8 @@ interface AtomsStore {
   clearSemanticSearch: () => void;
   setSemanticSearchQuery: (query: string) => void;
   setSearchMode: (mode: SearchMode) => void;
-  retryEmbedding: (atomId: string) => Promise<void>;
-  retryTagging: (atomId: string) => Promise<void>;
+  retryEmbedding: (atomId: string, options?: { workspace?: boolean }) => Promise<void>;
+  retryTagging: (atomId: string, options?: { workspace?: boolean }) => Promise<void>;
 
   // Filter & sort methods
   setSourceFilter: (filter: SourceFilterType) => void;
@@ -249,6 +249,7 @@ function toSummary(atom: AtomWithTags): AtomSummary {
     last_evidence_at: atom.last_evidence_at,
     last_revised_at: atom.last_revised_at,
     citations: atom.citations,
+    dossier_usages: atom.dossier_usages,
     summaries_revision: atom.summaries_revision,
     embedding_status: atom.embedding_status,
     tagging_status: atom.tagging_status,
@@ -637,10 +638,10 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
     set({ searchMode: mode });
   },
 
-  retryEmbedding: async (atomId: string) => {
+  retryEmbedding: async (atomId: string, options) => {
     set({ error: null });
     try {
-      await getTransport().invoke('retry_embedding', { atomId });
+      await getTransport().invoke('retry_embedding', { atomId }, options);
       // Update the atom status to 'pending' optimistically
       set((state) => ({
         atoms: state.atoms.map((a) =>
@@ -653,10 +654,10 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
     }
   },
 
-  retryTagging: async (atomId: string) => {
+  retryTagging: async (atomId: string, options) => {
     set({ error: null });
     try {
-      await getTransport().invoke('retry_tagging', { atomId });
+      await getTransport().invoke('retry_tagging', { atomId }, options);
       set((state) => ({
         atoms: state.atoms.map((a) =>
           a.id === atomId ? { ...a, tagging_status: 'pending' as const } : a

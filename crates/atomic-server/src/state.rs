@@ -564,7 +564,9 @@ impl ServerEvent {
                 soul_id: owner.as_ref().map(|(_, soul_id)| soul_id.clone()),
                 database_id: Some(database_id),
             },
-            atomic_core::ChatEvent::AtomPipelineEvent { event, .. } => Self::from(event),
+            atomic_core::ChatEvent::AtomPipelineEvent { event, .. } => {
+                Self::from(event).with_database_id(database_id)
+            }
             atomic_core::ChatEvent::Error {
                 conversation_id,
                 error,
@@ -860,6 +862,20 @@ mod tests {
             }
             _ => panic!("Wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_chat_pipeline_event_keeps_database_scope() {
+        let event = atomic_core::ChatEvent::AtomPipelineEvent {
+            conversation_id: "c4".into(),
+            event: atomic_core::EmbeddingEvent::EmbeddingComplete {
+                atom_id: "a4".into(),
+            },
+        };
+        assert_eq!(
+            ServerEvent::from_chat(event, "workspace".into(), None).database_id(),
+            Some("workspace")
+        );
     }
 
     #[test]

@@ -1472,11 +1472,38 @@ impl AtomicCore {
         query: &str,
         section_limit: i32,
     ) -> Result<GlobalSearchResponse, AtomicCoreError> {
+        self.search_global_keyword_inner(query, section_limit, None)
+            .await
+    }
+
+    pub async fn search_global_keyword_for_owner(
+        &self,
+        query: &str,
+        section_limit: i32,
+        owner: (&str, &str),
+    ) -> Result<GlobalSearchResponse, AtomicCoreError> {
+        self.search_global_keyword_inner(query, section_limit, Some(owner))
+            .await
+    }
+
+    async fn search_global_keyword_inner(
+        &self,
+        query: &str,
+        section_limit: i32,
+        owner: Option<(&str, &str)>,
+    ) -> Result<GlobalSearchResponse, AtomicCoreError> {
         if let Some(sqlite) = self.storage.as_sqlite() {
             let sqlite = sqlite.clone();
             let query = query.to_string();
+            let owner = owner.map(|(user_id, soul_id)| (user_id.to_string(), soul_id.to_string()));
             return tokio::task::spawn_blocking(move || {
-                sqlite.global_keyword_search_sync(&query, section_limit)
+                sqlite.global_keyword_search_sync(
+                    &query,
+                    section_limit,
+                    owner
+                        .as_ref()
+                        .map(|(user_id, soul_id)| (user_id.as_str(), soul_id.as_str())),
+                )
             })
             .await
             .map_err(|e| {
@@ -1486,6 +1513,11 @@ impl AtomicCore {
 
         #[cfg(feature = "postgres")]
         if let Some(pg) = self.storage.as_postgres() {
+            if owner.is_some() {
+                return Err(AtomicCoreError::Configuration(
+                    "OpenAlma Soul workspaces require SQLite".to_string(),
+                ));
+            }
             return pg.global_keyword_search(query, section_limit).await;
         }
 
@@ -5449,6 +5481,33 @@ mod tests {
             "preview must not accidentally carry FTS markers, got {:?}",
             preview
         );
+    }
+
+    #[tokio::test]
+    async fn test_global_search_scopes_chats_to_owner() {
+        let (db, _temp) = create_test_db().await;
+        let visible = db
+            .create_conversation(&[], Some("Shared needle"), Some(("owner", "soul")))
+            .await
+            .unwrap();
+        let sealed = db
+            .create_conversation(&[], Some("Sealed needle"), None)
+            .await
+            .unwrap();
+        db.save_message(&visible.conversation.id, "user", "needle")
+            .await
+            .unwrap();
+        db.save_message(&sealed.conversation.id, "user", "needle")
+            .await
+            .unwrap();
+
+        let response = db
+            .search_global_keyword_for_owner("needle", 10, ("owner", "soul"))
+            .await
+            .unwrap();
+
+        assert_eq!(response.chats.len(), 1);
+        assert_eq!(response.chats[0].id, visible.conversation.id);
     }
 
     #[tokio::test]

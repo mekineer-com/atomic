@@ -241,6 +241,8 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
         if (controller.signal.aborted) return;
         console.error('Global search failed:', error);
         if (requestId === searchRequestRef.current) {
+          setGlobalResults({ atoms: [], wiki: [], chats: [], tags: [] });
+          setHybridAtomResults([]);
           setSearchError(String(error));
         }
       } finally {
@@ -263,6 +265,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     searchAbortRef.current?.abort();
     searchRequestRef.current += 1;
     setIsSearching(false);
+    setSearchError(null);
   }, [isOpen]);
 
   const enabledSources = useMemo(

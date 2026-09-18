@@ -57,6 +57,15 @@ impl TestCtx {
             setup_claim_lock: tokio::sync::Mutex::new(()),
             setup_claim_limiter: atomic_server::state::SetupClaimLimiter::new(),
         });
+        if state.memu_session.is_some() {
+            state
+                .bind_workspace_database(
+                    "TestOwner",
+                    "TestSoul",
+                    &state.manager.active_id().unwrap(),
+                )
+                .unwrap();
+        }
         TestCtx {
             _temp: temp,
             state,
@@ -409,6 +418,16 @@ async fn memu_approve_empty() -> HttpResponse {
     HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 
+async fn memu_delete_memory_conflict(path: web::Path<String>) -> HttpResponse {
+    assert_eq!(path.as_str(), "m1");
+    HttpResponse::Conflict().json(json!({
+        "detail": {
+            "message": "Memory is cited in dossier prose",
+            "dossiers": [{"id": "category:c1", "name": "Core", "ref": "M1"}]
+        }
+    }))
+}
+
 async fn memu_search(req: HttpRequest) -> HttpResponse {
     let query = req.query_string();
     if query.contains("q=memory") {
@@ -528,6 +547,10 @@ fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
             )
             .route("/memory/{id}", web::get().to(memu_memory))
             .route("/memory/{id}", web::patch().to(memu_update_memory))
+            .route(
+                "/memory/{id}",
+                web::delete().to(memu_delete_memory_conflict),
+            )
             .route("/memory/{id}/approve", web::post().to(memu_approve_empty))
     })
     .bind(("127.0.0.1", 0))
@@ -857,6 +880,51 @@ async fn test_memu_read_routes_proxy() {
     let neighborhood: Value = actix_test::call_and_read_body_json(&app, req).await;
     assert_eq!(neighborhood["center_atom_id"], "memory:m1");
     assert_eq!(neighborhood["atoms"][0]["depth"], 0);
+
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_openalma_rejects_another_workspace_database() {
+    let (memu_url, memu_handle) = start_memu_memory_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let foreign = ctx
+        .state
+        .manager
+        .create_database("Foreign Soul")
+        .await
+        .unwrap();
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::get()
+        .uri(&format!("/api/atoms?db={}", foreign.id))
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-Atomic-Source", "workspace"))
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+
+    assert_eq!(response.status(), 400);
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_cited_memory_delete_preserves_conflict_response() {
+    let (memu_url, memu_handle) = start_memu_memory_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::delete()
+        .uri("/api/memu/reviews/memory/m1")
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+    assert_eq!(response.status(), 409);
+    let body: Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["error"]["dossiers"][0]["ref"], "M1");
 
     memu_handle.stop(true).await;
 }

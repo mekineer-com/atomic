@@ -11,6 +11,7 @@ import { useUIStore } from '../stores/ui';
 import { useEmbeddingProgressStore } from '../stores/embedding-progress';
 import { useCanvasStore } from '../stores/canvas';
 import type { AtomWithTags } from '../stores/atoms';
+import { currentIdentity } from '../lib/openalma-identity';
 
 interface EmbeddingCompletePayload {
   atom_id: string;
@@ -35,6 +36,14 @@ interface PipelineQueueCompletedPayload {
   run_id: string;
   total_jobs: number;
   failed_jobs: number;
+}
+
+function atomMatchesSelectedSource(atom: AtomWithTags): boolean {
+  if (!currentIdentity()) return true;
+  const isMemory = atom.id.startsWith('memory:')
+    || atom.id.startsWith('category:')
+    || atom.id.startsWith('entity:');
+  return isMemory === (useUIStore.getState().knowledgeSource === 'memories');
 }
 
 interface PipelineStatusSnapshot {
@@ -101,12 +110,14 @@ export function useEmbeddingEvents() {
       reconcilePipelineStatus();
 
       unsubs.push(transport.subscribe<AtomWithTags>('atom-created', (payload) => {
+        if (!atomMatchesSelectedSource(payload)) return;
         useAtomsStore.getState().addAtom(payload);
         useCanvasStore.getState().invalidateCanvasData();
         scheduleStatusReconcile();
       }));
 
       unsubs.push(transport.subscribe<AtomWithTags>('atom-updated', (payload) => {
+        if (!atomMatchesSelectedSource(payload)) return;
         useAtomsStore.getState().addAtom(payload);
         useCanvasStore.getState().invalidateCanvasData();
         scheduleStatusReconcile();

@@ -121,7 +121,11 @@ pub async fn global_search(
         };
         let local = match db
             .0
-            .search_global_keyword(&search_req.query, section_limit as i32)
+            .search_global_keyword_for_owner(
+                &search_req.query,
+                section_limit as i32,
+                (&config.user_id, &config.soul_id),
+            )
             .await
         {
             Ok(local) => local,
@@ -135,12 +139,10 @@ pub async fn global_search(
             }
         };
         if let Some(local_atoms) = response["atoms"].as_array_mut() {
-            local_atoms.splice(0..0, atoms);
-            local_atoms.truncate(section_limit);
+            *local_atoms = interleave(atoms, std::mem::take(local_atoms), section_limit);
         }
         if let Some(local_tags) = response["tags"].as_array_mut() {
-            local_tags.splice(0..0, tags);
-            local_tags.truncate(section_limit);
+            *local_tags = interleave(tags, std::mem::take(local_tags), section_limit);
         }
         return HttpResponse::Ok().json(response);
     }
@@ -148,6 +150,32 @@ pub async fn global_search(
         db.0.search_global_keyword(&req.query, req.section_limit.unwrap_or(5))
             .await,
     )
+}
+
+fn interleave<T>(left: Vec<T>, right: Vec<T>, limit: usize) -> Vec<T> {
+    let mut left = left.into_iter();
+    let mut right = right.into_iter();
+    let mut merged = Vec::with_capacity(limit);
+    while merged.len() < limit {
+        match left.next() {
+            Some(value) => merged.push(value),
+            None => {
+                merged.extend(right.take(limit - merged.len()));
+                break;
+            }
+        }
+        if merged.len() == limit {
+            break;
+        }
+        match right.next() {
+            Some(value) => merged.push(value),
+            None => {
+                merged.extend(left.take(limit - merged.len()));
+                break;
+            }
+        }
+    }
+    merged
 }
 
 async fn memu_tags_value(
@@ -363,4 +391,21 @@ async fn memu_search_value(
             atom
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::interleave;
+
+    #[test]
+    fn federated_preview_keeps_both_sources_visible() {
+        assert_eq!(
+            interleave(vec![1, 2, 3, 4, 5], vec![10, 11, 12, 13, 14], 5),
+            vec![1, 10, 2, 11, 3]
+        );
+        assert_eq!(
+            interleave(vec![1], vec![10, 11, 12], 5),
+            vec![1, 10, 11, 12]
+        );
+    }
 }

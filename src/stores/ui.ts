@@ -536,13 +536,18 @@ export const useUIStore = create<UIStore>()(
           }
         }
         if (existing) {
-          const matched = existing.stack[existingIndex];
           const existingId = existing.id;
           set((s) => {
             const tabs = s.tabs.map((t) =>
-              t.id === existingId ? { ...t, stackIndex: existingIndex } : t,
+              t.id === existingId
+                ? {
+                    ...t,
+                    stack: t.stack.map((candidate, index) => index === existingIndex ? entry : candidate),
+                    stackIndex: existingIndex,
+                  }
+                : t,
             );
-            const projected = projectActiveEntry(matched);
+            const projected = projectActiveEntry(entry);
             return {
               tabs,
               activeTabId: existingId,
@@ -550,7 +555,7 @@ export const useUIStore = create<UIStore>()(
               localGraph: { ...s.localGraph, ...projected.localGraphPatch },
             };
           });
-          navigateTo(entryUrl(matched));
+          navigateTo(entryUrl(entry));
           return;
         }
 

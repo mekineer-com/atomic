@@ -361,9 +361,9 @@ function AtomReaderContent({
   }, [atom.id, atom.title, atom.description, atom.content, initialEditing]);
 
   const handleAutoTag = useCallback(async () => {
-    await retryTagging(atom.id);
+    await retryTagging(atom.id, { workspace: !isMemuAtom });
     onAtomUpdated?.({ ...atom, tagging_status: 'pending' });
-  }, [retryTagging, atom, onAtomUpdated]);
+  }, [retryTagging, atom, isMemuAtom, onAtomUpdated]);
 
   const saveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -866,7 +866,10 @@ function AtomReaderContent({
       {/* Delete Confirmation Modal */}
       <Modal
         isOpen={showDeleteModal}
-        onClose={() => setShowDeleteModal(false)}
+        onClose={() => {
+          setShowDeleteModal(false);
+          setMemuError(null);
+        }}
         title={isMemuMemory ? 'Delete Memory' : 'Delete Atom'}
         confirmLabel={isDeleting ? 'Deleting...' : 'Delete'}
         confirmVariant="danger"
