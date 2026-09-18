@@ -32,7 +32,9 @@ export function nextFullSearchLimit(
   results: GlobalSearchResponse,
   enabledSources: GlobalSearchSource[],
   limit: number,
+  error?: string | null,
 ): number | null {
+  if (error) return null;
   return enabledSources.some((source) => results[source].length === limit) ? limit * 2 : null;
 }
 
@@ -273,7 +275,7 @@ export function useSearchPalette({ isOpen, onClose, initialQuery = '' }: UseSear
     [searchSources],
   );
   const canLoadMore = mode === 'global' && !isSearching && enabledSources.length > 0
-    && nextFullSearchLimit(globalResults, enabledSources, globalLimit) !== null;
+    && nextFullSearchLimit(globalResults, enabledSources, globalLimit, searchError) !== null;
 
   const loadMore = useCallback(async () => {
     const trimmed = searchQuery.trim();

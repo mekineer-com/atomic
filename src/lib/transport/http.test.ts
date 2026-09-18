@@ -33,6 +33,19 @@ describe('HttpTransport cancellation', () => {
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-Atomic-Source': 'workspace' });
   });
 
+  it('does not send the Workspace header unless requested', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response('{}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
+
+    await transport.invoke('list_atoms');
+
+    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty('X-Atomic-Source');
+  });
+
   it('surfaces cited-memory conflicts with dossier names', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       error: {

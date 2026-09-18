@@ -14,5 +14,6 @@ describe('nextFullSearchLimit', () => {
     expect(nextFullSearchLimit(results(20, 2), ['atoms', 'wiki'], 20)).toBe(40);
     expect(nextFullSearchLimit(results(20, 2), ['wiki'], 20)).toBeNull();
     expect(nextFullSearchLimit(results(19, 2), ['atoms', 'wiki'], 20)).toBeNull();
+    expect(nextFullSearchLimit(results(20, 2), ['atoms'], 20, 'offline')).toBeNull();
   });
 });

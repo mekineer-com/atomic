@@ -288,6 +288,7 @@ Use it before answering when the user refers to "this", "current", "open", "visi
 async fn execute_get_current_page_context(
     storage: &StorageBackend,
     page_context: Option<&PageContext>,
+    scope_tag_ids: &[String],
     memu_tool_config: Option<&MemuToolConfig>,
 ) -> Result<Option<serde_json::Value>, String> {
     let Some(ctx) = page_context else {
@@ -327,6 +328,11 @@ async fn execute_get_current_page_context(
                 },
                 "selected_tag_id": ctx.selected_tag_id.as_deref(),
             })));
+        }
+        if !atom_matches_scope(storage, atom_id, scope_tag_ids).await? {
+            return Err(format!(
+                "Atom {atom_id} is outside this conversation's scope"
+            ));
         }
         let stored_atom = storage
             .get_atom_impl(atom_id)
@@ -1548,6 +1554,7 @@ async fn run_agent_loop(
                         match execute_get_current_page_context(
                             &storage,
                             page_context,
+                            &ctx.scope_tag_ids,
                             memu_tool_config.as_ref(),
                         )
                         .await
@@ -2014,6 +2021,21 @@ mod tests {
         .expect_err("out-of-scope atom must be refused");
         assert!(refused.contains("outside this conversation's scope"));
         assert!(!refused.contains("Pelicans dive for fish."));
+
+        let context = PageContext {
+            view: Some("atom".to_string()),
+            atom_id: Some(atom.atom.id.clone()),
+            atom_title: Some("Private".to_string()),
+            atom_snippet: Some("must not leak".to_string()),
+            wiki_tag_id: None,
+            wiki_tag_name: None,
+            selected_tag_id: None,
+        };
+        let refused =
+            execute_get_current_page_context(&core.storage, Some(&context), &[private.id], None)
+                .await
+                .expect_err("page context must enforce conversation scope");
+        assert!(refused.contains("outside this conversation's scope"));
     }
 
     #[test]

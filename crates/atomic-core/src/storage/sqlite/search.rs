@@ -904,35 +904,42 @@ fn keyword_search_chats(
              WHERE chat_messages_fts MATCH ?1 AND m.role != 'system'
                AND (?2 IS NULL OR (c.user_id = ?2 AND c.soul_id = ?3))
              ORDER BY bm25(chat_messages_fts)
-             LIMIT ?4",
+             LIMIT ?4 OFFSET ?5",
         )
         .map_err(|e| AtomicCoreError::Search(format!("Failed to prepare chat FTS query: {}", e)))?;
-    let msg_rows = msg_stmt
-        .query_map(
-            rusqlite::params![
-                escaped_query,
-                owner.map(|value| value.0),
-                owner.map(|value| value.1),
-                limit * 4
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    normalize_bm25_score(row.get::<_, f64>(2)?),
-                ))
-            },
-        )
-        .map_err(|e| AtomicCoreError::Search(format!("Failed to query chat FTS: {}", e)))?;
-    for row in msg_rows {
-        let (conversation_id, content, score) =
-            row.map_err(|e| AtomicCoreError::Search(e.to_string()))?;
-        let entry = conversation_best
-            .entry(conversation_id)
-            .or_insert((score, content.clone()));
-        if score > entry.0 {
-            *entry = (score, content);
+    let batch_size = limit.max(1).saturating_mul(4);
+    let mut offset = 0;
+    while conversation_best.len() < limit.max(1) as usize {
+        let msg_rows = msg_stmt
+            .query_map(
+                rusqlite::params![
+                    escaped_query,
+                    owner.map(|value| value.0),
+                    owner.map(|value| value.1),
+                    batch_size,
+                    offset
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        normalize_bm25_score(row.get::<_, f64>(2)?),
+                    ))
+                },
+            )
+            .map_err(|e| AtomicCoreError::Search(format!("Failed to query chat FTS: {}", e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AtomicCoreError::Search(e.to_string()))?;
+        let fetched = msg_rows.len() as i32;
+        for (conversation_id, content, score) in msg_rows {
+            conversation_best
+                .entry(conversation_id)
+                .or_insert((score, content));
         }
+        if fetched < batch_size {
+            break;
+        }
+        offset += fetched;
     }
 
     let title_pattern = format!("%{}%", trimmed_query);

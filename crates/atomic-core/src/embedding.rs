@@ -2171,7 +2171,11 @@ where
                     run_claimed(run, &storage, &on_event, &external_settings, &canvas_cache).await;
                     match claim_due_batches(&storage).await {
                         Ok(next) if next.total > 0 => run = next,
-                        _ => break,
+                        Ok(_) => break,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Pipeline drain could not claim more jobs");
+                            break;
+                        }
                     }
                 }
             });
@@ -2197,7 +2201,11 @@ where
                             )
                             .await;
                         }
-                        _ => break,
+                        Ok(_) => break,
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Pipeline drain could not claim more jobs");
+                            break;
+                        }
                     }
                 }
             });

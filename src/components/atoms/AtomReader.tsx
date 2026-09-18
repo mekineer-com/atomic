@@ -434,8 +434,8 @@ function AtomReaderContent({
   }, [saveStatus, setReaderSaveStatus]);
 
   useEffect(() => {
-    if (!isMemuAtom) startEditing();
-  }, [isMemuAtom, startEditing]);
+    if (!isMemuAtom && isEditing) startEditing();
+  }, [isEditing, isMemuAtom, startEditing]);
 
   useEffect(() => {
     if (!isMemuAtom && !atom.content.trim() && !useUIStore.getState().readerState.editing) {

@@ -322,7 +322,7 @@ export function useInlineEditor({
           // main nav, leaving an orphan pill pointing at the deleted atom).
           useAtomsStore.getState().deleteAtom(atom.id, { workspace: true }).catch(console.error);
           useUIStore.getState().removeAtomFromTabs(atom.id);
-        } else if (hasDraftChanges) {
+        } else if (hasDraftChanges || needsPipelineRef.current) {
           savingPromiseRef.current
             .catch(() => {})
             .then(async () => {
@@ -330,13 +330,26 @@ export function useInlineEditor({
               const latestSourceUrl = editSourceUrlRef.current;
               const latestTags = editTagsRef.current;
               const tagIds = latestTags.map(t => t.id);
-              await useAtomsStore.getState().updateAtomContentOnly(
-                atom.id,
-                latestContent,
-                latestSourceUrl || undefined,
-                tagIds,
-                { workspace: true },
-              );
+              const latestTagIds = [...tagIds].sort().join(',');
+              const pipelineNeeded = needsPipelineRef.current
+                || latestContent !== lastSavedRef.current.content
+                || latestSourceUrl !== lastSavedRef.current.sourceUrl;
+              if (
+                latestContent !== lastSavedRef.current.content
+                || latestSourceUrl !== lastSavedRef.current.sourceUrl
+                || latestTagIds !== lastSavedRef.current.tagIds
+              ) {
+                await useAtomsStore.getState().updateAtomContentOnly(
+                  atom.id,
+                  latestContent,
+                  latestSourceUrl || undefined,
+                  tagIds,
+                  { workspace: true },
+                );
+              }
+              if (pipelineNeeded) {
+                await useAtomsStore.getState().processAtomPipeline(atom.id, { workspace: true });
+              }
             })
             .catch(console.error);
         }
