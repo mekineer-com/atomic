@@ -242,19 +242,25 @@ impl CanvasCache {
 
                 // Re-read and claim the deadline under one lock. An invalidation
                 // may have pushed it forward after the sleeper woke.
-                let mut slot = cache
-                    .inner
-                    .debounce_deadline
-                    .lock()
-                    .expect("canvas debounce lock");
-                let Some(current_deadline) = *slot else {
-                    return;
+                let claimed = {
+                    let mut slot = cache
+                        .inner
+                        .debounce_deadline
+                        .lock()
+                        .expect("canvas debounce lock");
+                    let Some(current_deadline) = *slot else {
+                        return;
+                    };
+                    if tokio::time::Instant::now() < current_deadline {
+                        false
+                    } else {
+                        *slot = None;
+                        true
+                    }
                 };
-                if tokio::time::Instant::now() < current_deadline {
+                if !claimed {
                     continue;
                 }
-                *slot = None;
-                drop(slot);
 
                 let gen_at_start = cache.inner.rebuild_gen.load(Ordering::SeqCst);
                 let cache_compute = cache.clone();
