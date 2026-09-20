@@ -15,6 +15,7 @@ import {
   Telescope,
   ClipboardCheck,
   Users,
+  UserRound,
 } from 'lucide-react';
 import { motion, LayoutGroup } from 'motion/react';
 import { AtomGrid } from '../atoms/AtomGrid';
@@ -101,6 +102,8 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
 
   const [filterBarOpen, setFilterBarOpen] = useState(false);
   const [memuReviewsEnabled, setMemuReviewsEnabled] = useState(false);
+  const [compactControl, setCompactControl] = useState<'source' | 'soul' | null>(null);
+  const compactControlsRef = useRef<HTMLDivElement>(null);
   const activeTab = tabs.find(tab => tab.id === activeTabId);
   const activeEntry = activeTab?.stack[activeTab.stackIndex];
   const reviewPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'approvals';
@@ -118,6 +121,15 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   useEffect(() => {
     if (openAlmaMode && onBaseView && viewMode === 'reports') setViewMode('atoms');
   }, [onBaseView, openAlmaMode, setViewMode, viewMode]);
+
+  useEffect(() => {
+    if (compactControl === null) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!compactControlsRef.current?.contains(event.target as Node)) setCompactControl(null);
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    return () => document.removeEventListener('mousedown', closeOnOutsideClick);
+  }, [compactControl]);
 
   useEffect(() => {
     let ignore = false;
@@ -297,6 +309,23 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
 
   // Display count: totalCount from server when not searching, results length when searching
   const displayCount = isSemanticSearch ? displayAtoms.length : totalCount;
+  const knowledgeSourceControl = memuReviewsEnabled ? (
+    <div className="flex rounded-md border border-[var(--color-border)] p-0.5 text-xs">
+      {(['memories', 'workspace'] as const).map((source) => (
+        <button
+          key={source}
+          type="button"
+          onClick={() => {
+            setCompactControl(null);
+            void handleKnowledgeSource(source);
+          }}
+          className={`rounded px-2 py-1 capitalize ${knowledgeSource === source ? 'bg-[var(--color-accent)] text-white' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'}`}
+        >
+          {source}
+        </button>
+      ))}
+    </div>
+  ) : null;
 
   return (
     <>
@@ -463,22 +492,53 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
           </div>
         )}
 
-        {memuReviewsEnabled && (
-          <div className="flex rounded-md border border-[var(--color-border)] p-0.5 text-xs">
-            {(['memories', 'workspace'] as const).map((source) => (
-              <button
-                key={source}
-                type="button"
-                onClick={() => void handleKnowledgeSource(source)}
-                className={`rounded px-2 py-1 capitalize ${knowledgeSource === source ? 'bg-[var(--color-accent)] text-white' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'}`}
-              >
-                {source}
-              </button>
-            ))}
+        {!isMobile && knowledgeSourceControl}
+        {!isMobile && soulSelector}
+
+        {isMobile && (knowledgeSourceControl || soulSelector) && (
+          <div ref={compactControlsRef} className="relative flex shrink-0 items-center gap-1">
+            {knowledgeSourceControl && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setCompactControl(compactControl === 'source' ? null : 'source')}
+                  className={`rounded-md p-1.5 transition-colors ${compactControl === 'source' ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'}`}
+                  title="Memories or workspace"
+                  aria-label="Memories or workspace"
+                  aria-expanded={compactControl === 'source'}
+                  aria-haspopup="dialog"
+                >
+                  <Library className="h-4 w-4" strokeWidth={2} />
+                </button>
+                {compactControl === 'source' && (
+                  <div role="dialog" className="absolute right-0 top-full z-50 mt-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-1 shadow-xl">
+                    {knowledgeSourceControl}
+                  </div>
+                )}
+              </div>
+            )}
+            {soulSelector && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setCompactControl(compactControl === 'soul' ? null : 'soul')}
+                  className={`rounded-md p-1.5 transition-colors ${compactControl === 'soul' ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]'}`}
+                  title="Choose Soul"
+                  aria-label="Choose Soul"
+                  aria-expanded={compactControl === 'soul'}
+                  aria-haspopup="dialog"
+                >
+                  <UserRound className="h-4 w-4" strokeWidth={2} />
+                </button>
+                {compactControl === 'soul' && (
+                  <div role="dialog" className="absolute right-0 top-full z-50 mt-2 whitespace-nowrap rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-1 shadow-xl">
+                    {soulSelector}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
-
-        {soulSelector}
 
         {memuReviewsEnabled && (
           <button
