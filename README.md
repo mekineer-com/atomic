@@ -9,6 +9,8 @@
 [![Server Image](https://img.shields.io/github/v/tag/kenforthewin/atomic?label=server&logo=docker)](https://github.com/kenforthewin/atomic/pkgs/container/atomic-server)
 [![Web Image](https://img.shields.io/github/v/tag/kenforthewin/atomic?label=web&logo=docker)](https://github.com/kenforthewin/atomic/pkgs/container/atomic-web)
 
+This fork supplies the mind map for [OpenAlma](https://github.com/mekineer-com/OpenAlma). For OpenAlma questions and ideas, use [OpenAlma Discussions](https://github.com/mekineer-com/OpenAlma/discussions).
+
 A personal knowledge base that turns markdown notes into a semantically-connected, AI-augmented knowledge graph.
 
 Atomic stores knowledge as **atoms** — markdown notes that are automatically chunked, embedded, tagged, and linked by semantic similarity. Your atoms can be synthesized into wiki articles, explored on a spatial canvas, and queried through an agentic chat interface.
