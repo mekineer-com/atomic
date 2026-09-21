@@ -111,6 +111,9 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const reviewPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'approvals'));
   const entityPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'entities'));
   const isMobile = useIsMobile();
+  const [compactHeaderControls, setCompactHeaderControls] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches,
+  );
   const hasActiveFilter = sourceFilter !== 'all' || !!sourceValue || sortBy !== 'updated' || sortOrder !== 'desc';
 
   // Main nav is "active" only when no tab is open and the current view mode
@@ -121,6 +124,13 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   useEffect(() => {
     if (openAlmaMode && onBaseView && viewMode === 'reports') setViewMode('atoms');
   }, [onBaseView, openAlmaMode, setViewMode, viewMode]);
+
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 1023px)');
+    const update = (event: MediaQueryListEvent) => setCompactHeaderControls(event.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
 
   useEffect(() => {
     if (compactControl === null) return;
@@ -492,10 +502,10 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
           </div>
         )}
 
-        {!isMobile && knowledgeSourceControl}
-        {!isMobile && soulSelector}
+        {!compactHeaderControls && knowledgeSourceControl}
+        {!compactHeaderControls && soulSelector}
 
-        {isMobile && (knowledgeSourceControl || soulSelector) && (
+        {compactHeaderControls && (knowledgeSourceControl || soulSelector) && (
           <div ref={compactControlsRef} className="relative flex shrink-0 items-center gap-1">
             {knowledgeSourceControl && (
               <div className="relative">

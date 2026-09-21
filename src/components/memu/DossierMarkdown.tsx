@@ -64,7 +64,7 @@ export function MemoryCitationLinks({ citations = [] }: { citations?: MemoryCita
             background: event.metaKey || event.ctrlKey,
           })}
         >
-          {citation.ref}
+          {citation.ref.slice(1, -1)}
         </button>
       ))}
     </div>

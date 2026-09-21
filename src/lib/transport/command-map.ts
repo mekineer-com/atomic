@@ -312,13 +312,13 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'POST',
     path: '/api/search',
     argsMode: 'body',
-    transformArgs: (a) => ({ query: a.query, mode: 'semantic', limit: a.limit, threshold: a.threshold }),
+    transformArgs: (a) => ({ query: a.query, mode: 'semantic', limit: a.limit, threshold: a.threshold, memory_only: true }),
   },
   search_atoms_keyword: {
     method: 'POST',
     path: '/api/search',
     argsMode: 'body',
-    transformArgs: (a) => ({ query: a.query, mode: 'keyword', limit: a.limit }),
+    transformArgs: (a) => ({ query: a.query, mode: 'keyword', limit: a.limit, memory_only: true }),
   },
   search_atoms_hybrid: {
     method: 'POST',
@@ -329,7 +329,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       mode: 'hybrid',
       limit: a.limit,
       threshold: a.threshold,
-      memory_only: a.memoryOnly,
+      memory_only: true,
       exclude_entity_id: a.excludeEntityId,
       exclude_category_id: typeof a.excludeCategoryId === 'string'
         ? a.excludeCategoryId.replace(/^category:/, '')

@@ -3,6 +3,31 @@ import { describe, expect, it } from 'vitest';
 import { COMMAND_MAP } from './command-map';
 
 describe('memU command forwarding', () => {
+  it('forwards category description edits from approvals', () => {
+    expect(COMMAND_MAP.update_category_summary.transformArgs?.({
+      summary: 'Current category prose',
+      title: 'Current category',
+      description: 'Edited category description',
+      displayed_summary: 'Previous category prose',
+      summaries_revision: 4,
+    })).toEqual({
+      summary: 'Current category prose',
+      title: 'Current category',
+      description: 'Edited category description',
+      displayed_summary: 'Previous category prose',
+      summaries_revision: 4,
+    });
+  });
+
+  it('keeps categories in tag search rather than atom search', () => {
+    expect(COMMAND_MAP.search_atoms_keyword.transformArgs?.({ query: 'test', limit: 5 })).toMatchObject({
+      memory_only: true,
+    });
+    expect(COMMAND_MAP.search_atoms_semantic.transformArgs?.({ query: 'test', limit: 5 })).toMatchObject({
+      memory_only: true,
+    });
+  });
+
   it('forwards entity curation search filters', () => {
     expect(COMMAND_MAP.search_atoms_hybrid.transformArgs?.({
       query: 'M42',
