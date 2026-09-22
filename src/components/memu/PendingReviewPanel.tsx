@@ -64,6 +64,8 @@ type PendingReviews = {
   summaries_revision: number;
 };
 
+type SummaryScrollPosition = { approved: number; draft: number };
+
 export function PendingReviewPanel() {
   const [reviews, setReviews] = useState<PendingReviews>({ items: [], categories: [], soul_summaries: [], summaries_revision: 0 });
   const [clusterColors, setClusterColors] = useState<Record<string, number>>({});
@@ -75,6 +77,7 @@ export function PendingReviewPanel() {
   const busyCategory = useRef<string | null>(null);
   const dirtyCategories = useRef(new Set<string>());
   const summariesRevision = useRef(0);
+  const summaryScrollPositions = useRef(new Map<string, SummaryScrollPosition>());
   const changeSummaryBusy = useCallback((busy: boolean, categoryId: string | null) => {
     busyCategory.current = busy ? categoryId : null;
     setSummaryBusy(busy);
@@ -82,6 +85,14 @@ export function PendingReviewPanel() {
   const changeCategoryDirty = useCallback((categoryId: string, dirty: boolean) => {
     if (dirty) dirtyCategories.current.add(categoryId);
     else dirtyCategories.current.delete(categoryId);
+  }, []);
+  const scrollPosition = useCallback((id: string) => {
+    let position = summaryScrollPositions.current.get(id);
+    if (!position) {
+      position = { approved: 0, draft: 0 };
+      summaryScrollPositions.current.set(id, position);
+    }
+    return position;
   }, []);
 
   const loadReviews = useCallback(async () => {
@@ -179,6 +190,7 @@ export function PendingReviewPanel() {
                 review={category}
                 kind="category"
                 revision={reviews.summaries_revision}
+                scrollPosition={scrollPosition(category.id)}
                 disabled={summaryActionsDisabled}
                 onStale={() => setSummariesStale(true)}
                 onDirtyChange={changeCategoryDirty}
@@ -197,6 +209,7 @@ export function PendingReviewPanel() {
                 review={summary}
                 kind="soul"
                 revision={reviews.summaries_revision}
+                scrollPosition={scrollPosition(summary.id)}
                 disabled={summaryActionsDisabled}
                 onStale={() => setSummariesStale(true)}
                 onBusyChange={changeSummaryBusy}
@@ -274,6 +287,7 @@ function GeneratedSummaryRow({
   review,
   kind,
   revision,
+  scrollPosition,
   disabled,
   onStale,
   onDirtyChange,
@@ -284,6 +298,7 @@ function GeneratedSummaryRow({
   review: CategoryReview | SoulSummaryReview;
   kind: 'category' | 'soul';
   revision: number;
+  scrollPosition: SummaryScrollPosition;
   disabled: boolean;
   onStale: () => void;
   onDirtyChange?: (id: string, dirty: boolean) => void;
@@ -356,10 +371,10 @@ function GeneratedSummaryRow({
         </div>
       ) : <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>}
       <div className="grid gap-2 md:grid-cols-2">
-        <div className={`prose prose-invert max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`}>
+        <div ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className={`prose prose-invert max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`}>
           <DossierMarkdown citations={review.citations}>{review.approved_summary ?? ''}</DossierMarkdown>
         </div>
-        <textarea className={`overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <textarea ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className={`overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       {kind === 'category' && Boolean(review.citations?.length) && (
         <div className="mt-2">

@@ -15,6 +15,7 @@ import { formatDate } from '../../lib/date';
 import { getTransport } from '../../lib/transport';
 import { findSimilarAtoms } from '../../lib/api';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
+import { currentIdentity } from '../../lib/openalma-identity';
 import { DossierMarkdown, DossierUsageLinks, MemoryCitationLinks } from '../memu/DossierMarkdown';
 import { MemoryEntityControls } from '../memu/EntityManager';
 import { atomLinkExtension, type AtomLinkSuggestion, type AtomLinkSuggestionSource } from '../../editor/atom-links';
@@ -44,6 +45,9 @@ const AtomicCodeMirrorEditor = lazy(async () => {
   );
   return { default: Wrapped };
 });
+
+const atomDetailCache = new Map<string, AtomWithTags>();
+const readerScrollPositions = new Map<string, number>();
 
 function DossierMembershipControls({
   atom,
@@ -157,11 +161,14 @@ function DossierMembershipControls({
 
 interface AtomReaderProps {
   atomId: string;
+  viewKey: string;
   highlightText?: string | null;
   initialEditing?: boolean;
 }
 
-export function AtomReader({ atomId, highlightText, initialEditing }: AtomReaderProps) {
+export function AtomReader({ atomId, viewKey, highlightText, initialEditing }: AtomReaderProps) {
+  const identity = currentIdentity();
+  const cacheKey = identity ? `${identity.userId}\0${identity.soulId}\0${atomId}` : null;
   const deleteAtom = useAtomsStore(s => s.deleteAtom);
   const fetchTags = useTagsStore(s => s.fetchTags);
   const setSelectedTag = useUIStore(s => s.setSelectedTag);
@@ -170,16 +177,18 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
   const removeAtomFromTabs = useUIStore(s => s.removeAtomFromTabs);
   const redirectAtomTabToFinding = useUIStore(s => s.redirectAtomTabToFinding);
 
-  const [atom, setAtom] = useState<AtomWithTags | null>(null);
-  const [isLoadingAtom, setIsLoadingAtom] = useState(true);
+  const [atom, setAtom] = useState<AtomWithTags | null>(() => cacheKey ? atomDetailCache.get(cacheKey) ?? null : null);
+  const [isLoadingAtom, setIsLoadingAtom] = useState(() => !cacheKey || !atomDetailCache.has(cacheKey));
   const [showLoading, setShowLoading] = useState(false);
   const lastFetchedAt = useRef<string | null>(null);
 
   const refreshAtom = useCallback(async () => {
     const fetchedAtom = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atomId });
+    if (fetchedAtom && cacheKey) atomDetailCache.set(cacheKey, fetchedAtom);
+    else if (cacheKey) atomDetailCache.delete(cacheKey);
     setAtom(fetchedAtom);
     lastFetchedAt.current = fetchedAtom?.updated_at ?? null;
-  }, [atomId]);
+  }, [atomId, cacheKey]);
 
 
   // Watch the atoms store for updates to the currently viewed atom
@@ -189,6 +198,14 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
 
   // Fetch atom from database
   useEffect(() => {
+    const cached = cacheKey ? atomDetailCache.get(cacheKey) : null;
+    if (cached) {
+      setAtom(cached);
+      lastFetchedAt.current = cached.updated_at;
+      setIsLoadingAtom(false);
+      setShowLoading(false);
+      return;
+    }
     setIsLoadingAtom(true);
     setShowLoading(false);
 
@@ -209,7 +226,7 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
       });
 
     return () => clearTimeout(loadingTimer);
-  }, [atomId, refreshAtom]);
+  }, [atomId, cacheKey, refreshAtom]);
 
   // Re-fetch when store summary changes (e.g., after tag extraction)
   const storeAtomUpdatedAt = storeAtom?.updated_at;
@@ -260,6 +277,7 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
       ) : (
         <AtomReaderContent
           atom={atom}
+          scrollKey={viewKey}
           highlightText={highlightText}
           initialEditing={initialEditing}
           onDismiss={overlayDismiss}
@@ -279,12 +297,16 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
               await deleteAtom(atomId, { workspace: true });
             }
             await fetchTags();
+            if (cacheKey) atomDetailCache.delete(cacheKey);
             removeAtomFromTabs(atomId);
           }}
           onTagClick={(tagId) => { setSelectedTag(tagId); overlayDismiss(); }}
           onRelatedAtomClick={(id, opts) => overlayNavigate({ type: 'reader', atomId: id }, opts)}
           onViewGraph={(opts) => overlayNavigate({ type: 'graph', atomId }, opts)}
-          onAtomUpdated={(updated) => setAtom(updated)}
+          onAtomUpdated={(updated) => {
+            if (cacheKey) atomDetailCache.set(cacheKey, updated);
+            setAtom(updated);
+          }}
           onReload={refreshAtom}
         />
       )}
@@ -294,6 +316,7 @@ export function AtomReader({ atomId, highlightText, initialEditing }: AtomReader
 
 interface AtomReaderContentProps {
   atom: AtomWithTags;
+  scrollKey: string;
   highlightText?: string | null;
   initialEditing?: boolean;
   onDismiss: () => void;
@@ -306,7 +329,7 @@ interface AtomReaderContentProps {
 }
 
 function AtomReaderContent({
-  atom, highlightText, initialEditing,
+  atom, scrollKey, highlightText, initialEditing,
   onDismiss, onDelete, onTagClick, onRelatedAtomClick, onViewGraph, onAtomUpdated, onReload,
 }: AtomReaderContentProps) {
   const readerTheme = useUIStore(s => s.readerTheme);
@@ -330,6 +353,9 @@ function AtomReaderContent({
   const [memuEditing, setMemuEditing] = useState(Boolean(initialEditing));
   const [memuStatus, setMemuStatus] = useState<'idle' | 'saving'>('idle');
   const [memuError, setMemuError] = useState<string | null>(null);
+  const restoreScroll = useCallback((node: HTMLDivElement | null) => {
+    if (node) node.scrollTop = readerScrollPositions.get(scrollKey) ?? 0;
+  }, [scrollKey]);
   const memuSummaryEdited = memuSummary !== atom.content;
   const memuCategoryEdited = isMemuCategory && (
     memuTitle !== atom.title || memuDescription !== (atom.description ?? '')
@@ -621,7 +647,7 @@ function AtomReaderContent({
           the viewport may be wide while the reader is narrow — without
           container queries the desktop two-column would render at ~600px
           and squeeze the editor. */}
-      <div className="@container flex-1 overflow-y-auto scrollbar-auto-hide">
+      <div ref={restoreScroll} onScroll={(event) => readerScrollPositions.set(scrollKey, event.currentTarget.scrollTop)} className="@container flex-1 overflow-y-auto scrollbar-auto-hide">
         <div className="max-w-6xl mx-auto px-3 py-5 sm:px-4 sm:py-6 @4xl:px-6 @4xl:flex @4xl:gap-10">
           <div className="flex-1 min-w-0">
             {isMemuAtom ? (
@@ -667,7 +693,12 @@ function AtomReaderContent({
                     {memuError && (
                       <p className="rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{memuError}</p>
                     )}
-                    {isMemuMemory && <DossierUsageLinks usages={atom.dossier_usages} />}
+                    {isMemuMemory && (
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+                        {atom.memory_ref && <span className="font-medium text-[var(--color-text-secondary)]">M{atom.memory_ref}</span>}
+                        <DossierUsageLinks usages={atom.dossier_usages} />
+                      </div>
+                    )}
                     {isMemuCategory && memuEditing && <MemoryCitationLinks citations={atom.citations} />}
                     {isMemuCategory && (
                       <DossierMembershipControls

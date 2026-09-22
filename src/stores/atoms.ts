@@ -32,6 +32,7 @@ export interface DossierUsage {
 }
 
 export interface DossierFields {
+  memory_ref?: number | null;
   description?: string | null;
   approved_description?: string | null;
   approved_summary?: string | null;

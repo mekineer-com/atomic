@@ -46,7 +46,8 @@ import { startNewAtom } from '../../lib/new-atom';
 import { readerEditorActions } from '../../lib/reader-editor-bridge';
 
 export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
-  const openAlmaMode = currentIdentity() !== null;
+  const identity = currentIdentity();
+  const openAlmaMode = identity !== null;
   const atoms = useAtomsStore(s => s.atoms);
   const totalCount = useAtomsStore(s => s.totalCount);
   const hasMore = useAtomsStore(s => s.hasMore);
@@ -106,6 +107,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const compactControlsRef = useRef<HTMLDivElement>(null);
   const activeTab = tabs.find(tab => tab.id === activeTabId);
   const activeEntry = activeTab?.stack[activeTab.stackIndex];
+  const readerViewKey = `${identity?.userId ?? 'standalone'}:${identity?.soulId ?? 'default'}:${activeTabId ?? 'reader'}:${readerState.atomId ?? ''}`;
   const reviewPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'approvals';
   const entityPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'entities';
   const reviewPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'approvals'));
@@ -628,7 +630,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
         ) : readerState.atomId ? (
           readerState.atomId.startsWith('entity:')
             ? <EntityReader entityId={readerState.atomId.slice('entity:'.length)} />
-            : <AtomReader atomId={readerState.atomId} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
+            : <AtomReader key={readerViewKey} atomId={readerState.atomId} viewKey={readerViewKey} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
         ) : wikiReaderState.tagId && wikiReaderState.tagName ? (
           <WikiReader
             tagId={wikiReaderState.tagId}

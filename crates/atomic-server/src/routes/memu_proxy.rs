@@ -267,6 +267,7 @@ pub fn atom_from_node(node: &Value) -> Value {
         "created_at": node["created_at"].as_str().unwrap_or(timestamp),
         "updated_at": timestamp,
         "approved_at": node["approved_at"].as_str(),
+        "memory_ref": node["memory_ref"].clone(),
         "description": node["description"].clone(),
         "approved_description": node["approved_description"].clone(),
         "approved_summary": node["approved_summary"].as_str(),
@@ -322,7 +323,8 @@ mod tests {
         };
         assert_eq!(url.path(), "/root/entity:a%2Fb%3Fc");
 
-        let atom = atom_from_node(&json!({"id": "memory:m1", "entity_ids": null}));
+        let atom = atom_from_node(&json!({"id": "memory:m1", "memory_ref": 42, "entity_ids": null}));
+        assert_eq!(atom["memory_ref"], 42);
         assert_eq!(atom["entity_ids"], json!([]));
         assert_eq!(atom["entity_names"], json!([]));
         assert!(atom.get("members").is_none());
