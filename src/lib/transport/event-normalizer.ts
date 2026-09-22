@@ -34,6 +34,12 @@ export function normalizeServerEvent(data: Record<string, unknown>): NormalizedE
       return { event: 'atom-created', payload: data.atom };
     case 'AtomUpdated':
       return { event: 'atom-updated', payload: data.atom };
+    case 'MemuReviewsChanged':
+      return { event: 'memu-reviews-changed', payload: {
+        category_id: data.category_id,
+        summaries_revision: data.summaries_revision,
+        pending: data.pending,
+      } };
     case 'EmbeddingsReset':
       return { event: 'embeddings-reset', payload: data };
     case 'ImportProgress':

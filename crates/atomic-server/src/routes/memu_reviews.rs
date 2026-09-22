@@ -116,6 +116,22 @@ pub(super) fn updated_atom_response(
     scope: &memu_proxy::MemuScope,
 ) -> HttpResponse {
     let revision = body.get("summaries_revision").cloned();
+    if body["id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("category:"))
+    {
+        if let Some(summaries_revision) = revision.as_ref().and_then(Value::as_i64) {
+            let pending = body["summary"] != body["approved_summary"]
+                || body["description"] != body["approved_description"];
+            let _ = state.event_tx.send(ServerEvent::MemuReviewsChanged {
+                category_id: body["id"].as_str().unwrap_or_default().to_string(),
+                summaries_revision,
+                pending,
+                user_id: scope.user_id.clone(),
+                soul_id: scope.soul_id.clone(),
+            });
+        }
+    }
     let mut atom_value = memu_proxy::atom_from_node(&body);
     if memu_proxy::is_memu_id(body["id"].as_str().unwrap_or_default()) {
         if let Ok(atom) = serde_json::from_value::<atomic_core::AtomWithTags>(atom_value.clone()) {

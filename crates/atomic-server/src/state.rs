@@ -331,6 +331,13 @@ pub enum ServerEvent {
         soul_id: Option<String>,
         database_id: Option<String>,
     },
+    MemuReviewsChanged {
+        category_id: String,
+        summaries_revision: i64,
+        pending: bool,
+        user_id: String,
+        soul_id: String,
+    },
 
     /// The per-DB `dashboard.featured_report_id` pointer changed.
     /// Broadcast on every write through the dashboard route so the
@@ -481,6 +488,9 @@ impl ServerEvent {
             | Self::AtomUpdated {
                 user_id, soul_id, ..
             } => Some((user_id.as_deref()?, soul_id.as_deref()?)),
+            Self::MemuReviewsChanged {
+                user_id, soul_id, ..
+            } => Some((user_id, soul_id)),
             _ => None,
         }
     }

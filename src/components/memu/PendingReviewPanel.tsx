@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getTransport } from '../../lib/transport';
 import { useCanvasStore } from '../../stores/canvas';
 import type { DossierUsage, MemoryCitation } from '../../stores/atoms';
@@ -72,6 +72,17 @@ export function PendingReviewPanel() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [summariesStale, setSummariesStale] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
+  const busyCategory = useRef<string | null>(null);
+  const dirtyCategories = useRef(new Set<string>());
+  const summariesRevision = useRef(0);
+  const changeSummaryBusy = useCallback((busy: boolean, categoryId: string | null) => {
+    busyCategory.current = busy ? categoryId : null;
+    setSummaryBusy(busy);
+  }, []);
+  const changeCategoryDirty = useCallback((categoryId: string, dirty: boolean) => {
+    if (dirty) dirtyCategories.current.add(categoryId);
+    else dirtyCategories.current.delete(categoryId);
+  }, []);
 
   const loadReviews = useCallback(async () => {
     setLoading(true);
@@ -94,6 +105,29 @@ export function PendingReviewPanel() {
     void loadReviews();
   }, [loadReviews]);
 
+  summariesRevision.current = reviews.summaries_revision;
+  useEffect(() => getTransport().subscribe<{
+    category_id: string;
+    summaries_revision: number;
+    pending: boolean;
+  }>('memu-reviews-changed', (change) => {
+    if (change.summaries_revision <= summariesRevision.current) return;
+    if (dirtyCategories.current.has(change.category_id) && busyCategory.current !== change.category_id) {
+      setSummariesStale(true);
+      return;
+    }
+    summariesRevision.current = change.summaries_revision;
+    setReviews((current) => {
+      return {
+        ...current,
+        summaries_revision: change.summaries_revision,
+        categories: change.pending
+          ? current.categories
+          : current.categories.filter((category) => category.id !== change.category_id),
+      };
+    });
+  }), []);
+
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   const summaryActionsDisabled = loading || loadFailed || summariesStale || summaryBusy;
   // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
@@ -112,11 +146,12 @@ export function PendingReviewPanel() {
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
             <p className="text-sm text-[var(--color-text-secondary)]">Approve agent edits and pending memories.</p>
           </div>
-          <button type="button" disabled={loading} onClick={() => void loadReviews()} className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50">Refresh</button>
+          <button type="button" disabled={loading || summariesStale} onClick={() => void loadReviews()} className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50">Refresh</button>
         </div>
 
         {loading && <p className="text-sm text-[var(--color-text-secondary)]">Loading...</p>}
         {error && <p className="mb-3 rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{error}</p>}
+        {summariesStale && <p className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-500">Memory summaries changed outside this review, possibly during a memorize cycle. Save any unsaved text elsewhere, then close and reopen Approvals.</p>}
         {!loading && reviews.items.length === 0 && reviews.categories.length === 0 && reviews.soul_summaries.length === 0 && (
           <p className="text-sm text-[var(--color-text-secondary)]">Nothing pending.</p>
         )}
@@ -129,6 +164,7 @@ export function PendingReviewPanel() {
                 key={item.id}
                 item={item}
                 accentClass={item.similar_to?.length && clusterColors[item.id] != null ? CLUSTER_COLORS[clusterColors[item.id]] : null}
+                disabled={summariesStale}
                 onDone={() => removeMemory(item.id)}
                 onError={reportError}
               />
@@ -144,13 +180,13 @@ export function PendingReviewPanel() {
                 kind="category"
                 revision={reviews.summaries_revision}
                 disabled={summaryActionsDisabled}
-                stale={summariesStale}
                 onStale={() => setSummariesStale(true)}
-                onBusyChange={setSummaryBusy}
+                onDirtyChange={changeCategoryDirty}
+                onBusyChange={changeSummaryBusy}
                 onDone={(result) => {
                   useCanvasStore.getState().invalidateCanvasData();
                   removeCategory(category.id);
-                  setReviews((r) => ({ ...r, summaries_revision: result.summaries_revision }));
+                  setReviews((r) => ({ ...r, summaries_revision: Math.max(r.summaries_revision, result.summaries_revision) }));
                 }}
                 onError={reportError}
               />
@@ -162,12 +198,11 @@ export function PendingReviewPanel() {
                 kind="soul"
                 revision={reviews.summaries_revision}
                 disabled={summaryActionsDisabled}
-                stale={summariesStale}
                 onStale={() => setSummariesStale(true)}
-                onBusyChange={setSummaryBusy}
+                onBusyChange={changeSummaryBusy}
                 onDone={(result) => setReviews((r) => ({
                   ...r,
-                  summaries_revision: result.summaries_revision,
+                  summaries_revision: Math.max(r.summaries_revision, result.summaries_revision),
                   soul_summaries: r.soul_summaries.map((row) => row.kind === summary.kind ? { ...row, ...result, kind: summary.kind } : row),
                 }))}
                 onError={reportError}
@@ -182,11 +217,13 @@ export function PendingReviewPanel() {
 function MemoryRow({
   item,
   accentClass,
+  disabled,
   onDone,
   onError,
 }: {
   item: MemoryReview;
   accentClass: (typeof CLUSTER_COLORS)[number] | null;
+  disabled: boolean;
   onDone: () => void;
   onError: (err: unknown) => void;
 }) {
@@ -226,8 +263,8 @@ function MemoryRow({
       <textarea className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       <DossierUsageLinks usages={item.dossier_usages} />
       <div className="mt-2 flex gap-2">
-        <button disabled={busy} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary } : { id: item.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
-        <button disabled={busy || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
+        <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary } : { id: item.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
+        <button disabled={busy || disabled || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
       </div>
     </article>
   );
@@ -238,8 +275,8 @@ function GeneratedSummaryRow({
   kind,
   revision,
   disabled,
-  stale,
   onStale,
+  onDirtyChange,
   onBusyChange,
   onDone,
   onError,
@@ -248,9 +285,9 @@ function GeneratedSummaryRow({
   kind: 'category' | 'soul';
   revision: number;
   disabled: boolean;
-  stale: boolean;
   onStale: () => void;
-  onBusyChange: (busy: boolean) => void;
+  onDirtyChange?: (id: string, dirty: boolean) => void;
+  onBusyChange: (busy: boolean, categoryId: string | null) => void;
   onDone: (result: SummaryMutationResponse) => void;
   onError: (err: unknown) => void;
 }) {
@@ -266,10 +303,15 @@ function GeneratedSummaryRow({
     setTitle(review.label ?? '');
     setDescription(review.description ?? '');
   }, [review]);
+  useEffect(() => {
+    if (!onDirtyChange) return;
+    onDirtyChange(review.id, edited);
+    return () => onDirtyChange(review.id, false);
+  }, [edited, onDirtyChange, review.id]);
   const run = async () => {
     if (disabled) return;
     setBusy(true);
-    onBusyChange(true);
+    onBusyChange(true, kind === 'category' ? review.id : null);
     try {
       const command = kind === 'category'
         ? (edited ? 'update_category_summary' : 'approve_category')
@@ -292,13 +334,12 @@ function GeneratedSummaryRow({
       else onError(err);
     } finally {
       setBusy(false);
-      onBusyChange(false);
+      onBusyChange(false, null);
     }
   };
 
   return (
     <article className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3">
-      {stale && <p className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-500">Summaries changed during a memorize cycle. Save any edits to another file, then refresh this page.</p>}
       {kind === 'category' ? (
         <div className="mb-3 space-y-2">
           <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
