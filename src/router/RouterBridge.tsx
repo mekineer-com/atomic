@@ -165,7 +165,10 @@ function reconcileTabsForOverlay(
   const newEntry = entryFromRoute(parsed);
   if (!newEntry) return null;
 
-  const activeTab = activeTabId ? tabs.find((t) => t.id === activeTabId) ?? null : null;
+  const selectedActiveTab = activeTabId ? tabs.find((t) => t.id === activeTabId) ?? null : null;
+  const activeTab = selectedActiveTab?.retired && parsed.kind === 'tool' && parsed.tool === 'approvals'
+    ? null
+    : selectedActiveTab;
   const activeCurrent = activeTab?.stack[activeTab.stackIndex];
 
   // Already showing this entry as current. Preserve highlightText/editing
@@ -186,6 +189,7 @@ function reconcileTabsForOverlay(
 
   // Some other tab has this entry as its current — switch to it.
   const matching = tabs.find((t) => {
+    if (t.retired && parsed.kind === 'tool' && parsed.tool === 'approvals') return false;
     const cur = t.stack[t.stackIndex];
     return cur && entriesEquivalent(cur, parsed);
   });

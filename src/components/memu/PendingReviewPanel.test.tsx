@@ -79,4 +79,45 @@ describe('PendingReviewPanel', () => {
     expect(container.textContent).toContain('new soul summary');
     await act(async () => { root.unmount(); });
   });
+
+  it('retires a conflicting review without offering refresh', async () => {
+    const onStale = vi.fn();
+    transport.invoke.mockResolvedValue({
+      items: [],
+      categories: [{ id: 'category:c1', label: 'Edited category', summary: 'draft' }],
+      soul_summaries: [],
+      summaries_revision: 1,
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
+    const input = container.querySelector('input')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, 'Changed category');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      transport.listeners.get('memu-reviews-changed')?.({
+        category_id: 'category:c1',
+        summaries_revision: 2,
+        pending: true,
+      });
+    });
+
+    expect(onStale).toHaveBeenCalledOnce();
+    const banner = [...container.querySelectorAll('p')].find(node => node.textContent?.includes('read-only snapshot'));
+    expect(banner?.textContent).toContain('Memory summaries changed');
+    expect(banner?.classList.contains('sticky')).toBe(true);
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Refresh')).toBe(false);
+    await act(async () => {
+      transport.listeners.get('memu-reviews-changed')?.({
+        category_id: 'category:c1',
+        summaries_revision: 3,
+        pending: false,
+      });
+    });
+    expect(container.querySelector('input')).not.toBeNull();
+    await act(async () => { root.unmount(); });
+  });
 });

@@ -66,7 +66,7 @@ type PendingReviews = {
 
 type SummaryScrollPosition = { approved: number; draft: number };
 
-export function PendingReviewPanel() {
+export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
   const [reviews, setReviews] = useState<PendingReviews>({ items: [], categories: [], soul_summaries: [], summaries_revision: 0 });
   const [clusterColors, setClusterColors] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +78,15 @@ export function PendingReviewPanel() {
   const dirtyReviews = useRef(new Set<string>());
   const summariesRevision = useRef(0);
   const reviewEvents = useRef(0);
+  const stale = useRef(false);
   const summaryScrollPositions = useRef(new Map<string, SummaryScrollPosition>());
+  const onStaleRef = useRef(onStale);
+  onStaleRef.current = onStale;
+  const markStale = useCallback(() => {
+    stale.current = true;
+    setSummariesStale(true);
+    onStaleRef.current?.();
+  }, []);
   const changeSummaryBusy = useCallback((busy: boolean, reviewKey: string) => {
     busyReview.current = busy ? reviewKey : null;
     setSummaryBusy(busy);
@@ -103,9 +111,11 @@ export function PendingReviewPanel() {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const eventVersion = reviewEvents.current;
         const fetched = await getTransport().invoke<PendingReviews>('list_pending_memu_reviews');
+        if (stale.current) return;
         if (eventVersion !== reviewEvents.current || fetched.summaries_revision < summariesRevision.current) {
           if (attempt === 0) continue;
-          setSummariesStale(true);
+          setError('Reviews changed while loading. Refresh to try again.');
+          setLoadFailed(true);
           return;
         }
         summariesRevision.current = fetched.summaries_revision;
@@ -133,11 +143,12 @@ export function PendingReviewPanel() {
     summaries_revision: number;
     pending: boolean;
   }>('memu-reviews-changed', (change) => {
+    if (stale.current) return;
     reviewEvents.current += 1;
     if (change.summaries_revision <= summariesRevision.current) return;
     const reviewKey = `category:${change.category_id}`;
     if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
-      setSummariesStale(true);
+      markStale();
       return;
     }
     summariesRevision.current = change.summaries_revision;
@@ -150,9 +161,10 @@ export function PendingReviewPanel() {
           : current.categories.filter((category) => category.id !== change.category_id),
       };
     });
-  }), []);
+  }), [markStale]);
 
   useEffect(() => getTransport().subscribe<SummaryMutationResponse>('memu-soul-summary-changed', (change) => {
+    if (stale.current) return;
     reviewEvents.current += 1;
     if (!Number.isFinite(change.summaries_revision)) {
       void loadReviews();
@@ -161,7 +173,7 @@ export function PendingReviewPanel() {
     if (change.summaries_revision <= summariesRevision.current || !change.kind) return;
     const reviewKey = `soul:${change.kind}`;
     if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
-      setSummariesStale(true);
+      markStale();
       return;
     }
     summariesRevision.current = change.summaries_revision;
@@ -170,7 +182,7 @@ export function PendingReviewPanel() {
       summaries_revision: change.summaries_revision,
       soul_summaries: current.soul_summaries.map((row) => row.kind === change.kind ? { ...row, ...change } : row),
     }));
-  }), [loadReviews]);
+  }), [loadReviews, markStale]);
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   const summaryActionsDisabled = loading || loadFailed || summariesStale || summaryBusy;
@@ -190,12 +202,12 @@ export function PendingReviewPanel() {
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
             <p className="text-sm text-[var(--color-text-secondary)]">Approve agent edits and pending memories.</p>
           </div>
-          <button type="button" disabled={loading || summariesStale} onClick={() => void loadReviews()} className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50">Refresh</button>
+          {!summariesStale && <button type="button" disabled={loading} onClick={() => void loadReviews()} className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50">Refresh</button>}
         </div>
 
         {loading && <p className="text-sm text-[var(--color-text-secondary)]">Loading...</p>}
         {error && <p className="mb-3 rounded border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-500">{error}</p>}
-        {summariesStale && <p className="mb-3 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-sm text-amber-500">Memory summaries changed outside this review, possibly during a memorize cycle. Save any unsaved text elsewhere, then close and reopen Approvals.</p>}
+        {summariesStale && <p className="sticky top-0 z-20 mb-3 rounded border border-amber-500/40 bg-[var(--color-bg-main)] p-2 text-sm text-amber-500">Memory summaries changed. This tab is now a read-only snapshot. Open Approvals again to see the latest.</p>}
         {!loading && reviews.items.length === 0 && reviews.categories.length === 0 && reviews.soul_summaries.length === 0 && (
           <p className="text-sm text-[var(--color-text-secondary)]">Nothing pending.</p>
         )}
@@ -225,7 +237,7 @@ export function PendingReviewPanel() {
                 revision={reviews.summaries_revision}
                 scrollPosition={scrollPosition(category.id)}
                 disabled={summaryActionsDisabled}
-                onStale={() => setSummariesStale(true)}
+                onStale={markStale}
                 onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => {
@@ -244,7 +256,7 @@ export function PendingReviewPanel() {
                 revision={reviews.summaries_revision}
                 scrollPosition={scrollPosition(summary.id)}
                 disabled={summaryActionsDisabled}
-                onStale={() => setSummariesStale(true)}
+                onStale={markStale}
                 onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => setReviews((r) => ({

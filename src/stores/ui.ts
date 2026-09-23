@@ -69,6 +69,7 @@ export interface Tab {
   id: string;
   stack: TabEntry[];
   stackIndex: number;
+  retired?: boolean;
   /// Monotonically increasing ordinal assigned at creation. Used for the
   /// "Tab N" fallback label so untitled tabs stay distinguishable even after
   /// reordering or closures.
@@ -150,6 +151,7 @@ interface UIStore {
   // Tab actions
   openEntry: (entry: TabEntry, opts?: { newTab?: boolean; background?: boolean }) => void;
   openToolTab: (tool: 'approvals' | 'entities') => void;
+  retireApprovalsTab: (tabId: string) => void;
   switchToTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
@@ -578,6 +580,7 @@ export const useUIStore = create<UIStore>()(
       openToolTab: (tool) => {
         const state = get();
         for (const tab of state.tabs) {
+          if (tool === 'approvals' && tab.retired) continue;
           const index = tab.stack.findIndex((entry) => entry.type === 'tool' && entry.tool === tool);
           if (index < 0) continue;
           const entry = tab.stack[index];
@@ -593,6 +596,10 @@ export const useUIStore = create<UIStore>()(
         }
         state.openEntry({ type: 'tool', tool }, { newTab: true });
       },
+
+      retireApprovalsTab: (tabId) => set((state) => ({
+        tabs: state.tabs.map((tab) => tab.id === tabId ? { ...tab, retired: true } : tab),
+      })),
 
       switchToTab: (tabId) => {
         const state = get();
@@ -1131,32 +1138,35 @@ export const useUIStore = create<UIStore>()(
     {
       name: 'atomic-ui-storage',
       version: 2,
-      partialize: (state) => ({
-        viewMode: state.viewMode,
-        atomsLayout: state.atomsLayout,
-        knowledgeSource: state.knowledgeSource,
-        readerTheme: state.readerTheme,
-        chatSidebarOpen: state.chatSidebarOpen,
-        chatSidebarWidth: state.chatSidebarWidth,
-        chatSidebarConversationId: state.chatSidebarConversationId,
-        leftPanelOpen: state.leftPanelOpen,
-        tabs: state.tabs,
-        activeTabId: state.activeTabId,
-        nextTabOrdinal: state.nextTabOrdinal,
-        canvasRememberView: state.canvasRememberView,
-        canvasEntitiesPanelHeight: state.canvasEntitiesPanelHeight,
-        ...(state.canvasRememberView ? {
-          canvasCategoryVisible: state.canvasCategoryVisible,
-          canvasEntityVisible: state.canvasEntityVisible,
-          canvasCategoryShowDimmed: state.canvasCategoryShowDimmed,
-          canvasEntityShowDimmed: state.canvasEntityShowDimmed,
-          canvasFilter: state.canvasFilter,
-          canvasRebuildPerView: state.canvasRebuildPerView,
-          canvasCameraState: state.canvasCameraState,
-          canvasEdgeThreshold: state.canvasEdgeThreshold,
-          canvasVisibleEdgeLayers: state.canvasVisibleEdgeLayers,
-        } : {}),
-      }),
+      partialize: (state) => {
+        const tabs = state.tabs.filter((tab) => !tab.retired);
+        return {
+          viewMode: state.viewMode,
+          atomsLayout: state.atomsLayout,
+          knowledgeSource: state.knowledgeSource,
+          readerTheme: state.readerTheme,
+          chatSidebarOpen: state.chatSidebarOpen,
+          chatSidebarWidth: state.chatSidebarWidth,
+          chatSidebarConversationId: state.chatSidebarConversationId,
+          leftPanelOpen: state.leftPanelOpen,
+          tabs,
+          activeTabId: tabs.some((tab) => tab.id === state.activeTabId) ? state.activeTabId : null,
+          nextTabOrdinal: state.nextTabOrdinal,
+          canvasRememberView: state.canvasRememberView,
+          canvasEntitiesPanelHeight: state.canvasEntitiesPanelHeight,
+          ...(state.canvasRememberView ? {
+            canvasCategoryVisible: state.canvasCategoryVisible,
+            canvasEntityVisible: state.canvasEntityVisible,
+            canvasCategoryShowDimmed: state.canvasCategoryShowDimmed,
+            canvasEntityShowDimmed: state.canvasEntityShowDimmed,
+            canvasFilter: state.canvasFilter,
+            canvasRebuildPerView: state.canvasRebuildPerView,
+            canvasCameraState: state.canvasCameraState,
+            canvasEdgeThreshold: state.canvasEdgeThreshold,
+            canvasVisibleEdgeLayers: state.canvasVisibleEdgeLayers,
+          } : {}),
+        };
+      },
       // v0 → v1: 'grid' and 'list' were top-level ViewMode values. They're now
       // collapsed into a single 'atoms' view with a separate atomsLayout field.
       // v1 → v2: tabs introduced. No data migration needed — older sessions

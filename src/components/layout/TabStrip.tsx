@@ -52,7 +52,7 @@ function fetchAtomTitle(atomId: string, onResolved: (title: string) => void): vo
     });
 }
 
-function useResolvedTitle(entry: TabEntry, ordinal: number): { label: string; icon: 'atom' | 'wiki' | 'graph' | 'report' | 'finding' | 'approvals' | 'entities' } {
+function useResolvedTitle(entry: TabEntry, ordinal: number, retired = false): { label: string; icon: 'atom' | 'wiki' | 'graph' | 'report' | 'finding' | 'approvals' | 'entities' } {
   const atomFromStore = useAtomsStore(
     useShallow((s) => {
       if (entry.type === 'atom' || entry.type === 'graph') {
@@ -131,7 +131,7 @@ function useResolvedTitle(entry: TabEntry, ordinal: number): { label: string; ic
   }
 
   if (entry.type === 'tool') {
-    return { label: entry.tool === 'approvals' ? 'Approvals' : 'Entities', icon: entry.tool };
+    return { label: entry.tool === 'approvals' ? `Approvals${retired ? ' (old)' : ''}` : 'Entities', icon: entry.tool };
   }
 
   const candidate =
@@ -157,7 +157,7 @@ function SortablePill({ tab, isActive, onSwitch, onClose, onBack, onForward, onM
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: tab.id });
 
   const entry = tab.stack[tab.stackIndex];
-  const { label, icon } = useResolvedTitle(entry, tab.ordinal);
+  const { label, icon } = useResolvedTitle(entry, tab.ordinal, tab.retired);
 
   const canBack = tab.stackIndex > 0;
   const canForward = tab.stackIndex < tab.stack.length - 1;

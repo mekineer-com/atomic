@@ -82,6 +82,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const toggleLeftPanel = useUIStore(s => s.toggleLeftPanel);
   const deactivateTabs = useUIStore(s => s.deactivateTabs);
   const openToolTab = useUIStore(s => s.openToolTab);
+  const retireApprovalsTab = useUIStore(s => s.retireApprovalsTab);
   const setViewMode = useUIStore(s => s.setViewMode);
   const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
   const setKnowledgeSource = useUIStore(s => s.setKnowledgeSource);
@@ -110,7 +111,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const readerViewKey = `${identity?.userId ?? 'standalone'}:${identity?.soulId ?? 'default'}:${activeTabId ?? 'reader'}:${readerState.atomId ?? ''}`;
   const reviewPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'approvals';
   const entityPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'entities';
-  const reviewPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'approvals'));
+  const reviewTabs = tabs.filter(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'approvals'));
   const entityPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'entities'));
   const isMobile = useIsMobile();
   const [compactHeaderControls, setCompactHeaderControls] = useState(
@@ -619,9 +620,11 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
 
       {/* Content */}
       <div className="flex-1 overflow-hidden relative">
-        {reviewPanelMounted && (
-          <div className={`absolute inset-0 ${reviewPanelOpen ? '' : 'hidden'}`}><PendingReviewPanel /></div>
-        )}
+        {reviewTabs.map((tab) => {
+          const entry = tab.stack[tab.stackIndex];
+          const open = tab.id === activeTabId && entry?.type === 'tool' && entry.tool === 'approvals';
+          return <div key={tab.id} className={`absolute inset-0 ${open ? '' : 'hidden'}`}><PendingReviewPanel onStale={() => retireApprovalsTab(tab.id)} /></div>;
+        })}
         {entityPanelMounted && (
           <div className={`absolute inset-0 ${entityPanelOpen ? '' : 'hidden'}`}><EntityManager /></div>
         )}
