@@ -74,6 +74,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
   const [loadFailed, setLoadFailed] = useState(false);
   const [summariesStale, setSummariesStale] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
+  const [hasDirtyReviews, setHasDirtyReviews] = useState(false);
   const busyReview = useRef<string | null>(null);
   const dirtyReviews = useRef(new Set<string>());
   const summariesRevision = useRef(0);
@@ -94,6 +95,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
   const changeSummaryDirty = useCallback((reviewKey: string, dirty: boolean) => {
     if (dirty) dirtyReviews.current.add(reviewKey);
     else dirtyReviews.current.delete(reviewKey);
+    setHasDirtyReviews(dirtyReviews.current.size > 0);
   }, []);
   const scrollPosition = useCallback((id: string) => {
     let position = summaryScrollPositions.current.get(id);
@@ -186,6 +188,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
 
   useEffect(() => getTransport().subscribe<AtomWithTags>('atom-updated', (atom) => {
     if (stale.current || !atom.id.startsWith('memory:')) return;
+    reviewEvents.current += 1;
     const id = atom.id;
     const reviewKey = id;
     if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
@@ -222,7 +225,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
             <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">memU review</h2>
             <p className="text-sm text-[var(--color-text-secondary)]">Approve agent edits and pending memories.</p>
           </div>
-          {!summariesStale && <button type="button" disabled={loading} onClick={() => void loadReviews()} className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50">Refresh</button>}
+          {!summariesStale && <button type="button" disabled={loading || hasDirtyReviews} title={hasDirtyReviews ? 'Save or discard edits before refreshing' : undefined} onClick={() => void loadReviews()} className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm disabled:opacity-50">Refresh</button>}
         </div>
 
         {loading && <p className="text-sm text-[var(--color-text-secondary)]">Loading...</p>}

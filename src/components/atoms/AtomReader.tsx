@@ -341,7 +341,16 @@ export function AtomReader({
           onSavingChange={(saving) => { savingRef.current = saving; }}
           onConflict={retire}
           onFetchCurrent={fetchCurrentAtom}
-          onOpenCurrent={() => {
+          onOpenCurrent={async () => {
+            try {
+              if (!await fetchCurrentAtom()) {
+                setCurrentAvailable(false);
+                return;
+              }
+            } catch (error) {
+              console.error('Failed to check current memU item:', error);
+              return;
+            }
             if (cacheKey) atomDetailCache.delete(cacheKey);
             openReader(atomId, undefined, { newTab: true });
           }}
@@ -402,7 +411,7 @@ interface AtomReaderContentProps {
   onSavingChange: (saving: boolean) => void;
   onConflict: (currentAvailable: boolean) => void;
   onFetchCurrent: () => Promise<AtomWithTags | null>;
-  onOpenCurrent: () => void;
+  onOpenCurrent: () => void | Promise<void>;
   onDismiss: () => void;
   onDelete: () => Promise<void>;
   onTagClick: (tagId: string) => void;
@@ -796,7 +805,7 @@ function AtomReaderContent({
               ? `This ${isMemuCategory ? 'category' : 'memory'} changed while you were editing. This tab is now a read-only snapshot.`
               : `This ${isMemuCategory ? 'category' : 'memory'} changed while you were editing. This tab is now a read-only snapshot; no current version is available.`}
           </span>
-          {currentAvailable && <button type="button" data-dead-tab-action className="rounded border border-amber-500/50 px-3 py-1" onClick={onOpenCurrent}>Open current version</button>}
+          {currentAvailable && <button type="button" data-dead-tab-action className="rounded border border-amber-500/50 px-3 py-1" onClick={() => void onOpenCurrent()}>Open current version</button>}
         </div>
       )}
       {/* @container makes the two-column layout react to the actual reader

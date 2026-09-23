@@ -986,6 +986,21 @@ async fn test_empty_memu_review_response_does_not_broadcast_atom_updated() {
 }
 
 #[actix_web::test]
+async fn test_category_approval_requires_summary_snapshot() {
+    let ctx = TestCtx::new().await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::post()
+        .uri("/api/memu/reviews/category/c1/approve")
+        .insert_header(ctx.auth_header())
+        .set_json(json!({}))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+
+    assert_eq!(response.status(), 400);
+}
+
+#[actix_web::test]
 async fn test_send_message_uses_memu_chat_profile() {
     let (model_url, model_handle) = start_fake_model();
     let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);

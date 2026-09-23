@@ -97,6 +97,7 @@ describe('PendingReviewPanel', () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, 'Changed category');
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    expect([...container.querySelectorAll('button')].find(button => button.textContent === 'Refresh')?.disabled).toBe(true);
     await act(async () => {
       transport.listeners.get('memu-reviews-changed')?.({
         category_id: 'category:c1',
@@ -155,6 +156,32 @@ describe('PendingReviewPanel', () => {
     expect(onStale).toHaveBeenCalledOnce();
     expect(textarea.value).toBe('local draft');
     expect(textarea.readOnly).toBe(true);
+    await act(async () => { root.unmount(); });
+  });
+
+  it('does not let an in-flight reload restore a memory changed by an event', async () => {
+    let finishLoad!: (value: unknown) => void;
+    transport.invoke
+      .mockImplementationOnce(() => new Promise(resolve => { finishLoad = resolve; }))
+      .mockResolvedValueOnce({ items: [], categories: [], soul_summaries: [], summaries_revision: 1 });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<PendingReviewPanel />); });
+    await act(async () => {
+      transport.listeners.get('atom-updated')?.({
+        id: 'memory:m1', content: 'approved elsewhere', approved_at: '2026-01-01T00:00:00Z',
+      });
+      finishLoad({
+        items: [{ id: 'memory:m1', summary: 'stale pending row', memory_type: 'knowledge' }],
+        categories: [],
+        soul_summaries: [],
+        summaries_revision: 1,
+      });
+    });
+
+    expect(container.textContent).not.toContain('stale pending row');
+    expect(transport.invoke).toHaveBeenCalledTimes(2);
     await act(async () => { root.unmount(); });
   });
 });

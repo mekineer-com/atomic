@@ -420,6 +420,9 @@ async fn approve_summary(
     body: SummaryGuard,
     atom_response: bool,
 ) -> HttpResponse {
+    if body.summaries_revision.is_none() || body.displayed_summary.is_none() {
+        return HttpResponse::BadRequest().json(json!({"error": "summary snapshot is required"}));
+    }
     let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,

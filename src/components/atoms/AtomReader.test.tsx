@@ -63,7 +63,8 @@ describe('AtomReader stale snapshots', () => {
   it('keeps a dirty draft mounted and read-only when a refetch changes its baseline', async () => {
     transport.invoke
       .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
-      .mockResolvedValueOnce(memory('external memory', '2026-01-02T00:00:00Z'));
+      .mockResolvedValueOnce(memory('external memory', '2026-01-02T00:00:00Z'))
+      .mockResolvedValueOnce(null);
     useUIStore.setState({
       tabs: [{
         id: 'tab-1',
@@ -95,6 +96,15 @@ describe('AtomReader stale snapshots', () => {
     expect(container.querySelector('textarea')?.value).toBe('local draft');
     expect(container.querySelector('textarea')?.readOnly).toBe(true);
     expect(container.textContent).toContain('read-only snapshot');
+    await act(async () => {
+      [...container.querySelectorAll('button')]
+        .find(button => button.textContent === 'Open current version')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(useUIStore.getState().tabs).toHaveLength(1);
+    expect(container.textContent).toContain('no current version is available');
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Open current version')).toBe(false);
     await act(async () => { root.unmount(); });
   });
 });
