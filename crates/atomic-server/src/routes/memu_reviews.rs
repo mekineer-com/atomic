@@ -149,18 +149,27 @@ pub(super) fn updated_atom_response(
     HttpResponse::Ok().json(atom_value)
 }
 
+fn broadcast_soul_summary(
+    event_tx: &tokio::sync::broadcast::Sender<ServerEvent>,
+    body: &Value,
+    scope: &memu_proxy::MemuScope,
+) {
+    if body.get("summaries_revision").and_then(Value::as_i64).is_none() {
+        tracing::warn!("memU soul-summary response omitted summaries_revision");
+    }
+    let _ = event_tx.send(ServerEvent::MemuSoulSummaryChanged {
+        summary: body.clone(),
+        user_id: scope.user_id.clone(),
+        soul_id: scope.soul_id.clone(),
+    });
+}
+
 fn updated_soul_summary_response(
     state: &AppState,
     body: Value,
     scope: &memu_proxy::MemuScope,
 ) -> HttpResponse {
-    if body.get("summaries_revision").and_then(Value::as_i64).is_some() {
-        let _ = state.event_tx.send(ServerEvent::MemuSoulSummaryChanged {
-            summary: body.clone(),
-            user_id: scope.user_id.clone(),
-            soul_id: scope.soul_id.clone(),
-        });
-    }
+    broadcast_soul_summary(&state.event_tx, &body, scope);
     HttpResponse::Ok().json(body)
 }
 
@@ -447,5 +456,29 @@ pub async fn delete_memory(
     {
         Ok(body) => HttpResponse::Ok().json(body),
         Err(response) => response,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soul_summary_response_is_broadcast_even_without_revision() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(1);
+        let scope = memu_proxy::MemuScope {
+            base_url: "http://localhost".into(),
+            user_id: "owner".into(),
+            soul_id: "soul".into(),
+        };
+
+        broadcast_soul_summary(&tx, &json!({"kind": "narrative_self"}), &scope);
+
+        match rx.try_recv().unwrap() {
+            ServerEvent::MemuSoulSummaryChanged { summary, .. } => {
+                assert_eq!(summary["kind"], "narrative_self");
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 }

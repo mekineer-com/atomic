@@ -25,7 +25,14 @@ afterEach(() => {
 describe('PendingReviewPanel', () => {
   it('does not let an in-flight reload overwrite a newer review event', async () => {
     let finishLoad!: (value: unknown) => void;
-    transport.invoke.mockReturnValue(new Promise(resolve => { finishLoad = resolve; }));
+    transport.invoke
+      .mockImplementationOnce(() => new Promise(resolve => { finishLoad = resolve; }))
+      .mockResolvedValueOnce({
+        items: [],
+        categories: [{ id: 'category:c2', label: 'Fresh category', summary: 'new' }],
+        soul_summaries: [],
+        summaries_revision: 2,
+      });
     const container = document.createElement('div');
     const root = createRoot(container);
 
@@ -44,7 +51,32 @@ describe('PendingReviewPanel', () => {
       });
     });
 
-    expect(container.textContent).not.toContain('Stale category');
+    expect(transport.invoke).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('input')?.value).toBe('Fresh category');
+    await act(async () => { root.unmount(); });
+  });
+
+  it('applies soul-summary events', async () => {
+    transport.invoke.mockResolvedValue({
+      items: [],
+      categories: [],
+      soul_summaries: [{ id: 'soul-summary:narrative_self', kind: 'narrative_self', summary: 'old' }],
+      summaries_revision: 1,
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<PendingReviewPanel />); });
+    await act(async () => {
+      transport.listeners.get('memu-soul-summary-changed')?.({
+        id: 'soul-summary:narrative_self',
+        kind: 'narrative_self',
+        summary: 'new soul summary',
+        summaries_revision: 2,
+      });
+    });
+
+    expect(container.textContent).toContain('new soul summary');
     await act(async () => { root.unmount(); });
   });
 });

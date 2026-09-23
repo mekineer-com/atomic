@@ -97,16 +97,22 @@ export function PendingReviewPanel() {
   }, []);
 
   const loadReviews = useCallback(async () => {
-    const eventVersion = reviewEvents.current;
     setLoading(true);
     setError(null);
     try {
-      const fetched = await getTransport().invoke<PendingReviews>('list_pending_memu_reviews');
-      if (eventVersion !== reviewEvents.current) return;
-      if (fetched.summaries_revision < summariesRevision.current) return;
-      summariesRevision.current = fetched.summaries_revision;
-      setReviews(fetched);
-      setClusterColors(assignClusterColors(fetched.items));
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const eventVersion = reviewEvents.current;
+        const fetched = await getTransport().invoke<PendingReviews>('list_pending_memu_reviews');
+        if (eventVersion !== reviewEvents.current || fetched.summaries_revision < summariesRevision.current) {
+          if (attempt === 0) continue;
+          setSummariesStale(true);
+          return;
+        }
+        summariesRevision.current = fetched.summaries_revision;
+        setReviews(fetched);
+        setClusterColors(assignClusterColors(fetched.items));
+        break;
+      }
       setLoadFailed(false);
       setSummariesStale(false);
     } catch (err) {
@@ -148,6 +154,10 @@ export function PendingReviewPanel() {
 
   useEffect(() => getTransport().subscribe<SummaryMutationResponse>('memu-soul-summary-changed', (change) => {
     reviewEvents.current += 1;
+    if (!Number.isFinite(change.summaries_revision)) {
+      void loadReviews();
+      return;
+    }
     if (change.summaries_revision <= summariesRevision.current || !change.kind) return;
     const reviewKey = `soul:${change.kind}`;
     if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
@@ -160,7 +170,7 @@ export function PendingReviewPanel() {
       summaries_revision: change.summaries_revision,
       soul_summaries: current.soul_summaries.map((row) => row.kind === change.kind ? { ...row, ...change } : row),
     }));
-  }), []);
+  }), [loadReviews]);
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   const summaryActionsDisabled = loading || loadFailed || summariesStale || summaryBusy;
@@ -239,7 +249,9 @@ export function PendingReviewPanel() {
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => setReviews((r) => ({
                   ...r,
-                  summaries_revision: Math.max(r.summaries_revision, result.summaries_revision),
+                  summaries_revision: Number.isFinite(result.summaries_revision)
+                    ? Math.max(r.summaries_revision, result.summaries_revision)
+                    : r.summaries_revision,
                   soul_summaries: r.soul_summaries.map((row) => row.kind === summary.kind ? { ...row, ...result, kind: summary.kind } : row),
                 }))}
                 onError={reportError}
