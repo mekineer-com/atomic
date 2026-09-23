@@ -169,6 +169,10 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     if (stale.current) return;
     reviewEvents.current += 1;
     if (!Number.isFinite(change.summaries_revision)) {
+      if (dirtyReviews.current.size > 0) {
+        markStale();
+        return;
+      }
       void loadReviews();
       return;
     }

@@ -993,6 +993,8 @@ async fn test_category_approval_requires_summary_snapshot() {
     let req = actix_test::TestRequest::post()
         .uri("/api/memu/reviews/category/c1/approve")
         .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
         .set_json(json!({}))
         .to_request();
     let response = actix_test::call_service(&app, req).await;

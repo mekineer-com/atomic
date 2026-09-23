@@ -196,7 +196,8 @@ export function AtomReader({
   retired = false,
 }: AtomReaderProps) {
   const identity = currentIdentity();
-  const cacheKey = identity ? `${identity.userId}\0${identity.soulId}\0${atomId}` : null;
+  const memuReader = atomId.startsWith('memory:') || atomId.startsWith('category:');
+  const cacheKey = identity && !memuReader ? `${identity.userId}\0${identity.soulId}\0${atomId}` : null;
   const deleteAtom = useAtomsStore(s => s.deleteAtom);
   const fetchTags = useTagsStore(s => s.fetchTags);
   const setSelectedTag = useUIStore(s => s.setSelectedTag);
@@ -231,8 +232,9 @@ export function AtomReader({
 
   const refreshAtom = useCallback(async () => {
     if (retiredRef.current || savingRef.current) return;
+    const startingAtom = atomRef.current;
     const fetchedAtom = await fetchCurrentAtom();
-    if (retiredRef.current) return;
+    if (retiredRef.current || savingRef.current || atomRef.current !== startingAtom) return;
     const current = atomRef.current;
     if (tabId && dirtyRef.current && current && (!fetchedAtom || memuEditableFieldsChanged(current, fetchedAtom))) {
       retire(Boolean(fetchedAtom));
@@ -348,6 +350,10 @@ export function AtomReader({
                 return;
               }
             } catch (error) {
+              if (isMissingMemoryError(error)) {
+                setCurrentAvailable(false);
+                return;
+              }
               console.error('Failed to check current memU item:', error);
               return;
             }

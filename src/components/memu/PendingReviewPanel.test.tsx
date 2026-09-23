@@ -184,4 +184,31 @@ describe('PendingReviewPanel', () => {
     expect(transport.invoke).toHaveBeenCalledTimes(2);
     await act(async () => { root.unmount(); });
   });
+
+  it('retires instead of reloading over a draft when a soul event has no revision', async () => {
+    const onStale = vi.fn();
+    transport.invoke.mockResolvedValue({
+      items: [],
+      categories: [{ id: 'category:c1', label: 'Category', summary: 'original' }],
+      soul_summaries: [],
+      summaries_revision: 1,
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
+    const input = container.querySelector('input')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, 'local title');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      transport.listeners.get('memu-soul-summary-changed')?.({ kind: 'narrative_self', summary: 'external' });
+    });
+
+    expect(onStale).toHaveBeenCalledOnce();
+    expect(container.querySelector('input')?.value).toBe('local title');
+    expect(transport.invoke).toHaveBeenCalledTimes(1);
+    await act(async () => { root.unmount(); });
+  });
 });
