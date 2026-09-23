@@ -58,7 +58,26 @@ describe('HttpTransport cancellation', () => {
     })));
     const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
 
-    await expect(transport.invoke('delete_memory', { id: 'memory:fictional' }))
+    await expect(transport.invoke('delete_memory', {
+      id: 'memory:fictional', displayed_summary: 'Fictional memory',
+    }))
       .rejects.toBe('Memory is cited in dossier prose: Fictional dossier');
+  });
+
+  it('sends memory baselines in update, approval, and delete requests', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response('{}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
+
+    await transport.invoke('update_memory_summary', { id: 'memory:m1', summary: 'new', displayed_summary: 'old' });
+    await transport.invoke('approve_memory', { id: 'memory:m1', displayed_summary: 'old' });
+    await transport.invoke('delete_memory', { id: 'memory:m1', displayed_summary: 'old' });
+
+    expect(fetchMock.mock.calls[0][1].body).toBe(JSON.stringify({ summary: 'new', displayed_summary: 'old' }));
+    expect(fetchMock.mock.calls[1][1].body).toBe(JSON.stringify({ displayed_summary: 'old' }));
+    expect(fetchMock.mock.calls[2][0]).toBe('http://localhost/api/memu/reviews/memory/memory%3Am1?displayed_summary=old');
   });
 });

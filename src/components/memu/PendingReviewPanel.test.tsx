@@ -121,4 +121,40 @@ describe('PendingReviewPanel', () => {
     expect(container.querySelector('input')).not.toBeNull();
     await act(async () => { root.unmount(); });
   });
+
+  it('updates clean memory rows and retires dirty conflicting rows', async () => {
+    const onStale = vi.fn();
+    transport.invoke.mockResolvedValue({
+      items: [{ id: 'memory:m1', summary: 'old memory', memory_type: 'knowledge' }],
+      categories: [],
+      soul_summaries: [],
+      summaries_revision: 1,
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
+    await act(async () => {
+      transport.listeners.get('atom-updated')?.({
+        id: 'memory:m1', content: 'external memory', approved_at: null,
+      });
+    });
+    const textarea = container.querySelector('textarea')!;
+    expect(textarea.value).toBe('external memory');
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'local draft');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      transport.listeners.get('atom-updated')?.({
+        id: 'memory:m1', content: 'new external memory', approved_at: null,
+      });
+    });
+
+    expect(onStale).toHaveBeenCalledOnce();
+    expect(textarea.value).toBe('local draft');
+    expect(textarea.readOnly).toBe(true);
+    await act(async () => { root.unmount(); });
+  });
 });

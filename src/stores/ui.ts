@@ -151,7 +151,7 @@ interface UIStore {
   // Tab actions
   openEntry: (entry: TabEntry, opts?: { newTab?: boolean; background?: boolean }) => void;
   openToolTab: (tool: 'approvals' | 'entities') => void;
-  retireApprovalsTab: (tabId: string) => void;
+  retireTab: (tabId: string) => void;
   switchToTab: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   reorderTabs: (fromIndex: number, toIndex: number) => void;
@@ -599,7 +599,7 @@ export const useUIStore = create<UIStore>()(
         state.openEntry({ type: 'tool', tool }, { newTab: true });
       },
 
-      retireApprovalsTab: (tabId) => set((state) => ({
+      retireTab: (tabId) => set((state) => ({
         tabs: state.tabs.map((tab) => tab.id === tabId ? { ...tab, retired: true } : tab),
       })),
 
@@ -719,6 +719,7 @@ export const useUIStore = create<UIStore>()(
         // would just show "Atom not found"). Could prune those too, but
         // surgical removal is friendlier.
         const isCurrentlyShowing = (tab: Tab) => {
+          if (tab.retired) return false;
           const e = tab.stack[tab.stackIndex];
           if (!e) return false;
           if (e.type === 'atom' && e.atomId === atomId) return true;

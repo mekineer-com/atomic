@@ -75,11 +75,13 @@ export function MemoryEntityControls({
   memoryId,
   entityIds = [],
   entityNames = [],
+  readOnly = false,
   onUpdated,
 }: {
   memoryId: string;
   entityIds?: string[];
   entityNames?: string[];
+  readOnly?: boolean;
   onUpdated: (atom: AtomWithTags) => void;
 }) {
   const [entities, setEntities] = useState<EntitySummary[]>([]);
@@ -122,18 +124,19 @@ export function MemoryEntityControls({
         {entityIds.map((id, index) => (
           <span key={id} className="flex items-center gap-1 rounded-full border border-[var(--color-border)] px-2 py-1 text-xs">
             <button type="button" onClick={() => openReader(id)}>{entityNames[index] ?? 'Entity'}</button>
-            <button type="button" aria-label={`Detach ${entityNames[index] ?? 'entity'}`} onClick={() => void change(id, false)} className="text-[var(--color-text-tertiary)] hover:text-red-400">×</button>
+            {!readOnly && <button type="button" aria-label={`Detach ${entityNames[index] ?? 'entity'}`} onClick={() => void change(id, false)} className="text-[var(--color-text-tertiary)] hover:text-red-400">×</button>}
           </span>
         ))}
         {entityIds.length === 0 && <span className="text-xs text-[var(--color-text-tertiary)]">None</span>}
       </div>
       <input
         value={query}
+        readOnly={readOnly}
         onChange={event => setQuery(event.target.value)}
         placeholder="Find an entity to attach"
         className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]"
       />
-      {query.trim() && (
+      {!readOnly && query.trim() && (
         <div className="mt-1 space-y-1">
           {matches.map(entity => (
             <button key={entity.id} type="button" onClick={() => void change(entity.id, true)} className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-[var(--color-bg-hover)]">

@@ -401,6 +401,7 @@ async fn memu_memory(path: web::Path<String>) -> HttpResponse {
 async fn memu_update_memory(path: web::Path<String>, body: web::Json<Value>) -> HttpResponse {
     assert_eq!(path.as_str(), "m1");
     assert_eq!(body["summary"], "Updated memory");
+    assert_eq!(body["displayed_summary"], "Memory summary");
     HttpResponse::Ok().json(json!({
         "id": "memory:m1",
         "kind": "memory",
@@ -414,12 +415,14 @@ async fn memu_update_memory(path: web::Path<String>, body: web::Json<Value>) -> 
     }))
 }
 
-async fn memu_approve_empty() -> HttpResponse {
+async fn memu_approve_empty(body: web::Json<Value>) -> HttpResponse {
+    assert_eq!(body["displayed_summary"], "Memory summary");
     HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 
-async fn memu_delete_memory_conflict(path: web::Path<String>) -> HttpResponse {
+async fn memu_delete_memory_conflict(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
     assert_eq!(path.as_str(), "m1");
+    assert!(req.query_string().contains("displayed_summary=Memory+summary"));
     HttpResponse::Conflict().json(json!({
         "detail": {
             "message": "Memory is cited in dossier prose",
@@ -916,7 +919,7 @@ async fn test_cited_memory_delete_preserves_conflict_response() {
     let app = actix_test::init_service(test_app(&ctx)).await;
 
     let req = actix_test::TestRequest::delete()
-        .uri("/api/memu/reviews/memory/m1")
+        .uri("/api/memu/reviews/memory/m1?displayed_summary=Memory%20summary")
         .insert_header(ctx.auth_header())
         .insert_header(("X-OpenAlma-User", "TestOwner"))
         .insert_header(("X-OpenAlma-Soul", "TestSoul"))
@@ -941,7 +944,7 @@ async fn test_memu_review_save_broadcasts_atom_updated() {
         .insert_header(ctx.auth_header())
         .insert_header(("X-OpenAlma-User", "TestOwner"))
         .insert_header(("X-OpenAlma-Soul", "TestSoul"))
-        .set_json(json!({"summary": "Updated memory"}))
+        .set_json(json!({"summary": "Updated memory", "displayed_summary": "Memory summary"}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -973,6 +976,7 @@ async fn test_empty_memu_review_response_does_not_broadcast_atom_updated() {
         .insert_header(ctx.auth_header())
         .insert_header(("X-OpenAlma-User", "TestOwner"))
         .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"displayed_summary": "Memory summary"}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);

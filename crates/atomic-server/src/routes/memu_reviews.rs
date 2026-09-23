@@ -26,6 +26,11 @@ pub struct SummaryGuard {
     pub displayed_summary: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct MemoryDeleteGuard {
+    pub displayed_summary: String,
+}
+
 pub async fn status(state: web::Data<AppState>) -> HttpResponse {
     HttpResponse::Ok().json(json!({"enabled": state.memu_session.is_some()}))
 }
@@ -57,8 +62,16 @@ pub async fn approve_memory(
     request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
+    body: web::Json<SummaryGuard>,
 ) -> HttpResponse {
-    approve(request, state, "memory", &path.into_inner()).await
+    approve(
+        request,
+        state,
+        "memory",
+        &path.into_inner(),
+        body.into_inner(),
+    )
+    .await
 }
 
 pub async fn approve_category(
@@ -83,7 +96,11 @@ async fn approve(
     state: web::Data<AppState>,
     kind: &str,
     id: &str,
+    body: SummaryGuard,
 ) -> HttpResponse {
+    if body.displayed_summary.is_none() {
+        return HttpResponse::BadRequest().json(json!({"error": "displayed_summary is required"}));
+    }
     let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
@@ -97,10 +114,13 @@ async fn approve(
         Err(response) => return response,
     };
     match memu_json(
-        client.post(url).query(&[
-            ("user_id", config.user_id.as_str()),
-            ("soul_id", config.soul_id.as_str()),
-        ]),
+        client
+            .post(url)
+            .query(&[
+                ("user_id", config.user_id.as_str()),
+                ("soul_id", config.soul_id.as_str()),
+            ])
+            .json(&body),
         "memU approve",
     )
     .await
@@ -284,6 +304,9 @@ async fn update(
     {
         return HttpResponse::BadRequest().json(json!({"error": "no changes supplied"}));
     }
+    if kind == "memory" && body.displayed_summary.is_none() {
+        return HttpResponse::BadRequest().json(json!({"error": "displayed_summary is required"}));
+    }
     let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
@@ -431,6 +454,7 @@ pub async fn delete_memory(
     request: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
+    guard: web::Query<MemoryDeleteGuard>,
 ) -> HttpResponse {
     let config = match session(&state, &request).await {
         Ok(config) => config,
@@ -449,6 +473,7 @@ pub async fn delete_memory(
         client.delete(url).query(&[
             ("user_id", config.user_id.as_str()),
             ("soul_id", config.soul_id.as_str()),
+            ("displayed_summary", guard.displayed_summary.as_str()),
         ]),
         "memU delete",
     )

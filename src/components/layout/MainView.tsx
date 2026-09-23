@@ -82,7 +82,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const toggleLeftPanel = useUIStore(s => s.toggleLeftPanel);
   const deactivateTabs = useUIStore(s => s.deactivateTabs);
   const openToolTab = useUIStore(s => s.openToolTab);
-  const retireApprovalsTab = useUIStore(s => s.retireApprovalsTab);
+  const retireTab = useUIStore(s => s.retireTab);
   const setViewMode = useUIStore(s => s.setViewMode);
   const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
   const setKnowledgeSource = useUIStore(s => s.setKnowledgeSource);
@@ -112,6 +112,12 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const reviewPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'approvals';
   const entityPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'entities';
   const reviewTabs = tabs.filter(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'approvals'));
+  const memuReaderTabs = tabs.flatMap((tab) => {
+    const entry = tab.stack[tab.stackIndex];
+    const memuReader = entry?.type === 'atom'
+      && (entry.atomId.startsWith('memory:') || entry.atomId.startsWith('category:'));
+    return memuReader && (tab.retired || tab.id === activeTabId) ? [{ tab, entry }] : [];
+  });
   const entityPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'entities'));
   const isMobile = useIsMobile();
   const [compactHeaderControls, setCompactHeaderControls] = useState(
@@ -623,7 +629,24 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
         {reviewTabs.map((tab) => {
           const entry = tab.stack[tab.stackIndex];
           const open = tab.id === activeTabId && entry?.type === 'tool' && entry.tool === 'approvals';
-          return <div key={tab.id} className={`absolute inset-0 ${open ? '' : 'hidden'}`}><PendingReviewPanel onStale={() => retireApprovalsTab(tab.id)} /></div>;
+          return <div key={tab.id} className={`absolute inset-0 ${open ? '' : 'hidden'}`}><PendingReviewPanel onStale={() => retireTab(tab.id)} /></div>;
+        })}
+        {memuReaderTabs.map(({ tab, entry }) => {
+          const open = tab.id === activeTabId;
+          const viewKey = `${identity?.userId ?? 'standalone'}:${identity?.soulId ?? 'default'}:${tab.id}:${entry.atomId}`;
+          return (
+            <div key={viewKey} className={`absolute inset-0 ${open ? '' : 'hidden'}`}>
+              <AtomReader
+                atomId={entry.atomId}
+                viewKey={viewKey}
+                highlightText={entry.highlightText}
+                initialEditing={entry.editing}
+                tabId={tab.id}
+                active={open}
+                retired={Boolean(tab.retired)}
+              />
+            </div>
+          );
         })}
         {entityPanelMounted && (
           <div className={`absolute inset-0 ${entityPanelOpen ? '' : 'hidden'}`}><EntityManager /></div>
@@ -633,7 +656,9 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
         ) : readerState.atomId ? (
           readerState.atomId.startsWith('entity:')
             ? <EntityReader entityId={readerState.atomId.slice('entity:'.length)} />
-            : <AtomReader key={readerViewKey} atomId={readerState.atomId} viewKey={readerViewKey} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
+            : (readerState.atomId.startsWith('memory:') || readerState.atomId.startsWith('category:'))
+              ? null
+              : <AtomReader key={readerViewKey} atomId={readerState.atomId} viewKey={readerViewKey} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
         ) : wikiReaderState.tagId && wikiReaderState.tagName ? (
           <WikiReader
             tagId={wikiReaderState.tagId}

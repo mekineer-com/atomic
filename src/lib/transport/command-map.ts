@@ -122,6 +122,8 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   approve_memory: {
     method: 'POST',
     path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}/approve`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ displayed_summary: a.displayed_summary }),
   },
   approve_category: {
     method: 'POST',
@@ -133,7 +135,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'PATCH',
     path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}`,
     argsMode: 'body',
-    transformArgs: (a) => ({ summary: a.summary }),
+    transformArgs: (a) => ({ summary: a.summary, displayed_summary: a.displayed_summary }),
   },
   update_category_summary: {
     method: 'PATCH',
@@ -173,7 +175,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   },
   delete_memory: {
     method: 'DELETE',
-    path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}`,
+    path: (a) => `/api/memu/reviews/memory/${encodeURIComponent(a.id as string)}?displayed_summary=${encodeURIComponent(a.displayed_summary as string)}`,
   },
   list_memu_entities: {
     method: 'GET',

@@ -49,13 +49,30 @@ const AtomicCodeMirrorEditor = lazy(async () => {
 const atomDetailCache = new Map<string, AtomWithTags>();
 const readerScrollPositions = new Map<string, number>();
 
+function memuEditableFieldsChanged(before: AtomWithTags, after: AtomWithTags): boolean {
+  if (before.content !== after.content) return true;
+  if (!before.id.startsWith('category:')) return false;
+  return before.title !== after.title || (before.description ?? '') !== (after.description ?? '');
+}
+
+function isStaleSummaryError(error: unknown): boolean {
+  return String(error).includes('summary_snapshot_stale');
+}
+
+function isMissingMemoryError(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  return message.includes('memory not found') || message.includes('category not found');
+}
+
 function DossierMembershipControls({
   atom,
+  disabled = false,
   onUpdated,
   onReload,
   onOpen,
 }: {
   atom: AtomWithTags;
+  disabled?: boolean;
   onUpdated: (atom: AtomWithTags) => void;
   onReload: () => Promise<void>;
   onOpen: (id: string) => void;
@@ -70,7 +87,7 @@ function DossierMembershipControls({
     ['Cited in dossier prose', members.filter(member => member.cited)],
     ['Other attached memories', members.filter(member => !member.cited)],
   ] as const;
-  const readOnly = atom.anchor_role != null;
+  const readOnly = disabled || atom.anchor_role != null;
 
   const change = async (memoryId: string, attached: boolean) => {
     if (atom.summaries_revision == null) {
@@ -164,9 +181,20 @@ interface AtomReaderProps {
   viewKey: string;
   highlightText?: string | null;
   initialEditing?: boolean;
+  tabId?: string;
+  active?: boolean;
+  retired?: boolean;
 }
 
-export function AtomReader({ atomId, viewKey, highlightText, initialEditing }: AtomReaderProps) {
+export function AtomReader({
+  atomId,
+  viewKey,
+  highlightText,
+  initialEditing,
+  tabId,
+  active = true,
+  retired = false,
+}: AtomReaderProps) {
   const identity = currentIdentity();
   const cacheKey = identity ? `${identity.userId}\0${identity.soulId}\0${atomId}` : null;
   const deleteAtom = useAtomsStore(s => s.deleteAtom);
@@ -176,19 +204,45 @@ export function AtomReader({ atomId, viewKey, highlightText, initialEditing }: A
   const overlayDismiss = useUIStore(s => s.overlayDismiss);
   const removeAtomFromTabs = useUIStore(s => s.removeAtomFromTabs);
   const redirectAtomTabToFinding = useUIStore(s => s.redirectAtomTabToFinding);
+  const retireTab = useUIStore(s => s.retireTab);
+  const openReader = useUIStore(s => s.openReader);
 
   const [atom, setAtom] = useState<AtomWithTags | null>(() => cacheKey ? atomDetailCache.get(cacheKey) ?? null : null);
   const [isLoadingAtom, setIsLoadingAtom] = useState(() => !cacheKey || !atomDetailCache.has(cacheKey));
   const [showLoading, setShowLoading] = useState(false);
   const lastFetchedAt = useRef<string | null>(null);
+  const atomRef = useRef(atom);
+  const dirtyRef = useRef(false);
+  const savingRef = useRef(false);
+  const retiredRef = useRef(retired);
+  const [currentAvailable, setCurrentAvailable] = useState(true);
+  atomRef.current = atom;
+  retiredRef.current = retired;
+
+  const fetchCurrentAtom = useCallback(
+    () => getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atomId }),
+    [atomId],
+  );
+
+  const retire = useCallback((available: boolean) => {
+    setCurrentAvailable(available);
+    if (tabId) retireTab(tabId);
+  }, [retireTab, tabId]);
 
   const refreshAtom = useCallback(async () => {
-    const fetchedAtom = await getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atomId });
+    if (retiredRef.current || savingRef.current) return;
+    const fetchedAtom = await fetchCurrentAtom();
+    if (retiredRef.current) return;
+    const current = atomRef.current;
+    if (tabId && dirtyRef.current && current && (!fetchedAtom || memuEditableFieldsChanged(current, fetchedAtom))) {
+      retire(Boolean(fetchedAtom));
+      return;
+    }
     if (fetchedAtom && cacheKey) atomDetailCache.set(cacheKey, fetchedAtom);
     else if (cacheKey) atomDetailCache.delete(cacheKey);
     setAtom(fetchedAtom);
     lastFetchedAt.current = fetchedAtom?.updated_at ?? null;
-  }, [atomId, cacheKey]);
+  }, [cacheKey, fetchCurrentAtom, retire, tabId]);
 
 
   // Watch the atoms store for updates to the currently viewed atom
@@ -233,9 +287,9 @@ export function AtomReader({ atomId, viewKey, highlightText, initialEditing }: A
   useEffect(() => {
     if (storeAtomUpdatedAt && !isLoadingAtom && storeAtomUpdatedAt !== lastFetchedAt.current) {
       lastFetchedAt.current = storeAtomUpdatedAt;
-      refreshAtom().catch(console.error);
+      if (!retired) refreshAtom().catch(console.error);
     }
-  }, [storeAtomUpdatedAt, isLoadingAtom, refreshAtom]);
+  }, [storeAtomUpdatedAt, isLoadingAtom, refreshAtom, retired]);
 
   // Refresh the open reader immediately when tagging completes for this atom.
   // The list store gets its status update from the global event hook, but the
@@ -244,9 +298,9 @@ export function AtomReader({ atomId, viewKey, highlightText, initialEditing }: A
     const transport = getTransport();
     return transport.subscribe<{ atom_id: string }>('tagging-complete', (payload) => {
       if (payload.atom_id !== atomId) return;
-      refreshAtom().catch(console.error);
+      if (!retired) refreshAtom().catch(console.error);
     });
-  }, [atomId, refreshAtom]);
+  }, [atomId, refreshAtom, retired]);
 
   // If the fetched atom turns out to be a report finding (`kind = 'report'`),
   // redirect to the specialized FindingReader view. The generic atom reader
@@ -280,10 +334,21 @@ export function AtomReader({ atomId, viewKey, highlightText, initialEditing }: A
           scrollKey={viewKey}
           highlightText={highlightText}
           initialEditing={initialEditing}
+          active={active}
+          retired={retired}
+          currentAvailable={currentAvailable}
+          onDirtyChange={(dirty) => { dirtyRef.current = dirty; }}
+          onSavingChange={(saving) => { savingRef.current = saving; }}
+          onConflict={retire}
+          onFetchCurrent={fetchCurrentAtom}
+          onOpenCurrent={() => {
+            if (cacheKey) atomDetailCache.delete(cacheKey);
+            openReader(atomId, undefined, { newTab: true });
+          }}
           onDismiss={overlayDismiss}
           onDelete={async () => {
             if (atomId.startsWith('memory:')) {
-              await getTransport().invoke('delete_memory', { id: atomId });
+              await getTransport().invoke('delete_memory', { id: atomId, displayed_summary: atom.content });
               useAtomsStore.setState((state) => {
                 const atoms = state.atoms.filter((a) => a.id !== atomId);
                 const semanticSearchResults = state.semanticSearchResults?.filter((a) => a.id !== atomId) ?? null;
@@ -300,10 +365,21 @@ export function AtomReader({ atomId, viewKey, highlightText, initialEditing }: A
             if (cacheKey) atomDetailCache.delete(cacheKey);
             removeAtomFromTabs(atomId);
           }}
-          onTagClick={(tagId) => { setSelectedTag(tagId); overlayDismiss(); }}
-          onRelatedAtomClick={(id, opts) => overlayNavigate({ type: 'reader', atomId: id }, opts)}
-          onViewGraph={(opts) => overlayNavigate({ type: 'graph', atomId }, opts)}
+          onTagClick={(tagId) => {
+            if (retiredRef.current) return;
+            setSelectedTag(tagId);
+            overlayDismiss();
+          }}
+          onRelatedAtomClick={(id, opts) => {
+            if (!retiredRef.current) overlayNavigate({ type: 'reader', atomId: id }, opts);
+          }}
+          onViewGraph={(opts) => {
+            if (!retiredRef.current) overlayNavigate({ type: 'graph', atomId }, opts);
+          }}
           onAtomUpdated={(updated) => {
+            if (retiredRef.current) return;
+            dirtyRef.current = false;
+            atomRef.current = updated;
             if (cacheKey) atomDetailCache.set(cacheKey, updated);
             setAtom(updated);
           }}
@@ -319,6 +395,14 @@ interface AtomReaderContentProps {
   scrollKey: string;
   highlightText?: string | null;
   initialEditing?: boolean;
+  active: boolean;
+  retired: boolean;
+  currentAvailable: boolean;
+  onDirtyChange: (dirty: boolean) => void;
+  onSavingChange: (saving: boolean) => void;
+  onConflict: (currentAvailable: boolean) => void;
+  onFetchCurrent: () => Promise<AtomWithTags | null>;
+  onOpenCurrent: () => void;
   onDismiss: () => void;
   onDelete: () => Promise<void>;
   onTagClick: (tagId: string) => void;
@@ -329,7 +413,8 @@ interface AtomReaderContentProps {
 }
 
 function AtomReaderContent({
-  atom, scrollKey, highlightText, initialEditing,
+  atom, scrollKey, highlightText, initialEditing, active, retired, currentAvailable,
+  onDirtyChange, onSavingChange, onConflict, onFetchCurrent, onOpenCurrent,
   onDismiss, onDelete, onTagClick, onRelatedAtomClick, onViewGraph, onAtomUpdated, onReload,
 }: AtomReaderContentProps) {
   const readerTheme = useUIStore(s => s.readerTheme);
@@ -366,7 +451,7 @@ function AtomReaderContent({
     : isMemuCategory
       && atom.approved_summary === atom.content
       && atom.approved_description === (atom.description ?? '');
-  const memuPrimaryDisabled = memuStatus !== 'idle' || (memuSummaryApproved && !memuEdited);
+  const memuPrimaryDisabled = retired || memuStatus !== 'idle' || (memuSummaryApproved && !memuEdited);
   const memuPrimaryLabel = memuStatus === 'saving'
     ? 'Saving...'
     : (memuSummaryApproved ? 'Save' : (memuEdited ? 'Save + approve' : 'Approve'));
@@ -379,12 +464,57 @@ function AtomReaderContent({
   const isTaggingInFlight = atom.tagging_status === 'pending' || atom.tagging_status === 'processing';
 
   useEffect(() => {
+    if (retired) return;
     setMemuTitle(atom.title);
     setMemuDescription(atom.description ?? '');
     setMemuSummary(atom.content);
     setMemuEditing(Boolean(initialEditing));
     setMemuError(null);
-  }, [atom.id, atom.title, atom.description, atom.content, initialEditing]);
+  }, [atom.id, atom.title, atom.description, atom.content, initialEditing, retired]);
+
+  useEffect(() => {
+    onDirtyChange(memuEdited);
+  }, [memuEdited, onDirtyChange]);
+
+  const runMemuMutation = useCallback(async (
+    command: 'update_memory_summary' | 'update_category_summary' | 'approve_memory' | 'approve_category',
+    args: Record<string, unknown>,
+  ): Promise<AtomWithTags | null> => {
+    const attempt = async (baseline: AtomWithTags, retry: boolean): Promise<AtomWithTags | null> => {
+      try {
+        return await getTransport().invoke<AtomWithTags>(command, {
+          id: atom.id,
+          ...args,
+          displayed_summary: baseline.content,
+          ...(isMemuCategory ? { summaries_revision: baseline.summaries_revision } : {}),
+        });
+      } catch (error) {
+        if (retry && isMemuCategory && isStaleSummaryError(error)) {
+          let current: AtomWithTags | null;
+          try {
+            current = await onFetchCurrent();
+          } catch (fetchError) {
+            setMemuError(String(fetchError));
+            return null;
+          }
+          if (!current) {
+            onConflict(false);
+            return null;
+          }
+          if (!memuEditableFieldsChanged(atom, current)) return attempt(current, false);
+          onConflict(true);
+          return null;
+        }
+        if (isStaleSummaryError(error) || isMissingMemoryError(error)) {
+          onConflict(!isMissingMemoryError(error));
+          return null;
+        }
+        setMemuError(String(error));
+        return null;
+      }
+    };
+    return attempt(atom, true);
+  }, [atom, isMemuCategory, onConflict, onFetchCurrent]);
 
   const handleAutoTag = useCallback(async () => {
     await retryTagging(atom.id, { workspace: !isMemuAtom });
@@ -404,28 +534,22 @@ function AtomReaderContent({
       return;
     }
     setMemuStatus('saving');
+    onSavingChange(true);
     setMemuError(null);
     try {
-      const updated = await getTransport().invoke<AtomWithTags>(
+      const updated = await runMemuMutation(
         isMemuMemory ? 'update_memory_summary' : 'update_category_summary',
-        {
-          id: atom.id,
-          ...changes,
-          ...(isMemuCategory ? {
-            displayed_summary: atom.content,
-            summaries_revision: atom.summaries_revision,
-          } : {}),
-        },
+        changes,
       );
+      if (!updated) return;
       useCanvasStore.getState().invalidateCanvasData();
       onAtomUpdated?.(updated);
       if (isMemuCategory) setMemuEditing(false);
-    } catch (error) {
-      setMemuError(String(error));
     } finally {
+      onSavingChange(false);
       setMemuStatus('idle');
     }
-  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated]);
+  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated, onSavingChange, runMemuMutation]);
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -434,30 +558,26 @@ function AtomReaderContent({
       return;
     }
     setMemuStatus('saving');
+    onSavingChange(true);
     setMemuError(null);
     try {
-      const updated = await getTransport().invoke<AtomWithTags>(
+      const updated = await runMemuMutation(
         isMemuMemory ? 'approve_memory' : 'approve_category',
-        {
-          id: atom.id,
-          ...(isMemuCategory ? {
-            displayed_summary: atom.content,
-            summaries_revision: atom.summaries_revision,
-          } : {}),
-        },
+        {},
       );
+      if (!updated) return;
       useCanvasStore.getState().invalidateCanvasData();
       onAtomUpdated?.(updated);
-    } catch (error) {
-      setMemuError(String(error));
     } finally {
+      onSavingChange(false);
       setMemuStatus('idle');
     }
-  }, [atom, isMemuCategory, isMemuMemory, onAtomUpdated]);
+  }, [atom, isMemuCategory, isMemuMemory, onAtomUpdated, onSavingChange, runMemuMutation]);
 
   useEffect(() => {
+    if (!active || retired) return;
     setReaderSaveStatus(saveStatus);
-  }, [saveStatus, setReaderSaveStatus]);
+  }, [active, retired, saveStatus, setReaderSaveStatus]);
 
   useEffect(() => {
     if (!isMemuAtom && isEditing) startEditing();
@@ -489,7 +609,8 @@ function AtomReaderContent({
   }, [atom.id, isEditing, isMemuAtom]);
 
   useEffect(() => {
-    readerEditorActions.current = {
+    if (!active || retired) return;
+    const actions = {
       startEditing: () => {
         editorHandleRef.current?.focus();
       },
@@ -501,12 +622,14 @@ function AtomReaderContent({
       openSearch: (query?: string) => editorHandleRef.current?.openSearch(query),
       closeSearch: () => editorHandleRef.current?.closeSearch(),
     };
+    readerEditorActions.current = actions;
     return () => {
-      readerEditorActions.current = null;
+      if (readerEditorActions.current === actions) readerEditorActions.current = null;
     };
-  }, [flushDraft]);
+  }, [active, flushDraft, retired]);
 
   useEffect(() => {
+    if (!active || retired) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && editorHandleRef.current?.isSearchOpen()) {
         e.preventDefault();
@@ -551,7 +674,11 @@ function AtomReaderContent({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [approveMemuSummary, flushDraft, isEditing, isMemuAtom, memuEdited, memuSummaryApproved, onDismiss, saveMemuSummary, saveNow, setReaderEditing, showDeleteModal]);
+  }, [active, approveMemuSummary, flushDraft, isEditing, isMemuAtom, memuEdited, memuSummaryApproved, onDismiss, retired, saveMemuSummary, saveNow, setReaderEditing, showDeleteModal]);
+
+  useEffect(() => {
+    if (retired) setShowDeleteModal(false);
+  }, [retired]);
 
   const [revealed, setRevealed] = useState(false);
   useEffect(() => {
@@ -560,14 +687,21 @@ function AtomReaderContent({
   }, []);
 
   const handleDelete = async () => {
+    if (retired) return;
     setIsDeleting(true);
+    onSavingChange(true);
     setMemuError(null);
     try {
       await onDelete();
       setShowDeleteModal(false);
     } catch (error) {
-      setMemuError(String(error));
+      if (isStaleSummaryError(error) || isMissingMemoryError(error)) {
+        onConflict(!isMissingMemoryError(error));
+      } else {
+        setMemuError(String(error));
+      }
     } finally {
+      onSavingChange(false);
       setIsDeleting(false);
     }
   };
@@ -638,10 +772,33 @@ function AtomReaderContent({
       ref={containerRef}
       tabIndex={-1}
       data-reader-theme={readerTheme}
+      onClickCapture={(event) => {
+        const target = event.target as HTMLElement;
+        if (retired && target.closest('button, a') && !target.closest('[data-dead-tab-action]')) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
+      onSubmitCapture={(event) => {
+        if (retired) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
       className={`h-full flex flex-col bg-[var(--color-bg-main)] transition-opacity duration-300 ease-out focus:outline-none ${
         revealed ? 'opacity-100' : 'opacity-0'
       }`}
     >
+      {retired && (
+        <div className="z-10 flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-500">
+          <span>
+            {currentAvailable
+              ? `This ${isMemuCategory ? 'category' : 'memory'} changed while you were editing. This tab is now a read-only snapshot.`
+              : `This ${isMemuCategory ? 'category' : 'memory'} changed while you were editing. This tab is now a read-only snapshot; no current version is available.`}
+          </span>
+          {currentAvailable && <button type="button" data-dead-tab-action className="rounded border border-amber-500/50 px-3 py-1" onClick={onOpenCurrent}>Open current version</button>}
+        </div>
+      )}
       {/* @container makes the two-column layout react to the actual reader
           pane width rather than the viewport. With the chat sidebar open,
           the viewport may be wide while the reader is narrow — without
@@ -666,9 +823,10 @@ function AtomReaderContent({
                       <div className="space-y-3">
                         {isMemuCategory && (
                           <>
-                            <Input value={memuTitle} onChange={(e) => setMemuTitle(e.target.value)} placeholder="Category title" />
+                            <Input value={memuTitle} onChange={(e) => setMemuTitle(e.target.value)} placeholder="Category title" readOnly={retired} />
                             <textarea
                               value={memuDescription}
+                              readOnly={retired}
                               onChange={(e) => setMemuDescription(e.target.value)}
                               className="min-h-24 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
                               placeholder="Description"
@@ -677,6 +835,7 @@ function AtomReaderContent({
                         )}
                         <textarea
                           value={memuSummary}
+                          readOnly={retired}
                           onChange={(e) => setMemuSummary(e.target.value)}
                           className="min-h-[24rem] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
                         />
@@ -703,6 +862,7 @@ function AtomReaderContent({
                     {isMemuCategory && (
                       <DossierMembershipControls
                         atom={atom}
+                        disabled={retired}
                         onUpdated={(updated) => onAtomUpdated?.(updated)}
                         onReload={onReload}
                         onOpen={(id) => onRelatedAtomClick(id)}
@@ -724,7 +884,7 @@ function AtomReaderContent({
                             setMemuSummary(atom.content);
                             setMemuEditing(false);
                           }}
-                          disabled={memuStatus !== 'idle'}
+                          disabled={retired || memuStatus !== 'idle'}
                           className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm"
                         >
                           Cancel
@@ -732,6 +892,7 @@ function AtomReaderContent({
                       ) : (
                         <button
                           onClick={() => setMemuEditing(true)}
+                          disabled={retired}
                           className="rounded border border-[var(--color-border)] px-3 py-1.5 text-sm"
                         >
                           Edit
@@ -740,7 +901,7 @@ function AtomReaderContent({
                       {isMemuMemory ? (
                         <button
                           onClick={() => setShowDeleteModal(true)}
-                          disabled={memuStatus !== 'idle' || memoryIsCited}
+                          disabled={retired || memuStatus !== 'idle' || memoryIsCited}
                           title={memoryIsCited ? 'Review current dossier citations before deleting' : undefined}
                           className="rounded border border-red-500/50 px-3 py-1.5 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]"
                         >
@@ -864,6 +1025,7 @@ function AtomReaderContent({
             {isMemuMemory && (
               <MemoryEntityControls
                 memoryId={atom.id}
+                readOnly={retired}
                 entityIds={atom.entity_ids}
                 entityNames={atom.entity_names}
                 onUpdated={updated => {

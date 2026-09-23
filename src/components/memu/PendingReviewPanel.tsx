@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getTransport } from '../../lib/transport';
 import { useCanvasStore } from '../../stores/canvas';
-import type { DossierUsage, MemoryCitation } from '../../stores/atoms';
+import type { AtomWithTags, DossierUsage, MemoryCitation } from '../../stores/atoms';
 import { formatDate } from '../../lib/date';
 import { DossierMarkdown, DossierUsageLinks, MemoryCitationLinks } from './DossierMarkdown';
 
@@ -184,6 +184,23 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     }));
   }), [loadReviews, markStale]);
 
+  useEffect(() => getTransport().subscribe<AtomWithTags>('atom-updated', (atom) => {
+    if (stale.current || !atom.id.startsWith('memory:')) return;
+    const id = atom.id;
+    const reviewKey = id;
+    if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
+      markStale();
+      return;
+    }
+    if (busyReview.current === reviewKey) return;
+    setReviews((current) => ({
+      ...current,
+      items: atom.approved_at
+        ? current.items.filter((item) => item.id !== id)
+        : current.items.map((item) => item.id === id ? { ...item, summary: atom.content } : item),
+    }));
+  }), [markStale]);
+
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   const acceptRevision = (revision: number) => {
     if (Number.isFinite(revision)) summariesRevision.current = Math.max(summariesRevision.current, revision);
@@ -232,6 +249,9 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
                 item={item}
                 accentClass={item.similar_to?.length && clusterColors[item.id] != null ? CLUSTER_COLORS[clusterColors[item.id]] : null}
                 disabled={summariesStale}
+                onStale={markStale}
+                onDirtyChange={changeSummaryDirty}
+                onBusyChange={changeSummaryBusy}
                 onDone={() => removeMemory(item.id)}
                 onError={reportError}
               />
@@ -294,12 +314,18 @@ function MemoryRow({
   item,
   accentClass,
   disabled,
+  onStale,
+  onDirtyChange,
+  onBusyChange,
   onDone,
   onError,
 }: {
   item: MemoryReview;
   accentClass: (typeof CLUSTER_COLORS)[number] | null;
   disabled: boolean;
+  onStale: () => void;
+  onDirtyChange: (id: string, dirty: boolean) => void;
+  onBusyChange: (busy: boolean, reviewKey: string) => void;
   onDone: () => void;
   onError: (err: unknown) => void;
 }) {
@@ -307,14 +333,23 @@ function MemoryRow({
   const [busy, setBusy] = useState(false);
   const edited = summary !== item.summary;
   const cited = item.dossier_usages?.some(usage => usage.cited) ?? false;
+  const reviewKey = item.id;
+  useEffect(() => setSummary(item.summary), [item.summary]);
+  useEffect(() => {
+    onDirtyChange(reviewKey, edited);
+    return () => onDirtyChange(reviewKey, false);
+  }, [edited, onDirtyChange, reviewKey]);
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
+    onBusyChange(true, reviewKey);
     try {
       await fn();
       await onDone();
     } catch (err) {
-      onError(err);
+      if (String(err).includes('summary_snapshot_stale')) onStale();
+      else onError(err);
     } finally {
+      onBusyChange(false, reviewKey);
       setBusy(false);
     }
   };
@@ -339,8 +374,8 @@ function MemoryRow({
       <textarea readOnly={disabled} className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       <DossierUsageLinks usages={item.dossier_usages} />
       <div className="mt-2 flex gap-2">
-        <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary } : { id: item.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
-        <button disabled={busy || disabled || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id }))}>Delete</button>
+        <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary, displayed_summary: item.summary } : { id: item.id, displayed_summary: item.summary }))}>{edited ? 'Save + approve' : 'Approve'}</button>
+        <button disabled={busy || disabled || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id, displayed_summary: item.summary }))}>Delete</button>
       </div>
     </article>
   );

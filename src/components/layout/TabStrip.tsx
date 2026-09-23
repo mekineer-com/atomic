@@ -139,7 +139,7 @@ function useResolvedTitle(entry: TabEntry, ordinal: number, retired = false): { 
     (entry.title && entry.title.trim()) ||
     (resolved && resolved.trim()) ||
     '';
-  const label = candidate || `Tab ${ordinal}`;
+  const label = `${candidate || `Tab ${ordinal}`}${retired ? ' (old)' : ''}`;
   return { label, icon: entry.type === 'graph' ? 'graph' : 'atom' };
 }
 
