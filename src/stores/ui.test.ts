@@ -20,4 +20,15 @@ describe('Approvals tabs', () => {
     state.openToolTab('approvals');
     expect(useUIStore.getState().tabs).toHaveLength(2);
   });
+
+  it('never navigates within or deduplicates to a retired tab', () => {
+    useUIStore.getState().openToolTab('approvals');
+    const oldId = useUIStore.getState().activeTabId!;
+    useUIStore.getState().retireApprovalsTab(oldId);
+
+    useUIStore.getState().openReader('memory:current');
+    const state = useUIStore.getState();
+    expect(state.tabs.find(tab => tab.id === oldId)?.stack).toHaveLength(1);
+    expect(state.activeTabId).not.toBe(oldId);
+  });
 });

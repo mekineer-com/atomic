@@ -185,6 +185,9 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
   }), [loadReviews, markStale]);
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
+  const acceptRevision = (revision: number) => {
+    if (Number.isFinite(revision)) summariesRevision.current = Math.max(summariesRevision.current, revision);
+  };
   const summaryActionsDisabled = loading || loadFailed || summariesStale || summaryBusy;
   // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
   // mates). Survivors keep their badge/color even when the last cluster mate goes —
@@ -212,7 +215,15 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
           <p className="text-sm text-[var(--color-text-secondary)]">Nothing pending.</p>
         )}
 
-        <div className="grid gap-4 lg:grid-cols-[2fr_3fr]">
+        <div
+          className="grid gap-4 lg:grid-cols-[2fr_3fr]"
+          onClickCapture={summariesStale ? (event) => {
+            if ((event.target as HTMLElement).closest('button, a')) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          } : undefined}
+        >
           <section className="space-y-3">
             <h3 className="font-medium text-[var(--color-text-primary)]">Memories</h3>
             {reviews.items.map((item) => (
@@ -241,6 +252,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
                 onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => {
+                  acceptRevision(result.summaries_revision);
                   useCanvasStore.getState().invalidateCanvasData();
                   removeCategory(category.id);
                   setReviews((r) => ({ ...r, summaries_revision: Math.max(r.summaries_revision, result.summaries_revision) }));
@@ -259,13 +271,16 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
                 onStale={markStale}
                 onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
-                onDone={(result) => setReviews((r) => ({
-                  ...r,
-                  summaries_revision: Number.isFinite(result.summaries_revision)
-                    ? Math.max(r.summaries_revision, result.summaries_revision)
-                    : r.summaries_revision,
-                  soul_summaries: r.soul_summaries.map((row) => row.kind === summary.kind ? { ...row, ...result, kind: summary.kind } : row),
-                }))}
+                onDone={(result) => {
+                  acceptRevision(result.summaries_revision);
+                  setReviews((r) => ({
+                    ...r,
+                    summaries_revision: Number.isFinite(result.summaries_revision)
+                      ? Math.max(r.summaries_revision, result.summaries_revision)
+                      : r.summaries_revision,
+                    soul_summaries: r.soul_summaries.map((row) => row.kind === summary.kind ? { ...row, ...result, kind: summary.kind } : row),
+                  }));
+                }}
                 onError={reportError}
               />
             ))}
@@ -321,7 +336,7 @@ function MemoryRow({
           </span>
         )}
       </div>
-      <textarea className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
+      <textarea readOnly={disabled} className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       <DossierUsageLinks usages={item.dossier_usages} />
       <div className="mt-2 flex gap-2">
         <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary } : { id: item.id }))}>{edited ? 'Save + approve' : 'Approve'}</button>
@@ -412,10 +427,10 @@ function GeneratedSummaryRow({
             {review.last_evidence_at && <span>Evidence: {formatDate(review.last_evidence_at)}</span>}
             {review.last_revised_at && <span>Revised: {formatDate(review.last_revised_at)}</span>}
           </div>
-          <input className="w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm font-medium" value={title} onChange={(e) => setTitle(e.target.value)} />
+          <input readOnly={disabled} className="w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm font-medium" value={title} onChange={(e) => setTitle(e.target.value)} />
           <div className="grid gap-2 md:grid-cols-2">
             <p className="min-h-20 whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 text-sm text-[var(--color-text-secondary)]">{review.approved_description ?? ''}</p>
-            <textarea className="min-h-20 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={description} onChange={(e) => setDescription(e.target.value)} />
+            <textarea readOnly={disabled} className="min-h-20 rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={description} onChange={(e) => setDescription(e.target.value)} />
           </div>
         </div>
       ) : <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>}
@@ -423,7 +438,7 @@ function GeneratedSummaryRow({
         <div ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className={`prose prose-invert max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`}>
           <DossierMarkdown citations={review.citations}>{review.approved_summary ?? ''}</DossierMarkdown>
         </div>
-        <textarea ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className={`overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <textarea readOnly={disabled} ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className={`overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       {kind === 'category' && Boolean(review.citations?.length) && (
         <div className="mt-2">

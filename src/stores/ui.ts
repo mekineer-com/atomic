@@ -460,9 +460,10 @@ export const useUIStore = create<UIStore>()(
       ///   3. no active tab → if some tab's *current* entry equivalent
       ///      already shows this entry, switch to it; otherwise new tab.
       openEntry: (entry, opts) => {
-        const newTab = !!opts?.newTab;
-        const background = !!opts?.background;
         const state = get();
+        const activeTab = state.activeTabId ? state.tabs.find((tab) => tab.id === state.activeTabId) : null;
+        const newTab = !!opts?.newTab || !!activeTab?.retired;
+        const background = !!opts?.background;
 
         // Cmd/ctrl+click: always new tab.
         if (newTab) {
@@ -530,6 +531,7 @@ export const useUIStore = create<UIStore>()(
         let existing: Tab | null = null;
         let existingIndex = -1;
         for (const t of state.tabs) {
+          if (t.retired) continue;
           const idx = t.stack.findIndex((e) => entriesEquivalent(e, entry));
           if (idx !== -1) {
             existing = t;
@@ -670,7 +672,7 @@ export const useUIStore = create<UIStore>()(
       tabBack: () => {
         const state = get();
         const tab = state.activeTabId ? state.tabs.find((t) => t.id === state.activeTabId) : null;
-        if (!tab) return;
+        if (!tab || tab.retired) return;
         const newIndex = tab.stackIndex - 1;
         if (newIndex < 0) return;
         const entry = tab.stack[newIndex];
@@ -686,7 +688,7 @@ export const useUIStore = create<UIStore>()(
       tabForward: () => {
         const state = get();
         const tab = state.activeTabId ? state.tabs.find((t) => t.id === state.activeTabId) : null;
-        if (!tab) return;
+        if (!tab || tab.retired) return;
         const newIndex = tab.stackIndex + 1;
         if (newIndex >= tab.stack.length) return;
         const entry = tab.stack[newIndex];
@@ -777,6 +779,7 @@ export const useUIStore = create<UIStore>()(
 
       setReaderEditing: (editing) =>
         set((state) => {
+          if (state.tabs.some((tab) => tab.id === state.activeTabId && tab.retired)) return state;
           const tabs = state.tabs.map((tab) => {
             if (tab.id !== state.activeTabId) return tab;
             const entry = tab.stack[tab.stackIndex];

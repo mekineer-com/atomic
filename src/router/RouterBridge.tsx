@@ -156,7 +156,7 @@ function projectActiveEntry(entry: TabEntry | null) {
 ///   3. Some other tab has the entry as its current → activate it.
 ///   4. Otherwise → push onto the active tab if there is one (treating it
 ///      as in-tab navigation), else create a new tab.
-function reconcileTabsForOverlay(
+export function reconcileTabsForOverlay(
   tabs: Tab[],
   activeTabId: string | null,
   parsed: ParsedRoute,
@@ -166,9 +166,15 @@ function reconcileTabsForOverlay(
   if (!newEntry) return null;
 
   const selectedActiveTab = activeTabId ? tabs.find((t) => t.id === activeTabId) ?? null : null;
-  const activeTab = selectedActiveTab?.retired && parsed.kind === 'tool' && parsed.tool === 'approvals'
-    ? null
-    : selectedActiveTab;
+  const selectedCurrent = selectedActiveTab?.stack[selectedActiveTab.stackIndex];
+
+  // A retired tab may still display its existing route. It just cannot be
+  // reused or navigated to a different entry.
+  if (selectedActiveTab?.retired && selectedCurrent && entriesEquivalent(selectedCurrent, parsed)) {
+    return { tabs, activeTabId: selectedActiveTab.id, entry: selectedCurrent, createdTab: false };
+  }
+
+  const activeTab = selectedActiveTab?.retired ? null : selectedActiveTab;
   const activeCurrent = activeTab?.stack[activeTab.stackIndex];
 
   // Already showing this entry as current. Preserve highlightText/editing
@@ -189,7 +195,7 @@ function reconcileTabsForOverlay(
 
   // Some other tab has this entry as its current — switch to it.
   const matching = tabs.find((t) => {
-    if (t.retired && parsed.kind === 'tool' && parsed.tool === 'approvals') return false;
+    if (t.retired) return false;
     const cur = t.stack[t.stackIndex];
     return cur && entriesEquivalent(cur, parsed);
   });

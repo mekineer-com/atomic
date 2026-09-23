@@ -110,6 +110,7 @@ describe('PendingReviewPanel', () => {
     expect(banner?.textContent).toContain('Memory summaries changed');
     expect(banner?.classList.contains('sticky')).toBe(true);
     expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Refresh')).toBe(false);
+    expect([...container.querySelectorAll('textarea')].every(textarea => textarea.readOnly)).toBe(true);
     await act(async () => {
       transport.listeners.get('memu-reviews-changed')?.({
         category_id: 'category:c1',
