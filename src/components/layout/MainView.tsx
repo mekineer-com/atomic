@@ -116,7 +116,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
     const entry = tab.stack[tab.stackIndex];
     const memuReader = entry?.type === 'atom'
       && (entry.atomId.startsWith('memory:') || entry.atomId.startsWith('category:'));
-    return memuReader && (tab.retired || tab.id === activeTabId) ? [{ tab, entry }] : [];
+    return memuReader ? [{ tab, entry }] : [];
   });
   const entityPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'entities'));
   const isMobile = useIsMobile();
