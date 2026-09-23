@@ -40,6 +40,8 @@ export function normalizeServerEvent(data: Record<string, unknown>): NormalizedE
         summaries_revision: data.summaries_revision,
         pending: data.pending,
       } };
+    case 'MemuSoulSummaryChanged':
+      return { event: 'memu-soul-summary-changed', payload: data.summary };
     case 'EmbeddingsReset':
       return { event: 'embeddings-reset', payload: data };
     case 'ImportProgress':

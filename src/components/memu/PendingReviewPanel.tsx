@@ -74,17 +74,18 @@ export function PendingReviewPanel() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [summariesStale, setSummariesStale] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
-  const busyCategory = useRef<string | null>(null);
-  const dirtyCategories = useRef(new Set<string>());
+  const busyReview = useRef<string | null>(null);
+  const dirtyReviews = useRef(new Set<string>());
   const summariesRevision = useRef(0);
+  const reviewEvents = useRef(0);
   const summaryScrollPositions = useRef(new Map<string, SummaryScrollPosition>());
-  const changeSummaryBusy = useCallback((busy: boolean, categoryId: string | null) => {
-    busyCategory.current = busy ? categoryId : null;
+  const changeSummaryBusy = useCallback((busy: boolean, reviewKey: string) => {
+    busyReview.current = busy ? reviewKey : null;
     setSummaryBusy(busy);
   }, []);
-  const changeCategoryDirty = useCallback((categoryId: string, dirty: boolean) => {
-    if (dirty) dirtyCategories.current.add(categoryId);
-    else dirtyCategories.current.delete(categoryId);
+  const changeSummaryDirty = useCallback((reviewKey: string, dirty: boolean) => {
+    if (dirty) dirtyReviews.current.add(reviewKey);
+    else dirtyReviews.current.delete(reviewKey);
   }, []);
   const scrollPosition = useCallback((id: string) => {
     let position = summaryScrollPositions.current.get(id);
@@ -96,10 +97,14 @@ export function PendingReviewPanel() {
   }, []);
 
   const loadReviews = useCallback(async () => {
+    const eventVersion = reviewEvents.current;
     setLoading(true);
     setError(null);
     try {
       const fetched = await getTransport().invoke<PendingReviews>('list_pending_memu_reviews');
+      if (eventVersion !== reviewEvents.current) return;
+      if (fetched.summaries_revision < summariesRevision.current) return;
+      summariesRevision.current = fetched.summaries_revision;
       setReviews(fetched);
       setClusterColors(assignClusterColors(fetched.items));
       setLoadFailed(false);
@@ -122,8 +127,10 @@ export function PendingReviewPanel() {
     summaries_revision: number;
     pending: boolean;
   }>('memu-reviews-changed', (change) => {
+    reviewEvents.current += 1;
     if (change.summaries_revision <= summariesRevision.current) return;
-    if (dirtyCategories.current.has(change.category_id) && busyCategory.current !== change.category_id) {
+    const reviewKey = `category:${change.category_id}`;
+    if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
       setSummariesStale(true);
       return;
     }
@@ -137,6 +144,22 @@ export function PendingReviewPanel() {
           : current.categories.filter((category) => category.id !== change.category_id),
       };
     });
+  }), []);
+
+  useEffect(() => getTransport().subscribe<SummaryMutationResponse>('memu-soul-summary-changed', (change) => {
+    reviewEvents.current += 1;
+    if (change.summaries_revision <= summariesRevision.current || !change.kind) return;
+    const reviewKey = `soul:${change.kind}`;
+    if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
+      setSummariesStale(true);
+      return;
+    }
+    summariesRevision.current = change.summaries_revision;
+    setReviews((current) => ({
+      ...current,
+      summaries_revision: change.summaries_revision,
+      soul_summaries: current.soul_summaries.map((row) => row.kind === change.kind ? { ...row, ...change } : row),
+    }));
   }), []);
 
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
@@ -193,7 +216,7 @@ export function PendingReviewPanel() {
                 scrollPosition={scrollPosition(category.id)}
                 disabled={summaryActionsDisabled}
                 onStale={() => setSummariesStale(true)}
-                onDirtyChange={changeCategoryDirty}
+                onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => {
                   useCanvasStore.getState().invalidateCanvasData();
@@ -212,6 +235,7 @@ export function PendingReviewPanel() {
                 scrollPosition={scrollPosition(summary.id)}
                 disabled={summaryActionsDisabled}
                 onStale={() => setSummariesStale(true)}
+                onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => setReviews((r) => ({
                   ...r,
@@ -301,8 +325,8 @@ function GeneratedSummaryRow({
   scrollPosition: SummaryScrollPosition;
   disabled: boolean;
   onStale: () => void;
-  onDirtyChange?: (id: string, dirty: boolean) => void;
-  onBusyChange: (busy: boolean, categoryId: string | null) => void;
+  onDirtyChange: (id: string, dirty: boolean) => void;
+  onBusyChange: (busy: boolean, reviewKey: string) => void;
   onDone: (result: SummaryMutationResponse) => void;
   onError: (err: unknown) => void;
 }) {
@@ -319,14 +343,15 @@ function GeneratedSummaryRow({
     setDescription(review.description ?? '');
   }, [review]);
   useEffect(() => {
-    if (!onDirtyChange) return;
-    onDirtyChange(review.id, edited);
-    return () => onDirtyChange(review.id, false);
-  }, [edited, onDirtyChange, review.id]);
+    const reviewKey = `${kind}:${kind === 'category' ? review.id : (review as SoulSummaryReview).kind}`;
+    onDirtyChange(reviewKey, edited);
+    return () => onDirtyChange(reviewKey, false);
+  }, [edited, kind, onDirtyChange, review]);
   const run = async () => {
     if (disabled) return;
     setBusy(true);
-    onBusyChange(true, kind === 'category' ? review.id : null);
+    const reviewKey = `${kind}:${kind === 'category' ? review.id : (review as SoulSummaryReview).kind}`;
+    onBusyChange(true, reviewKey);
     try {
       const command = kind === 'category'
         ? (edited ? 'update_category_summary' : 'approve_category')
@@ -349,7 +374,7 @@ function GeneratedSummaryRow({
       else onError(err);
     } finally {
       setBusy(false);
-      onBusyChange(false, null);
+      onBusyChange(false, reviewKey);
     }
   };
 

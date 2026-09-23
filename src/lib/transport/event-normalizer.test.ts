@@ -15,4 +15,12 @@ describe('normalizeServerEvent', () => {
       payload: { category_id: 'category:c1', summaries_revision: 9, pending: false },
     });
   });
+
+  it('normalizes soul-summary changes', () => {
+    const summary = { kind: 'narrative_self', summaries_revision: 10 };
+    expect(normalizeServerEvent({ type: 'MemuSoulSummaryChanged', summary })).toEqual({
+      event: 'memu-soul-summary-changed',
+      payload: summary,
+    });
+  });
 });

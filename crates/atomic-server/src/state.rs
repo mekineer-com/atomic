@@ -338,6 +338,11 @@ pub enum ServerEvent {
         user_id: String,
         soul_id: String,
     },
+    MemuSoulSummaryChanged {
+        summary: serde_json::Value,
+        user_id: String,
+        soul_id: String,
+    },
 
     /// The per-DB `dashboard.featured_report_id` pointer changed.
     /// Broadcast on every write through the dashboard route so the
@@ -489,6 +494,9 @@ impl ServerEvent {
                 user_id, soul_id, ..
             } => Some((user_id.as_deref()?, soul_id.as_deref()?)),
             Self::MemuReviewsChanged {
+                user_id, soul_id, ..
+            }
+            | Self::MemuSoulSummaryChanged {
                 user_id, soul_id, ..
             } => Some((user_id, soul_id)),
             _ => None,

@@ -149,6 +149,21 @@ pub(super) fn updated_atom_response(
     HttpResponse::Ok().json(atom_value)
 }
 
+fn updated_soul_summary_response(
+    state: &AppState,
+    body: Value,
+    scope: &memu_proxy::MemuScope,
+) -> HttpResponse {
+    if body.get("summaries_revision").and_then(Value::as_i64).is_some() {
+        let _ = state.event_tx.send(ServerEvent::MemuSoulSummaryChanged {
+            summary: body.clone(),
+            user_id: scope.user_id.clone(),
+            soul_id: scope.soul_id.clone(),
+        });
+    }
+    HttpResponse::Ok().json(body)
+}
+
 pub async fn update_memory(
     request: HttpRequest,
     state: web::Data<AppState>,
@@ -343,7 +358,7 @@ pub async fn update_soul_summary(
     )
     .await
     {
-        Ok(body) => HttpResponse::Ok().json(body),
+        Ok(body) => updated_soul_summary_response(&state, body, &config),
         Err(response) => response,
     }
 }
@@ -398,7 +413,7 @@ async fn approve_summary(
     .await
     {
         Ok(body) if atom_response => updated_atom_response(&state, body, &config),
-        Ok(body) => HttpResponse::Ok().json(body),
+        Ok(body) => updated_soul_summary_response(&state, body, &config),
         Err(response) => response,
     }
 }
