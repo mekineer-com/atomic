@@ -54,6 +54,7 @@ type SoulSummaryReview = CategoryReview & {
 
 type SummaryMutationResponse = CategoryReview & {
   kind?: string;
+  pending?: boolean;
   summaries_revision: number;
 };
 
@@ -186,7 +187,9 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     setReviews((current) => ({
       ...current,
       summaries_revision: change.summaries_revision,
-      soul_summaries: current.soul_summaries.map((row) => row.kind === change.kind ? { ...row, ...change } : row),
+      soul_summaries: change.pending === false
+        ? current.soul_summaries.filter((row) => row.kind !== change.kind)
+        : current.soul_summaries.map((row) => row.kind === change.kind ? { ...row, ...change } : row),
     }));
   }), [loadReviews, markStale]);
 
@@ -305,7 +308,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
                     summaries_revision: Number.isFinite(result.summaries_revision)
                       ? Math.max(r.summaries_revision, result.summaries_revision)
                       : r.summaries_revision,
-                    soul_summaries: r.soul_summaries.map((row) => row.kind === summary.kind ? { ...row, ...result, kind: summary.kind } : row),
+                    soul_summaries: r.soul_summaries.filter((row) => row.kind !== summary.kind),
                   }));
                 }}
                 onError={reportError}
@@ -477,10 +480,12 @@ function GeneratedSummaryRow({
         </div>
       ) : <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>}
       <div className="grid gap-2 md:grid-cols-2">
-        <div ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className={`prose prose-invert max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`}>
-          <DossierMarkdown citations={review.citations}>{review.approved_summary ?? ''}</DossierMarkdown>
+        <div ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className={`max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 tracking-normal [scrollbar-gutter:stable] text-[var(--color-text-secondary)] ${kind === 'category' ? 'prose prose-invert min-h-[21rem]' : 'min-h-28 whitespace-pre-wrap font-sans'}`}>
+          {kind === 'category'
+            ? <DossierMarkdown citations={review.citations}>{review.approved_summary ?? ''}</DossierMarkdown>
+            : (review.approved_summary ?? '')}
         </div>
-        <textarea readOnly={disabled} ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className={`overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <textarea readOnly={disabled} ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className={`overflow-y-auto rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       {kind === 'category' && Boolean(review.citations?.length) && (
         <div className="mt-2">

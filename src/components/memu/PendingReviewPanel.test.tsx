@@ -77,6 +77,63 @@ describe('PendingReviewPanel', () => {
     });
 
     expect(container.textContent).toContain('new soul summary');
+    await act(async () => {
+      transport.listeners.get('memu-soul-summary-changed')?.({
+        id: 'soul-summary:narrative_self',
+        kind: 'narrative_self',
+        summary: 'new soul summary',
+        pending: false,
+        summaries_revision: 3,
+      });
+    });
+    expect(container.textContent).not.toContain('new soul summary');
+    await act(async () => { root.unmount(); });
+  });
+
+  it('removes narrative self after Save + approve and uses matching text geometry', async () => {
+    transport.invoke
+      .mockResolvedValueOnce({
+        items: [],
+        categories: [],
+        soul_summaries: [{
+          id: 'soul-summary:narrative_self',
+          kind: 'narrative_self',
+          label: 'Narrative Self',
+          approved_summary: 'Same shaped paragraph.',
+          summary: 'Same shaped paragraph.',
+        }],
+        summaries_revision: 1,
+      })
+      .mockResolvedValueOnce({
+        id: 'soul-summary:narrative_self',
+        kind: 'narrative_self',
+        summary: 'Edited paragraph.',
+        approved_summary: 'Edited paragraph.',
+        pending: false,
+        summaries_revision: 2,
+      });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<PendingReviewPanel />); });
+    const textarea = container.querySelector('textarea')!;
+    const approved = textarea.previousElementSibling as HTMLElement;
+    for (const className of ['font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-auto']) {
+      expect(approved.classList.contains(className)).toBe(true);
+      expect(textarea.classList.contains(className)).toBe(true);
+    }
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Edited paragraph.');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const button = [...container.querySelectorAll('button')].find(node => node.textContent === 'Save + approve')!;
+    await act(async () => { button.click(); });
+
+    expect(transport.invoke).toHaveBeenLastCalledWith('update_soul_summary', expect.objectContaining({
+      kind: 'narrative_self',
+      summary: 'Edited paragraph.',
+    }));
+    expect(container.textContent).not.toContain('Narrative Self');
     await act(async () => { root.unmount(); });
   });
 
