@@ -13,6 +13,8 @@ pub struct SummaryUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summaries_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub displayed_summary: Option<String>,
@@ -300,7 +302,8 @@ async fn update(
         || (kind == "category"
             && body.summary.is_none()
             && body.title.is_none()
-            && body.description.is_none())
+            && body.description.is_none()
+            && body.kind.is_none())
     {
         return HttpResponse::BadRequest().json(json!({"error": "no changes supplied"}));
     }
@@ -331,6 +334,9 @@ async fn update(
     }
     if let Some(description) = body.description {
         payload["description"] = description.into();
+    }
+    if let Some(category_kind) = body.kind {
+        payload["kind"] = category_kind.into();
     }
     if let Some(revision) = body.summaries_revision {
         payload["summaries_revision"] = revision.into();

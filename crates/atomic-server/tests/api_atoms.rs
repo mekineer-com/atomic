@@ -415,6 +415,22 @@ async fn memu_update_memory(path: web::Path<String>, body: web::Json<Value>) -> 
     }))
 }
 
+async fn memu_update_category(path: web::Path<String>, body: web::Json<Value>) -> HttpResponse {
+    assert_eq!(path.as_str(), "c1");
+    assert_eq!(body["kind"], "topic");
+    HttpResponse::Ok().json(json!({
+        "id": "category:c1",
+        "kind": "category",
+        "category_kind": "topic",
+        "label": "Core",
+        "summary": "Category summary",
+        "created_at": "2026-07-04T00:00:00Z",
+        "updated_at": "2026-07-05T00:00:00Z",
+        "category_ids": [],
+        "category_names": []
+    }))
+}
+
 async fn memu_approve_empty(body: web::Json<Value>) -> HttpResponse {
     assert_eq!(body["displayed_summary"], "Memory summary");
     HttpResponse::Ok().json(json!({"status": "ok"}))
@@ -550,6 +566,7 @@ fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
             )
             .route("/memory/{id}", web::get().to(memu_memory))
             .route("/memory/{id}", web::patch().to(memu_update_memory))
+            .route("/category/{id}", web::patch().to(memu_update_category))
             .route(
                 "/memory/{id}",
                 web::delete().to(memu_delete_memory_conflict),
@@ -960,6 +977,31 @@ async fn test_memu_review_save_broadcasts_atom_updated() {
         }
         other => panic!("unexpected event: {other:?}"),
     }
+
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_memu_category_kind_only_update_is_forwarded() {
+    let (memu_url, memu_handle) = start_memu_memory_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    let req = actix_test::TestRequest::patch()
+        .uri("/api/memu/reviews/category/c1")
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({
+            "kind": "topic",
+            "displayed_summary": "Category summary",
+            "summaries_revision": 4
+        }))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+    assert_eq!(response.status(), 200);
+    let body: Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["category_kind"], "topic");
 
     memu_handle.stop(true).await;
 }
