@@ -145,6 +145,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       summary: a.summary,
       title: a.title,
       description: a.description,
+      kind: a.kind,
       displayed_summary: a.displayed_summary,
       summaries_revision: a.summaries_revision,
     }),

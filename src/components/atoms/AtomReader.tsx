@@ -52,7 +52,9 @@ const readerScrollPositions = new Map<string, number>();
 function memuEditableFieldsChanged(before: AtomWithTags, after: AtomWithTags): boolean {
   if (before.content !== after.content) return true;
   if (!before.id.startsWith('category:')) return false;
-  return before.title !== after.title || (before.description ?? '') !== (after.description ?? '');
+  return before.title !== after.title
+    || (before.description ?? '') !== (after.description ?? '')
+    || (before.category_kind ?? 'topic') !== (after.category_kind ?? 'topic');
 }
 
 function isStaleSummaryError(error: unknown): boolean {
@@ -449,6 +451,7 @@ function AtomReaderContent({
   const memoryIsCited = atom.dossier_usages?.some(usage => usage.cited) ?? false;
   const [memuTitle, setMemuTitle] = useState(atom.title);
   const [memuDescription, setMemuDescription] = useState(atom.description ?? '');
+  const [memuKind, setMemuKind] = useState<'lore' | 'topic' | 'goal'>(atom.category_kind ?? 'topic');
   const [memuSummary, setMemuSummary] = useState(atom.content);
   const [memuEditing, setMemuEditing] = useState(Boolean(initialEditing));
   const [memuStatus, setMemuStatus] = useState<'idle' | 'saving'>('idle');
@@ -458,7 +461,9 @@ function AtomReaderContent({
   }, [scrollKey]);
   const memuSummaryEdited = memuSummary !== atom.content;
   const memuCategoryEdited = isMemuCategory && (
-    memuTitle !== atom.title || memuDescription !== (atom.description ?? '')
+    memuTitle !== atom.title
+    || memuDescription !== (atom.description ?? '')
+    || memuKind !== (atom.category_kind ?? 'topic')
   );
   const memuEdited = memuSummaryEdited || memuCategoryEdited;
   const memuSummaryApproved = isMemuMemory
@@ -482,10 +487,11 @@ function AtomReaderContent({
     if (retired) return;
     setMemuTitle(atom.title);
     setMemuDescription(atom.description ?? '');
+    setMemuKind(atom.category_kind ?? 'topic');
     setMemuSummary(atom.content);
     setMemuEditing(Boolean(initialEditing));
     setMemuError(null);
-  }, [atom.id, atom.title, atom.description, atom.content, initialEditing, retired]);
+  }, [atom.id, atom.title, atom.description, atom.category_kind, atom.content, initialEditing, retired]);
 
   useEffect(() => {
     onDirtyChange(memuEdited);
@@ -542,6 +548,7 @@ function AtomReaderContent({
       ...(memuSummaryEdited ? { summary: memuSummary } : {}),
       ...(memuCategoryEdited && memuTitle !== atom.title ? { title: memuTitle } : {}),
       ...(memuCategoryEdited && memuDescription !== (atom.description ?? '') ? { description: memuDescription } : {}),
+      ...(memuCategoryEdited && memuKind !== (atom.category_kind ?? 'topic') ? { kind: memuKind } : {}),
     };
     if (Object.keys(changes).length === 0) return;
     if (isMemuCategory && atom.summaries_revision == null) {
@@ -564,7 +571,7 @@ function AtomReaderContent({
       onSavingChange(false);
       setMemuStatus('idle');
     }
-  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated, onSavingChange, runMemuMutation]);
+  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuKind, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated, onSavingChange, runMemuMutation]);
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -838,6 +845,14 @@ function AtomReaderContent({
                       <div className="space-y-3">
                         {isMemuCategory && (
                           <>
+                            <label className="block text-xs text-[var(--color-text-tertiary)]">
+                              Type
+                              <select value={memuKind} onChange={(e) => setMemuKind(e.target.value as 'lore' | 'topic' | 'goal')} disabled={retired} className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2 text-sm capitalize text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none">
+                                <option value="lore">Lore</option>
+                                <option value="topic">Topic</option>
+                                <option value="goal">Goal</option>
+                              </select>
+                            </label>
                             <Input value={memuTitle} onChange={(e) => setMemuTitle(e.target.value)} placeholder="Category title" readOnly={retired} />
                             <textarea
                               value={memuDescription}
@@ -896,6 +911,7 @@ function AtomReaderContent({
                           onClick={() => {
                             setMemuTitle(atom.title);
                             setMemuDescription(atom.description ?? '');
+                            setMemuKind(atom.category_kind ?? 'topic');
                             setMemuSummary(atom.content);
                             setMemuEditing(false);
                           }}

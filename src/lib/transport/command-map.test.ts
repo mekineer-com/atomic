@@ -8,12 +8,14 @@ describe('memU command forwarding', () => {
       summary: 'Current category prose',
       title: 'Current category',
       description: 'Edited category description',
+      kind: 'topic',
       displayed_summary: 'Previous category prose',
       summaries_revision: 4,
     })).toEqual({
       summary: 'Current category prose',
       title: 'Current category',
       description: 'Edited category description',
+      kind: 'topic',
       displayed_summary: 'Previous category prose',
       summaries_revision: 4,
     });
