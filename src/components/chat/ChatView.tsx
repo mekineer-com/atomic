@@ -1,13 +1,18 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { MessageSquare } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
-import { useUIStore } from '../../stores/ui';
+import { useUIStore, type TabEntry } from '../../stores/ui';
 import { useChatEvents } from '../../hooks/useChatEvents';
 import { useContentSearch } from '../../hooks';
 import { ChatHeader } from './ChatHeader';
 import { ChatMessage } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { SearchBar } from '../ui/SearchBar';
+
+export function shouldOpenChatSearch(chatSidebarOpen: boolean, entry?: TabEntry): boolean {
+  return chatSidebarOpen && entry?.type !== 'tool'
+    && !(entry?.type === 'atom' && /^(memory|category|entity):/.test(entry.atomId));
+}
 
 export function ChatView() {
   const currentConversation = useChatStore(s => s.currentConversation);
@@ -21,6 +26,11 @@ export function ChatView() {
   const goBack = useChatStore(s => s.goBack);
 
   const openReader = useUIStore(s => s.openReader);
+  const chatSearchOwnsFind = useUIStore((s) => {
+    const tab = s.activeTabId ? s.tabs.find(candidate => candidate.id === s.activeTabId) : null;
+    const entry = tab?.stack[tab.stackIndex];
+    return shouldOpenChatSearch(s.chatSidebarOpen, entry);
+  });
 
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -50,14 +60,14 @@ export function ChatView() {
   // Keyboard handler for Ctrl+F / Cmd+F
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      if (chatSearchOwnsFind && (e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         openSearch();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [openSearch]);
+  }, [chatSearchOwnsFind, openSearch]);
 
   // Subscribe to chat events for streaming
   useChatEvents(currentConversation?.id ?? null);
