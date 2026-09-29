@@ -11,7 +11,9 @@ import { SearchBar } from '../ui/SearchBar';
 
 export function shouldOpenChatSearch(chatSidebarOpen: boolean, entry?: TabEntry): boolean {
   return chatSidebarOpen && entry?.type !== 'tool'
-    && !(entry?.type === 'atom' && /^(memory|category|entity):/.test(entry.atomId));
+    && entry?.type !== 'wiki'
+    && !((entry?.type === 'atom' || entry?.type === 'graph')
+      && /^(memory|category|entity):/.test(entry.atomId));
 }
 
 export function ChatView() {

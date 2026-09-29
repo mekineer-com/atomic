@@ -8,6 +8,12 @@ describe('shouldOpenChatSearch', () => {
     expect(shouldOpenChatSearch(true, {
       type: 'atom', atomId: 'memory:1', tagId: null, highlightText: null, editing: false,
     })).toBe(false);
+    expect(shouldOpenChatSearch(true, {
+      type: 'graph', atomId: 'memory:1', tagId: null,
+    })).toBe(false);
+    expect(shouldOpenChatSearch(true, {
+      type: 'wiki', tagId: 'tag:1', tagName: 'Fictional Wiki', highlightText: null,
+    })).toBe(false);
   });
 
   it('keeps chat search on ordinary workspace surfaces', () => {
