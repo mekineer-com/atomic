@@ -1119,6 +1119,7 @@ impl Database {
         if version < 24 {
             conn.execute_batch(
                 "BEGIN;
+                 DROP TRIGGER IF EXISTS chat_citations_delete_local_atom;
                  CREATE TABLE chat_citations_new (
                      id TEXT PRIMARY KEY,
                      message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
