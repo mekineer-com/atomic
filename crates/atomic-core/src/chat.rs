@@ -574,8 +574,8 @@ pub fn update_conversation(
 
     if let Some(t) = title {
         conn.execute(
-            "UPDATE conversations SET title = ?1, updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![t, &now, id],
+            "UPDATE conversations SET title = ?1 WHERE id = ?2",
+            rusqlite::params![t, id],
         )?;
     }
 
@@ -1121,9 +1121,15 @@ mod tests {
             Some(("Fictional User", "Fictional Soul")),
         )
         .unwrap();
+        conn.execute(
+            "UPDATE conversations SET updated_at = '2026-01-02T03:04:05Z' WHERE id = ?1",
+            [&conv.conversation.id],
+        )
+        .unwrap();
         let updated =
             update_conversation(&conn, &conv.conversation.id, Some("Updated"), None).unwrap();
         assert_eq!(updated.title, Some("Updated".to_string()));
+        assert_eq!(updated.updated_at, "2026-01-02T03:04:05Z");
     }
 
     #[test]
