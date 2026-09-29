@@ -114,6 +114,7 @@ databases/                  # Local data dir (registry.db + per-DB files)
 # Development
 npm run tauri dev             # Desktop app (frontend + Tauri)
 npm run dev                   # Frontend only
+npm run build                 # Frontend type-check + production build
 cargo check                   # Check all workspace crates
 cargo test                    # Run all tests
 cargo check -p atomic-core    # Check specific crate
