@@ -281,7 +281,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 24;
+    const LATEST_VERSION: i32 = 23;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         Self::run_migrations_internal(conn, false)
@@ -418,7 +418,7 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
                     citation_index INTEGER NOT NULL,
-                    atom_id TEXT NOT NULL,
+                    atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
                     chunk_index INTEGER,
                     excerpt TEXT NOT NULL,
                     relevance_score REAL
@@ -1108,49 +1108,18 @@ impl Database {
                     ))?;
                 }
             }
-            conn.execute_batch(
+            conn.execute_batch(&format!(
                 "CREATE INDEX IF NOT EXISTS idx_conversations_owner
                      ON conversations(user_id, soul_id, updated_at DESC);
-                 PRAGMA user_version = 23;",
-            )?;
+                 PRAGMA user_version = {};",
+                Self::LATEST_VERSION,
+            ))?;
         }
-
-        // V24: chat citations may target either local atoms or federated memories.
-        if version < 24 {
-            conn.execute_batch(
-                "BEGIN;
-                 DROP TRIGGER IF EXISTS chat_citations_delete_local_atom;
-                 CREATE TABLE chat_citations_new (
-                     id TEXT PRIMARY KEY,
-                     message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
-                     citation_index INTEGER NOT NULL,
-                     atom_id TEXT NOT NULL,
-                     chunk_index INTEGER,
-                     excerpt TEXT NOT NULL,
-                     relevance_score REAL
-                 );
-                 INSERT INTO chat_citations_new
-                 SELECT id, message_id, citation_index, atom_id, chunk_index, excerpt, relevance_score
-                 FROM chat_citations;
-                 DROP TABLE chat_citations;
-                 ALTER TABLE chat_citations_new RENAME TO chat_citations;
-                 CREATE INDEX idx_chat_citations_message ON chat_citations(message_id);
-                 CREATE INDEX idx_chat_citations_atom ON chat_citations(atom_id);
-                 PRAGMA user_version = 24;
-                 COMMIT;",
-            )?;
-        }
-
-        debug_assert!(
-            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))?
-                >= Self::LATEST_VERSION
-        );
 
         // --- Triggers (recreated every startup to stay current) ---
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS atom_tags_insert_count;
              DROP TRIGGER IF EXISTS atom_tags_delete_count;
-             DROP TRIGGER IF EXISTS chat_citations_delete_local_atom;
 
              CREATE TRIGGER atom_tags_insert_count
              AFTER INSERT ON atom_tags
@@ -1162,12 +1131,6 @@ impl Database {
              AFTER DELETE ON atom_tags
              BEGIN
                  UPDATE tags SET atom_count = atom_count - 1 WHERE id = OLD.tag_id;
-             END;
-
-             CREATE TRIGGER chat_citations_delete_local_atom
-             AFTER DELETE ON atoms
-             BEGIN
-                 DELETE FROM chat_citations WHERE atom_id = OLD.id;
              END;",
         )?;
 
@@ -1497,128 +1460,6 @@ mod tests {
             let value = crate::settings::get_setting(&conn, "chat_model").unwrap();
             assert_eq!(value, "custom/model");
         }
-    }
-
-    #[test]
-    fn test_v24_migrates_federated_chat_citations() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let db = Database::open_or_create(temp_file.path()).unwrap();
-        let conn = db.conn.lock().unwrap();
-
-        conn.execute_batch(
-            "DROP TRIGGER IF EXISTS chat_citations_delete_local_atom;
-             DROP TABLE chat_citations;
-             CREATE TABLE chat_citations (
-                 id TEXT PRIMARY KEY,
-                 message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
-                 citation_index INTEGER NOT NULL,
-                 atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
-                 chunk_index INTEGER,
-                 excerpt TEXT NOT NULL,
-                 relevance_score REAL
-             );
-             CREATE INDEX idx_chat_citations_message ON chat_citations(message_id);
-             CREATE INDEX idx_chat_citations_atom ON chat_citations(atom_id);
-             INSERT INTO atoms (id, content, created_at, updated_at)
-             VALUES ('atom:test', 'Fictional note', '2026-01-01', '2026-01-01');
-             INSERT INTO conversations (id, title, created_at, updated_at)
-             VALUES ('conversation:test', 'Fictional chat', '2026-01-01', '2026-01-01');
-             INSERT INTO chat_messages
-                 (id, conversation_id, role, content, created_at, message_index)
-             VALUES
-                 ('message:test', 'conversation:test', 'assistant', 'Answer', '2026-01-01', 0);
-             INSERT INTO chat_citations
-                 (id, message_id, citation_index, atom_id, excerpt)
-             VALUES
-                 ('citation:local', 'message:test', 1, 'atom:test', 'Local excerpt');
-             PRAGMA user_version = 23;",
-        )
-        .unwrap();
-
-        let before: i64 = conn
-            .query_row("SELECT COUNT(*) FROM chat_citations", [], |row| row.get(0))
-            .unwrap();
-        Database::run_migrations(&conn).unwrap();
-
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        let after: i64 = conn
-            .query_row("SELECT COUNT(*) FROM chat_citations", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 24);
-        assert_eq!(after, before);
-
-        conn.execute(
-            "INSERT INTO chat_citations
-             (id, message_id, citation_index, atom_id, excerpt)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            (
-                "citation:federated",
-                "message:test",
-                2,
-                "memory:test",
-                "Federated excerpt",
-            ),
-        )
-        .unwrap();
-
-        conn.execute("DELETE FROM atoms WHERE id = 'atom:test'", [])
-            .unwrap();
-        let local_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM chat_citations WHERE id = 'citation:local'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let federated_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM chat_citations WHERE id = 'citation:federated'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(local_count, 0);
-        assert_eq!(federated_count, 1);
-
-        conn.execute("DELETE FROM chat_messages WHERE id = 'message:test'", [])
-            .unwrap();
-        let remaining: i64 = conn
-            .query_row("SELECT COUNT(*) FROM chat_citations", [], |row| row.get(0))
-            .unwrap();
-        let foreign_key_errors: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        let quick_check: String = conn
-            .query_row("PRAGMA quick_check", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(remaining, 0);
-        assert_eq!(foreign_key_errors, 0);
-        assert_eq!(quick_check, "ok");
-    }
-
-    #[test]
-    fn test_v24_fresh_database_installs_trigger() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let db = Database::open_or_create(temp_file.path()).unwrap();
-        let conn = db.conn.lock().unwrap();
-
-        let version: i32 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        let trigger_exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master
-                 WHERE type = 'trigger' AND name = 'chat_citations_delete_local_atom'",
-                [],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-        assert_eq!(version, 24);
-        assert!(trigger_exists);
     }
 
     #[test]
