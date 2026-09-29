@@ -418,7 +418,7 @@ impl Database {
                     id TEXT PRIMARY KEY,
                     message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
                     citation_index INTEGER NOT NULL,
-                    atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
+                    atom_id TEXT NOT NULL,
                     chunk_index INTEGER,
                     excerpt TEXT NOT NULL,
                     relevance_score REAL
@@ -1120,6 +1120,7 @@ impl Database {
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS atom_tags_insert_count;
              DROP TRIGGER IF EXISTS atom_tags_delete_count;
+             DROP TRIGGER IF EXISTS chat_citations_delete_local_atom;
 
              CREATE TRIGGER atom_tags_insert_count
              AFTER INSERT ON atom_tags
@@ -1131,6 +1132,12 @@ impl Database {
              AFTER DELETE ON atom_tags
              BEGIN
                  UPDATE tags SET atom_count = atom_count - 1 WHERE id = OLD.tag_id;
+             END;
+
+             CREATE TRIGGER chat_citations_delete_local_atom
+             AFTER DELETE ON atoms
+             BEGIN
+                 DELETE FROM chat_citations WHERE atom_id = OLD.id;
              END;",
         )?;
 
@@ -1460,6 +1467,43 @@ mod tests {
             let value = crate::settings::get_setting(&conn, "chat_model").unwrap();
             assert_eq!(value, "custom/model");
         }
+    }
+
+    #[test]
+    fn test_federated_chat_citation_cleanup() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let db = Database::open_or_create(temp_file.path()).unwrap();
+        let conn = db.conn.lock().unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO atoms (id, content, created_at, updated_at)
+             VALUES ('atom:test', 'Fictional note', '2026-01-01', '2026-01-01');
+             INSERT INTO conversations (id, title, created_at, updated_at)
+             VALUES ('conversation:test', 'Fictional chat', '2026-01-01', '2026-01-01');
+             INSERT INTO chat_messages
+                 (id, conversation_id, role, content, created_at, message_index)
+             VALUES
+                 ('message:test', 'conversation:test', 'assistant', 'Answer', '2026-01-01', 0);
+             INSERT INTO chat_citations
+                 (id, message_id, citation_index, atom_id, excerpt)
+             VALUES
+                 ('citation:local', 'message:test', 1, 'atom:test', 'Local excerpt'),
+                 ('citation:federated', 'message:test', 2, 'memory:test', 'Federated excerpt');
+             DELETE FROM atoms WHERE id = 'atom:test';",
+        )
+        .unwrap();
+
+        let remaining_id: String = conn
+            .query_row("SELECT id FROM chat_citations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining_id, "citation:federated");
+
+        conn.execute("DELETE FROM chat_messages WHERE id = 'message:test'", [])
+            .unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_citations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[test]
