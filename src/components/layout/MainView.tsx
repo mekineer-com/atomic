@@ -52,6 +52,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const totalCount = useAtomsStore(s => s.totalCount);
   const hasMore = useAtomsStore(s => s.hasMore);
   const isLoadingInitial = useAtomsStore(s => s.isLoadingInitial);
+  const initialLoadComplete = useAtomsStore(s => s.initialLoadComplete);
   const isLoadingMore = useAtomsStore(s => s.isLoadingMore);
   const fetchNextPage = useAtomsStore(s => s.fetchNextPage);
   const semanticSearchResults = useAtomsStore(s => s.semanticSearchResults);
@@ -129,6 +130,14 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   // matches. Once a tab is active, the pill carries the active styling and
   // the main nav goes back to a neutral state.
   const onBaseView = activeTabId === null;
+  const wasOnBaseView = useRef(onBaseView);
+
+  useEffect(() => {
+    if (onBaseView && !wasOnBaseView.current && !initialLoadComplete && !isLoadingInitial) {
+      void fetchAtoms();
+    }
+    wasOnBaseView.current = onBaseView;
+  }, [fetchAtoms, initialLoadComplete, isLoadingInitial, onBaseView]);
 
   useEffect(() => {
     if (openAlmaMode && onBaseView && viewMode === 'reports') setViewMode('atoms');

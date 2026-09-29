@@ -211,7 +211,14 @@ export function Layout() {
       useAtomsStore.getState().hydrateFromCache(),
       useTagsStore.getState().hydrateFromCache(),
     ]);
-    await Promise.all([fetchAtoms(), fetchTags()]);
+    const ui = useUIStore.getState();
+    const activeTab = ui.tabs.find((tab) => tab.id === ui.activeTabId);
+    const activeEntry = activeTab?.stack[activeTab.stackIndex];
+    if (activeEntry?.type === 'tool' && activeEntry.tool === 'approvals') {
+      await fetchTags();
+    } else {
+      await Promise.all([fetchAtoms(), fetchTags()]);
+    }
   };
 
   const handleSetupComplete = async () => {
