@@ -2014,7 +2014,7 @@ mod tests {
             &atom.atom.id,
             0,
             GET_ATOM_DEFAULT_LIMIT,
-            &[private.id],
+            &[private.id.clone()],
             None,
         )
         .await
