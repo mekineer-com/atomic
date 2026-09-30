@@ -120,10 +120,19 @@ describe('PendingReviewPanel', () => {
     const textarea = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed summary"]')!;
     expect(approved.readOnly).toBe(true);
     expect(approved.value).toBe('Same shaped paragraph.');
-    for (const className of ['min-h-[21rem]', 'font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-scroll', 'focus:overflow-y-hidden', 'focus:[field-sizing:content]']) {
+    for (const className of ['min-h-[21rem]', 'font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-scroll', 'focus:overflow-y-hidden']) {
       expect(approved.classList.contains(className)).toBe(true);
       expect(textarea.classList.contains(className)).toBe(true);
     }
+    Object.defineProperties(approved, {
+      scrollHeight: { configurable: true, value: 500 },
+      offsetHeight: { configurable: true, value: 338 },
+      clientHeight: { configurable: true, value: 336 },
+    });
+    await act(async () => { approved.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
+    expect(approved.style.height).toBe('502px');
+    await act(async () => { approved.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+    expect(approved.style.height).toBe('');
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Edited paragraph.');
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
