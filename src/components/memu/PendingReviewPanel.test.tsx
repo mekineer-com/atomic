@@ -90,6 +90,32 @@ describe('PendingReviewPanel', () => {
     await act(async () => { root.unmount(); });
   });
 
+  it('clears a similarity badge when its last pending sibling is approved', async () => {
+    transport.invoke
+      .mockResolvedValueOnce({
+        items: [
+          { id: 'memory:m1', summary: 'first memory', memory_type: 'knowledge', similar_to: ['memory:m2'], similarity: 0.9 },
+          { id: 'memory:m2', summary: 'second memory', memory_type: 'knowledge', similar_to: ['memory:m1'], similarity: 0.9 },
+        ],
+        categories: [],
+        soul_summaries: [],
+        summaries_revision: 1,
+      })
+      .mockResolvedValueOnce({});
+    const container = document.createElement('div');
+    const root = createRoot(container);
+
+    await act(async () => { root.render(<PendingReviewPanel />); });
+    expect(container.textContent?.match(/≈ 90%/g)).toHaveLength(2);
+    const approve = [...container.querySelectorAll('button')].find(button => button.textContent === 'Approve')!;
+    await act(async () => { approve.click(); });
+
+    expect(container.textContent).not.toContain('first memory');
+    expect(container.textContent).toContain('second memory');
+    expect(container.textContent).not.toContain('≈ 90%');
+    await act(async () => { root.unmount(); });
+  });
+
   it('removes narrative self after Save + approve and uses matching text geometry', async () => {
     transport.invoke
       .mockResolvedValueOnce({
