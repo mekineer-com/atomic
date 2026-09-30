@@ -221,22 +221,12 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     if (Number.isFinite(revision)) summariesRevision.current = Math.max(summariesRevision.current, revision);
   };
   const summaryActionsDisabled = loading || loadFailed || summariesStale || summaryBusy;
-  // Remove the acted-on row in place and strip dead similarity references so
-  // surviving badges continue to mean that another pending cluster mate exists.
+  // Remove the acted-on row in place (no refetch: reordering would scatter its cluster
+  // mates). Survivors keep their badge/color even when the last cluster mate goes —
+  // consistent visuals beat live-updating cluster membership mid-review.
   const removeMemory = (id: string) => {
     useCanvasStore.getState().invalidateCanvasData();
-    setReviews((r) => ({
-      ...r,
-      items: r.items
-        .filter((item) => item.id !== id)
-        .map((item) => {
-          if (!item.similar_to?.includes(id)) return item;
-          const rest = item.similar_to.filter((similarId) => similarId !== id);
-          return rest.length
-            ? { ...item, similar_to: rest }
-            : { ...item, similar_to: undefined, similarity: undefined };
-        }),
-    }));
+    setReviews((r) => ({ ...r, items: r.items.filter((item) => item.id !== id) }));
   };
   const reportError = (err: unknown) => setError(String(err));
 
