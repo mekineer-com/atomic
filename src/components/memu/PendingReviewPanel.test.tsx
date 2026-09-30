@@ -116,12 +116,12 @@ describe('PendingReviewPanel', () => {
     const root = createRoot(container);
 
     await act(async () => { root.render(<PendingReviewPanel />); });
-    const textarea = container.querySelector('textarea')!;
-    const approved = textarea.previousElementSibling as HTMLElement;
-    for (const className of ['font-sans', 'text-sm', 'leading-5', 'whitespace-pre-wrap', 'overflow-y-auto']) {
+    const approved = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Approved summary"]')!;
+    const textarea = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed summary"]')!;
+    expect(approved.readOnly).toBe(true);
+    expect(approved.value).toBe('Same shaped paragraph.');
+    for (const className of ['min-h-[21rem]', 'font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-scroll', 'focus:overflow-y-hidden', 'focus:[field-sizing:content]']) {
       expect(approved.classList.contains(className)).toBe(true);
-    }
-    for (const className of ['font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-scroll']) {
       expect(textarea.classList.contains(className)).toBe(true);
     }
     await act(async () => {

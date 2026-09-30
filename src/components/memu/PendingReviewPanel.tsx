@@ -480,8 +480,8 @@ function GeneratedSummaryRow({
         </div>
       ) : <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>}
       <div className="grid gap-2 md:grid-cols-2">
-        <pre ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className="min-h-28 overflow-y-auto whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)]">{review.approved_summary ?? ''}</pre>
-        <textarea readOnly={disabled} ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className="min-h-28 overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable]" value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <textarea readOnly aria-label="Approved summary" ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className="min-h-[21rem] overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] text-[var(--color-text-secondary)] focus:overflow-y-hidden focus:[field-sizing:content]" value={review.approved_summary ?? ''} />
+        <textarea readOnly={disabled} aria-label="Proposed summary" ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className="min-h-[21rem] overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] focus:overflow-y-hidden focus:[field-sizing:content]" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       {kind === 'category' && Boolean(review.citations?.length) && (
         <div className="mt-2">
