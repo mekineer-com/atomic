@@ -3,7 +3,7 @@ import { getTransport } from '../../lib/transport';
 import { useCanvasStore } from '../../stores/canvas';
 import type { AtomWithTags, DossierUsage, MemoryCitation } from '../../stores/atoms';
 import { formatDate } from '../../lib/date';
-import { DossierMarkdown, DossierUsageLinks, MemoryCitationLinks } from './DossierMarkdown';
+import { DossierUsageLinks, MemoryCitationLinks } from './DossierMarkdown';
 
 type MemoryReview = {
   id: string;
@@ -480,12 +480,8 @@ function GeneratedSummaryRow({
         </div>
       ) : <div className="mb-2 text-sm font-medium">{review.label ?? review.id}</div>}
       <div className="grid gap-2 md:grid-cols-2">
-        <div ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className={`max-w-none overflow-y-auto rounded border border-[var(--color-border)] p-2 text-sm leading-5 tracking-normal [scrollbar-gutter:stable] text-[var(--color-text-secondary)] ${kind === 'category' ? 'prose prose-invert min-h-[21rem]' : 'min-h-28 whitespace-pre-wrap font-sans'}`}>
-          {kind === 'category'
-            ? <DossierMarkdown citations={review.citations}>{review.approved_summary ?? ''}</DossierMarkdown>
-            : (review.approved_summary ?? '')}
-        </div>
-        <textarea readOnly={disabled} ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className={`overflow-y-auto rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable] ${kind === 'category' ? 'min-h-[21rem]' : 'min-h-28'}`} value={summary} onChange={(e) => setSummary(e.target.value)} />
+        <pre ref={(node) => { if (node) node.scrollTop = scrollPosition.approved; }} onScroll={(event) => { scrollPosition.approved = event.currentTarget.scrollTop; }} className="min-h-28 overflow-y-auto whitespace-pre-wrap rounded border border-[var(--color-border)] p-2 font-sans text-sm leading-5 [scrollbar-gutter:stable] text-[var(--color-text-secondary)]">{review.approved_summary ?? ''}</pre>
+        <textarea readOnly={disabled} ref={(node) => { if (node) node.scrollTop = scrollPosition.draft; }} onScroll={(event) => { scrollPosition.draft = event.currentTarget.scrollTop; }} className="min-h-28 overflow-y-scroll rounded border border-[var(--color-border)] bg-transparent p-2 font-sans text-sm leading-5 tracking-normal [scrollbar-gutter:stable]" value={summary} onChange={(e) => setSummary(e.target.value)} />
       </div>
       {kind === 'category' && Boolean(review.citations?.length) && (
         <div className="mt-2">

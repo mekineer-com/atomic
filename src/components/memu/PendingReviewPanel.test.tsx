@@ -118,8 +118,10 @@ describe('PendingReviewPanel', () => {
     await act(async () => { root.render(<PendingReviewPanel />); });
     const textarea = container.querySelector('textarea')!;
     const approved = textarea.previousElementSibling as HTMLElement;
-    for (const className of ['font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-auto']) {
+    for (const className of ['font-sans', 'text-sm', 'leading-5', 'whitespace-pre-wrap', 'overflow-y-auto']) {
       expect(approved.classList.contains(className)).toBe(true);
+    }
+    for (const className of ['font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-scroll']) {
       expect(textarea.classList.contains(className)).toBe(true);
     }
     await act(async () => {
