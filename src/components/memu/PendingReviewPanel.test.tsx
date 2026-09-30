@@ -131,14 +131,17 @@ describe('PendingReviewPanel', () => {
     });
     await act(async () => { approved.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
     expect(approved.style.height).toBe('502px');
+    const button = [...container.querySelectorAll('button')].find(node => node.textContent === 'Approve')!;
+    await act(async () => { approved.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: button })); });
+    expect(approved.style.height).toBe('502px');
     await act(async () => { approved.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
     expect(approved.style.height).toBe('');
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'Edited paragraph.');
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    const button = [...container.querySelectorAll('button')].find(node => node.textContent === 'Save + approve')!;
-    await act(async () => { button.click(); });
+    const saveButton = [...container.querySelectorAll('button')].find(node => node.textContent === 'Save + approve')!;
+    await act(async () => { saveButton.click(); });
 
     expect(transport.invoke).toHaveBeenLastCalledWith('update_soul_summary', expect.objectContaining({
       kind: 'narrative_self',
