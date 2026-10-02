@@ -143,7 +143,7 @@ describe('PendingReviewPanel', () => {
     const textarea = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed summary"]')!;
     expect(approved.readOnly).toBe(true);
     expect(approved.value).toBe('Same shaped paragraph.');
-    for (const className of ['min-h-[21rem]', 'font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-scroll', 'focus:overflow-y-hidden']) {
+    for (const className of ['min-h-[21rem]', 'font-sans', 'text-sm', 'leading-5', 'tracking-normal', 'overflow-y-scroll', 'focus:overflow-y-auto']) {
       expect(approved.classList.contains(className)).toBe(true);
       expect(textarea.classList.contains(className)).toBe(true);
     }
