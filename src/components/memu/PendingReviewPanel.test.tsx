@@ -23,6 +23,29 @@ afterEach(() => {
 });
 
 describe('PendingReviewPanel', () => {
+  it('approves with loaded category identity rather than draft fields', async () => {
+    transport.invoke.mockResolvedValueOnce({
+      items: [], categories: [{ id: 'category:c1', label: 'Loaded title', description: 'Loaded brief', summary: 'Shown' }],
+      soul_summaries: [], summaries_revision: 4,
+    }).mockRejectedValueOnce('summary_snapshot_stale');
+    const container = document.createElement('div');
+    const mounted = createRoot(container);
+    await act(async () => { mounted.render(<PendingReviewPanel />); });
+    const input = container.querySelector('input')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, 'Draft title');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')!.click();
+    });
+    expect(transport.invoke).toHaveBeenLastCalledWith('update_category_summary', expect.objectContaining({
+      title: 'Draft title', displayed_title: 'Loaded title', displayed_description: 'Loaded brief',
+      displayed_summary: 'Shown', summaries_revision: 4,
+    }));
+    await act(async () => { mounted.unmount(); });
+  });
+
   it('does not let an in-flight reload overwrite a newer review event', async () => {
     let finishLoad!: (value: unknown) => void;
     transport.invoke

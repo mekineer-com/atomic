@@ -18,6 +18,10 @@ pub struct SummaryUpdate {
     pub summaries_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub displayed_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displayed_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displayed_description: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -26,6 +30,10 @@ pub struct SummaryGuard {
     pub summaries_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub displayed_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displayed_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub displayed_description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -252,7 +260,11 @@ async fn set_category_memory(
     body: SummaryGuard,
     attached: bool,
 ) -> HttpResponse {
-    if body.summaries_revision.is_none() || body.displayed_summary.is_none() {
+    if body.summaries_revision.is_none()
+        || body.displayed_summary.is_none()
+        || body.displayed_title.is_none()
+        || body.displayed_description.is_none()
+    {
         return HttpResponse::BadRequest().json(json!({"error": "summary snapshot is required"}));
     }
     let config = match session(&state, &request).await {
@@ -310,6 +322,15 @@ async fn update(
     if kind == "memory" && body.displayed_summary.is_none() {
         return HttpResponse::BadRequest().json(json!({"error": "displayed_summary is required"}));
     }
+    if kind == "category"
+        && (body.summaries_revision.is_none()
+            || body.displayed_summary.is_none()
+            || body.displayed_title.is_none()
+            || body.displayed_description.is_none())
+    {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "complete category snapshot is required"}));
+    }
     let config = match session(&state, &request).await {
         Ok(config) => config,
         Err(response) => return response,
@@ -343,6 +364,12 @@ async fn update(
     }
     if let Some(displayed) = body.displayed_summary {
         payload["displayed_summary"] = displayed.into();
+    }
+    if let Some(title) = body.displayed_title {
+        payload["displayed_title"] = title.into();
+    }
+    if let Some(description) = body.displayed_description {
+        payload["displayed_description"] = description.into();
     }
     match memu_json(
         client
@@ -428,6 +455,12 @@ async fn approve_summary(
 ) -> HttpResponse {
     if body.summaries_revision.is_none() || body.displayed_summary.is_none() {
         return HttpResponse::BadRequest().json(json!({"error": "summary snapshot is required"}));
+    }
+    if kind == "category"
+        && (body.displayed_title.is_none() || body.displayed_description.is_none())
+    {
+        return HttpResponse::BadRequest()
+            .json(json!({"error": "complete category snapshot is required"}));
     }
     let config = match session(&state, &request).await {
         Ok(config) => config,

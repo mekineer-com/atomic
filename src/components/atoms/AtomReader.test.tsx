@@ -61,6 +61,43 @@ afterEach(() => {
 });
 
 describe('AtomReader stale snapshots', () => {
+  it('sends loaded category identity and does not retry over an unseen description', async () => {
+    const category = {
+      ...memory('Shown', '2026-01-01T00:00:00Z'), id: 'category:c1',
+      title: 'Loaded title', description: 'Loaded description', summaries_revision: 4,
+    };
+    useUIStore.setState({
+      tabs: [{ id: 'category-tab', stack: [{ type: 'atom', atomId: category.id, tagId: null, highlightText: null, editing: false }], stackIndex: 0, ordinal: 1 }],
+      activeTabId: 'category-tab', nextTabOrdinal: 2,
+    });
+    transport.invoke.mockImplementation((command: string) => {
+      if (command === 'get_atom_by_id') {
+        return Promise.resolve(transport.invoke.mock.calls.length === 1 ? category : {
+          ...category, description: 'Unseen description',
+        });
+      }
+      if (command === 'approve_category') return Promise.reject('summary_snapshot_stale');
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<AtomReader atomId="category:c1" viewKey="category:c1" tabId="category-tab" active />);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      [...container.querySelectorAll('button')].find(button => button.textContent === 'Approve')!.click();
+    });
+    const mutations = transport.invoke.mock.calls.filter(([command]) => command === 'approve_category');
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0][1]).toMatchObject({
+      displayed_summary: 'Shown', displayed_title: 'Loaded title',
+      displayed_description: 'Loaded description', summaries_revision: 4,
+    });
+    expect(useUIStore.getState().tabs[0].retired).toBe(true);
+    await act(async () => { root.unmount(); });
+  });
+
   it('keeps a dirty draft mounted and read-only when a refetch changes its baseline', async () => {
     transport.invoke
       .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))

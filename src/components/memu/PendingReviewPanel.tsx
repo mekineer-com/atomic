@@ -455,6 +455,10 @@ function GeneratedSummaryRow({
         ...target,
         ...(edited ? changes : {}),
         displayed_summary: review.summary,
+        ...(kind === 'category' ? {
+          displayed_title: review.label ?? '',
+          displayed_description: review.description ?? '',
+        } : {}),
         summaries_revision: revision,
       });
       onDone(result);

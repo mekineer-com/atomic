@@ -105,6 +105,8 @@ function DossierMembershipControls({
           categoryId: atom.id,
           memoryId,
           displayedSummary: atom.content,
+          displayedTitle: atom.title,
+          displayedDescription: atom.description ?? '',
           summariesRevision: atom.summaries_revision,
         },
       );
@@ -507,7 +509,11 @@ function AtomReaderContent({
           id: atom.id,
           ...args,
           displayed_summary: baseline.content,
-          ...(isMemuCategory ? { summaries_revision: baseline.summaries_revision } : {}),
+          ...(isMemuCategory ? {
+            summaries_revision: baseline.summaries_revision,
+            displayed_title: baseline.title,
+            displayed_description: baseline.description ?? '',
+          } : {}),
         });
       } catch (error) {
         if (retry && isMemuCategory && isStaleSummaryError(error)) {

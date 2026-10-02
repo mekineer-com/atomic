@@ -129,7 +129,7 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'POST',
     path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.id as string)}/approve`,
     argsMode: 'body',
-    transformArgs: (a) => ({ displayed_summary: a.displayed_summary, summaries_revision: a.summaries_revision }),
+    transformArgs: (a) => ({ displayed_summary: a.displayed_summary, summaries_revision: a.summaries_revision, displayed_title: a.displayed_title, displayed_description: a.displayed_description }),
   },
   update_memory_summary: {
     method: 'PATCH',
@@ -148,19 +148,21 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       kind: a.kind,
       displayed_summary: a.displayed_summary,
       summaries_revision: a.summaries_revision,
+      displayed_title: a.displayed_title,
+      displayed_description: a.displayed_description,
     }),
   },
   attach_memu_category_memory: {
     method: 'PUT',
     path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.categoryId as string)}/memory/${encodeURIComponent(a.memoryId as string)}`,
     argsMode: 'body',
-    transformArgs: (a) => ({ displayed_summary: a.displayedSummary, summaries_revision: a.summariesRevision }),
+    transformArgs: (a) => ({ displayed_summary: a.displayedSummary, summaries_revision: a.summariesRevision, displayed_title: a.displayedTitle, displayed_description: a.displayedDescription }),
   },
   detach_memu_category_memory: {
     method: 'DELETE',
     path: (a) => `/api/memu/reviews/category/${encodeURIComponent(a.categoryId as string)}/memory/${encodeURIComponent(a.memoryId as string)}`,
     argsMode: 'body',
-    transformArgs: (a) => ({ displayed_summary: a.displayedSummary, summaries_revision: a.summariesRevision }),
+    transformArgs: (a) => ({ displayed_summary: a.displayedSummary, summaries_revision: a.summariesRevision, displayed_title: a.displayedTitle, displayed_description: a.displayedDescription }),
   },
   approve_soul_summary: {
     method: 'POST',

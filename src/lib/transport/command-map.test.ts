@@ -10,6 +10,8 @@ describe('memU command forwarding', () => {
       description: 'Edited category description',
       kind: 'topic',
       displayed_summary: 'Previous category prose',
+      displayed_title: 'Previous category',
+      displayed_description: 'Previous description',
       summaries_revision: 4,
     })).toEqual({
       summary: 'Current category prose',
@@ -17,8 +19,24 @@ describe('memU command forwarding', () => {
       description: 'Edited category description',
       kind: 'topic',
       displayed_summary: 'Previous category prose',
+      displayed_title: 'Previous category',
+      displayed_description: 'Previous description',
       summaries_revision: 4,
     });
+  });
+
+  it('forwards the loaded identity for category approval and membership', () => {
+    const guard = {
+      displayed_summary: 'Shown', summaries_revision: 4,
+      displayed_title: 'Loaded title', displayed_description: 'Loaded description',
+    };
+    expect(COMMAND_MAP.approve_category.transformArgs?.(guard)).toEqual(guard);
+    for (const command of ['attach_memu_category_memory', 'detach_memu_category_memory']) {
+      expect(COMMAND_MAP[command].transformArgs?.({
+        displayedSummary: guard.displayed_summary, summariesRevision: guard.summaries_revision,
+        displayedTitle: guard.displayed_title, displayedDescription: guard.displayed_description,
+      })).toEqual(guard);
+    }
   });
 
   it('keeps categories in tag search rather than atom search', () => {
