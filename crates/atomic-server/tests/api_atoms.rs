@@ -418,6 +418,8 @@ async fn memu_update_memory(path: web::Path<String>, body: web::Json<Value>) -> 
 async fn memu_update_category(path: web::Path<String>, body: web::Json<Value>) -> HttpResponse {
     assert_eq!(path.as_str(), "c1");
     assert_eq!(body["kind"], "topic");
+    assert_eq!(body["displayed_title"], "Core");
+    assert_eq!(body["displayed_description"], "A category brief");
     HttpResponse::Ok().json(json!({
         "id": "category:c1",
         "kind": "category",
@@ -995,6 +997,8 @@ async fn test_memu_category_kind_only_update_is_forwarded() {
         .set_json(json!({
             "kind": "topic",
             "displayed_summary": "Category summary",
+            "displayed_title": "Core",
+            "displayed_description": "A category brief",
             "summaries_revision": 4
         }))
         .to_request();
