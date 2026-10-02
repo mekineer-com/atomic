@@ -106,9 +106,10 @@ export function ChatView() {
     if (!inputValue.trim() || isStreaming) return;
 
     const content = inputValue.trim();
-    setInputValue('');
     scrollToBottom(); // Scroll to bottom when user sends a message
-    await sendMessage(content);
+    if (await sendMessage(content)) {
+      setInputValue(current => current === inputValue ? '' : current);
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {

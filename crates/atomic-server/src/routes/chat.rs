@@ -121,29 +121,27 @@ async fn fetch_atomic_snapshot(
     Ok(snapshot)
 }
 
-async fn fetch_atomic_chat_profile(config: &MemuScope) -> Result<HashMap<String, String>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("memU chat_profile client failed: {e}"))?;
-    let response = client
-        .get(format!(
-            "{}/integration/atomic/chat_profile",
-            config.base_url
-        ))
-        .send()
-        .await
-        .map_err(|e| format!("memU chat_profile request failed: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(format!("memU chat_profile failed ({status})"));
-    }
-    let body = response
-        .json::<AtomicChatProfileResponse>()
-        .await
-        .map_err(|e| format!("memU chat_profile returned invalid JSON: {e}"))?;
+async fn fetch_atomic_chat_profile(
+    config: &MemuScope,
+) -> Result<HashMap<String, String>, HttpResponse> {
+    let value = memu_proxy::memu_json(
+        memu_proxy::client()?
+            .get(format!(
+                "{}/integration/atomic/chat_profile",
+                config.base_url
+            ))
+            .query(&[("user_id", &config.user_id), ("soul_id", &config.soul_id)]),
+        "memU chat_profile",
+    )
+    .await?;
+    let body = serde_json::from_value::<AtomicChatProfileResponse>(value).map_err(|e| {
+        HttpResponse::BadGateway().json(
+            serde_json::json!({"error": format!("memU chat_profile returned invalid JSON: {e}")}),
+        )
+    })?;
     if body.settings.is_empty() {
-        return Err("memU chat_profile returned empty settings".to_string());
+        return Err(HttpResponse::BadGateway()
+            .json(serde_json::json!({"error": "memU chat_profile returned empty settings"})));
     }
     Ok(body.settings)
 }
@@ -644,7 +642,7 @@ pub async fn send_chat_message(
     let result = if let Some(memu_session) = memu_session {
         let settings = match fetch_atomic_chat_profile(&memu_session).await {
             Ok(settings) => settings,
-            Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+            Err(response) => return response,
         };
         let memu_tools = atomic_core::MemuToolConfig {
             base_url: memu_session.base_url,
@@ -718,7 +716,7 @@ pub async fn end_memu_session(
         let transcript_before_recap = std::mem::take(&mut rows);
         let settings = match fetch_atomic_chat_profile(&memu_session).await {
             Ok(settings) => settings,
-            Err(e) => return HttpResponse::BadGateway().json(serde_json::json!({ "error": e })),
+            Err(response) => return response,
         };
         let on_event = chat_event_callback(
             state.event_tx.clone(),

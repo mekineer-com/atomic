@@ -64,6 +64,15 @@ describe('HttpTransport cancellation', () => {
       .rejects.toBe('Memory is cited in dossier prose: Fictional dossier');
   });
 
+  it('shows the launcher-directed pause without serializing internal state', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 'soul_paused', message: 'TestSoul is paused. Retry in OpenAlma launcher.', reason: 'Failed' },
+    }), { status: 409 })));
+    const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
+    await expect(transport.invoke('send_chat_message', { conversationId: 'test-chat', content: 'Draft' }))
+      .rejects.toBe('TestSoul is paused. Retry in OpenAlma launcher.');
+  });
+
   it('sends memory baselines in update, approval, and delete requests', async () => {
     const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response('{}', {
       status: 200,

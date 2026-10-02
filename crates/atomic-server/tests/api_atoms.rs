@@ -318,9 +318,10 @@ fn start_memu_stub_with_model(model_url: String) -> (String, actix_web::dev::Ser
             )
             .route(
                 "/integration/atomic/chat_profile",
-                web::get().to(move || {
+                web::get().to(move |request: HttpRequest| {
                     let model_url = model_url.clone();
                     async move {
+                        assert_eq!(request.query_string(), "user_id=TestOwner&soul_id=TestSoul");
                         HttpResponse::Ok().json(json!({
                             "settings": {
                                 "provider": "openai_compat",
@@ -1046,6 +1047,59 @@ async fn test_category_approval_requires_summary_snapshot() {
     let response = actix_test::call_service(&app, req).await;
 
     assert_eq!(response.status(), 400);
+}
+
+#[actix_web::test]
+async fn test_paused_chat_preserves_structured_error_without_saving_message() {
+    let server = HttpServer::new(|| {
+        App::new()
+            .route("/owner", web::get().to(memu_owner))
+            .route("/souls", web::get().to(memu_souls))
+            .route("/integration/atomic/session_start", web::post().to(atomic_session_start_ok))
+            .route("/integration/atomic/chat_profile", web::get().to(|request: HttpRequest| async move {
+                assert_eq!(request.query_string(), "user_id=TestOwner&soul_id=TestSoul");
+                HttpResponse::Conflict().json(json!({"detail": {
+                    "code": "soul_paused", "message": "TestSoul is paused. Retry in OpenAlma launcher.", "reason": "Failed"
+                }}))
+            }))
+    }).bind(("127.0.0.1", 0)).unwrap();
+    let url = format!("http://{}", server.addrs()[0]);
+    let server = server.run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+    let ctx = TestCtx::new_with_memu(Some(url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let request = actix_test::TestRequest::post()
+        .uri("/api/conversations")
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"tag_ids": [], "title": null}))
+        .to_request();
+    let response = actix_test::call_service(&app, request).await;
+    assert_eq!(response.status(), 201);
+    let conversation: Value = actix_test::read_body_json(response).await;
+    let id = conversation["id"].as_str().unwrap();
+    let request = actix_test::TestRequest::post()
+        .uri(&format!("/api/conversations/{id}/messages"))
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"content": "Draft"}))
+        .to_request();
+    let response = actix_test::call_service(&app, request).await;
+    assert_eq!(response.status(), 409);
+    let error: Value = actix_test::read_body_json(response).await;
+    assert_eq!(error["error"]["code"], "soul_paused");
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let saved = core.get_conversation(id).await.unwrap().unwrap();
+    assert!(
+        saved
+            .messages
+            .iter()
+            .all(|row| row.message.role == "system")
+    );
+    handle.stop(true).await;
 }
 
 #[actix_web::test]

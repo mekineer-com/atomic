@@ -161,7 +161,7 @@ interface ChatStore {
   removeTagFromScope: (tagId: string) => Promise<void>;
 
   // Actions - Messaging (placeholder for now)
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (content: string) => Promise<boolean>;
   endMemuSession: () => Promise<void>;
   cancelResponse: () => void;
 
@@ -399,7 +399,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const { currentConversation, messages, openConversation } = get();
     if (!currentConversation) {
       set({ error: 'No conversation selected' });
-      return;
+      return false;
     }
 
     // Add user message optimistically
@@ -457,6 +457,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Refetch the conversation to get the properly saved messages
       // This ensures correct IDs and ordering from the database
       await openConversation(currentConversation.id);
+      return true;
     } catch (e) {
       // Remove the temp user message on error
       set((state) => ({
@@ -465,6 +466,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         isStreaming: false,
         streamingContent: '',
       }));
+      return false;
     }
   },
 
