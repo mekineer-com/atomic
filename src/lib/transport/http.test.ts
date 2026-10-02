@@ -70,7 +70,7 @@ describe('HttpTransport cancellation', () => {
     }), { status: 409 })));
     const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
     await expect(transport.invoke('send_chat_message', { conversationId: 'test-chat', content: 'Draft' }))
-      .rejects.toBe('TestSoul is paused. Retry in OpenAlma launcher.');
+      .rejects.toMatchObject({ code: 'soul_paused', message: 'TestSoul is paused. Retry in OpenAlma launcher.' });
   });
 
   it('sends memory baselines in update, approval, and delete requests', async () => {

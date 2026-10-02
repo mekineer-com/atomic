@@ -268,9 +268,11 @@ export class HttpTransport implements Transport {
       }
       const text = await resp.text();
       let errorMsg: string;
+      let paused = false;
       try {
         const errJson = JSON.parse(text);
         const error = errJson.error;
+        paused = resp.status === 409 && error?.code === 'soul_paused';
         errorMsg = typeof error === 'string'
           ? error
           : Array.isArray(error?.conflicts)
@@ -282,6 +284,9 @@ export class HttpTransport implements Transport {
             : JSON.stringify(error ?? errJson);
       } catch {
         errorMsg = text;
+      }
+      if (paused) {
+        throw Object.assign(new Error(errorMsg), { code: 'soul_paused' });
       }
       throw errorMsg;
     }

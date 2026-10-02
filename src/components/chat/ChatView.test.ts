@@ -5,7 +5,7 @@ import { useChatStore } from '../../stores/chat';
 import { ChatView, shouldOpenChatSearch } from './ChatView';
 
 const { input } = vi.hoisted(() => ({ input: { props: null as null | {
-  value: string; onChange: (text: string) => void; onSend: () => Promise<void>;
+  value: string; disabled: boolean; onChange: (text: string) => void; onSend: () => Promise<void>;
 } } }));
 vi.mock('../../hooks/useChatEvents', () => ({ useChatEvents: () => {} }));
 vi.mock('./ChatHeader', () => ({ ChatHeader: () => null }));
@@ -42,7 +42,7 @@ it('keeps a rejected draft and never clears newer typing after success', async (
   const root = createRoot(container);
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => {});
-  const send = vi.fn().mockResolvedValue(false);
+  const send = vi.fn().mockResolvedValue('refused');
   useChatStore.setState({ currentConversation: {
     id: 'test-chat', title: 'Test', created_at: '', updated_at: '', is_archived: false,
     tags: [], message_count: 0, last_message_preview: null,
@@ -52,14 +52,16 @@ it('keeps a rejected draft and never clears newer typing after success', async (
     await act(async () => input.props!.onChange('Original draft'));
     await act(async () => input.props!.onSend());
     expect(input.props!.value).toBe('Original draft');
-    let finish!: (success: boolean) => void;
-    send.mockImplementationOnce(() => new Promise<boolean>(resolve => { finish = resolve; }));
+    let finish!: (success: string) => void;
+    send.mockImplementationOnce(() => new Promise<string>(resolve => { finish = resolve; }));
     let pending!: Promise<void>;
     await act(async () => { pending = input.props!.onSend(); });
+    expect(input.props!.value).toBe('');
+    expect(input.props!.disabled).toBe(true);
     await act(async () => input.props!.onChange('Newer draft'));
-    await act(async () => { finish(true); await pending; });
+    await act(async () => { finish('sent'); await pending; });
     expect(input.props!.value).toBe('Newer draft');
-    send.mockResolvedValueOnce(true);
+    send.mockResolvedValueOnce('sent');
     await act(async () => input.props!.onSend());
     expect(input.props!.value).toBe('');
   } finally {

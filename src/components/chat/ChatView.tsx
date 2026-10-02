@@ -35,6 +35,7 @@ export function ChatView() {
   });
 
   const [inputValue, setInputValue] = useState('');
+  const [isSending, setIsSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -103,12 +104,19 @@ export function ChatView() {
   }, []);
 
   const handleSend = async () => {
-    if (!inputValue.trim() || isStreaming) return;
+    if (!inputValue.trim() || isStreaming || isSending) return;
 
     const content = inputValue.trim();
+    setInputValue('');
+    setIsSending(true);
     scrollToBottom(); // Scroll to bottom when user sends a message
-    if (await sendMessage(content)) {
-      setInputValue(current => current === inputValue ? '' : current);
+    try {
+      if (await sendMessage(content) === 'refused'
+        && useChatStore.getState().currentConversation?.id === currentConversation?.id) {
+        setInputValue(current => current === '' ? inputValue : current);
+      }
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -220,7 +228,7 @@ export function ChatView() {
         onChange={setInputValue}
         onSend={handleSend}
         onKeyDown={handleKeyDown}
-        disabled={isStreaming}
+        disabled={isStreaming || isSending}
         placeholder={
           currentConversation.tags.length > 0
             ? `Ask about ${currentConversation.tags.map(t => t.name).join(', ')}...`
