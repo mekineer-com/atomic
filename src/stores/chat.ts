@@ -460,7 +460,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return 'sent';
     } catch (e) {
       const paused = e instanceof Error && 'code' in e && e.code === 'soul_paused';
-      if (!paused) await openConversation(currentConversation.id);
+      let unsaved = paused;
+      if (!paused) {
+        const saved = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', {
+          conversationId: currentConversation.id,
+        }).catch(() => undefined);
+        if (saved) {
+          unsaved = !saved.messages.some(m => m.role === 'user' && m.content === content
+            && !messages.some(previous => previous.id === m.id));
+          if (get().currentConversation?.id === currentConversation.id) set({ messages: saved.messages });
+        }
+      }
       // Remove the temp user message on error
       set((state) => ({
         messages: state.messages.filter((m) => !m.id.startsWith('temp-')),
@@ -468,7 +478,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         isStreaming: false,
         streamingContent: '',
       }));
-      return paused ? 'refused' : 'failed';
+      return unsaved ? 'refused' : 'failed';
     }
   },
 

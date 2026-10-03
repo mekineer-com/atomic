@@ -31,3 +31,16 @@ it('reconciles saved user input after a provider failure without restoring it as
   expect(useChatStore.getState().messages).toEqual([saved]);
   expect(useChatStore.getState().error).toBe('Provider failed');
 });
+
+it('restores input only when a successful history read proves it was not saved', async () => {
+  const earlier = { id: 'earlier', conversation_id: 'test-chat', role: 'user', content: 'Draft',
+    created_at: '', message_index: 0, tool_calls: [], citations: [] };
+  useChatStore.setState({ messages: [earlier] });
+  invoke.mockImplementation((command: string) => command === 'send_chat_message'
+    ? Promise.reject('Send failed')
+    : Promise.resolve({ ...useChatStore.getState().currentConversation, messages: [earlier] }));
+  expect(await useChatStore.getState().sendMessage('Draft')).toBe('refused');
+  expect(useChatStore.getState().messages).toEqual([earlier]);
+  invoke.mockRejectedValue('History unavailable');
+  expect(await useChatStore.getState().sendMessage('Draft')).toBe('failed');
+});
