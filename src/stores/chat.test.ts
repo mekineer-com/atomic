@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { useChatStore } from './chat';
+import { useChatStore, type ChatMessageWithContext } from './chat';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../lib/transport', () => ({ getTransport: () => ({ invoke }) }));
@@ -33,7 +33,7 @@ it('reconciles saved user input after a provider failure without restoring it as
 });
 
 it('restores input only when a successful history read proves it was not saved', async () => {
-  const earlier = { id: 'earlier', conversation_id: 'test-chat', role: 'user', content: 'Draft',
+  const earlier: ChatMessageWithContext = { id: 'earlier', conversation_id: 'test-chat', role: 'user', content: 'Draft',
     created_at: '', message_index: 0, tool_calls: [], citations: [] };
   useChatStore.setState({ messages: [earlier] });
   invoke.mockImplementation((command: string) => command === 'send_chat_message'
@@ -43,4 +43,44 @@ it('restores input only when a successful history read proves it was not saved',
   expect(useChatStore.getState().messages).toEqual([earlier]);
   invoke.mockRejectedValue('History unavailable');
   expect(await useChatStore.getState().sendMessage('Draft')).toBe('failed');
+});
+
+it.each(['send-failure', 'refresh-success', 'refresh-failure'])('leaves B untouched when A finishes late: %s', async (mode) => {
+  const conversationA = useChatStore.getState().currentConversation!;
+  const conversationB = { ...conversationA, id: 'chat-b' };
+  let readStarted!: () => void;
+  const started = new Promise<void>(resolve => { readStarted = resolve; });
+  let finishRead!: (value: unknown) => void;
+  let failRead!: (error: Error) => void;
+  const read = new Promise((resolve, reject) => { finishRead = resolve; failRead = reject; });
+  let finishB!: () => void;
+  invoke.mockImplementation((command: string, args: { conversationId: string }) => {
+    if (command === 'get_conversation') {
+      if (args.conversationId === conversationA.id) { readStarted(); return read; }
+      return Promise.resolve({ ...conversationB, messages: [] });
+    }
+    if (args.conversationId === conversationA.id) {
+      return mode === 'send-failure' ? Promise.reject(new Error('A failed')) : Promise.resolve({});
+    }
+    return new Promise<void>(resolve => { finishB = resolve; });
+  });
+  const sendA = useChatStore.getState().sendMessage('Draft A');
+  await started;
+  await useChatStore.getState().openConversation(conversationB.id);
+  const sendB = useChatStore.getState().sendMessage('Draft B');
+  useChatStore.getState().appendStreamContent('B is speaking');
+  const before = useChatStore.getState();
+  if (mode === 'refresh-failure') failRead(new Error('A history failed'));
+  else finishRead({ ...conversationA, messages: [] });
+  await sendA;
+  const after = useChatStore.getState();
+  expect(after.currentConversation).toEqual(before.currentConversation);
+  expect(after.messages).toEqual(before.messages);
+  expect(after.messages[after.messages.length - 1]?.content).toBe('Draft B');
+  expect(after.isStreaming).toBe(true);
+  expect(after.streamingContent).toBe('B is speaking');
+  expect(after.error).toBeNull();
+  expect(after.isLoading).toBe(false);
+  finishB();
+  await sendB;
 });

@@ -145,7 +145,7 @@ interface ChatStore {
 
   // Actions - Navigation
   showList: (filterTagId?: string) => void;
-  openConversation: (id: string) => Promise<void>;
+  openConversation: (id: string, onlyIfCurrent?: boolean) => Promise<void>;
   openOrCreateForTag: (tagId: string) => Promise<void>;
   goBack: () => void;
 
@@ -204,12 +204,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     get().fetchConversations(filterTagId);
   },
 
-  openConversation: async (id: string) => {
+  openConversation: async (id: string, onlyIfCurrent = false) => {
+    if (onlyIfCurrent && get().currentConversation?.id !== id) return;
     set({ isLoading: true, error: null });
     try {
       const result = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', {
         conversationId: id,
       });
+      if (onlyIfCurrent && get().currentConversation?.id !== id) return;
 
       if (result) {
         set({
@@ -233,6 +235,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         get().showList();
       }
     } catch (e) {
+      if (onlyIfCurrent && get().currentConversation?.id !== id) return;
       set({ error: String(e), isLoading: false });
     }
   },
@@ -456,7 +459,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       // Refetch the conversation to get the properly saved messages
       // This ensures correct IDs and ordering from the database
-      await openConversation(currentConversation.id);
+      await openConversation(currentConversation.id, true);
       return 'sent';
     } catch (e) {
       const paused = e instanceof Error && 'code' in e && e.code === 'soul_paused';
@@ -472,12 +475,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
       }
       // Remove the temp user message on error
-      set((state) => ({
+      set((state) => state.currentConversation?.id === currentConversation.id ? {
         messages: state.messages.filter((m) => !m.id.startsWith('temp-')),
         error: String(e),
         isStreaming: false,
         streamingContent: '',
-      }));
+      } : {});
       return unsaved ? 'refused' : 'failed';
     }
   },
