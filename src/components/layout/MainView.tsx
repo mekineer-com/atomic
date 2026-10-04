@@ -575,7 +575,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
               openToolTab('approvals');
             }}
             className="p-1.5 rounded-md text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors shrink-0"
-            title="Review memU changes"
+            title="Approvals"
           >
             <ClipboardCheck className="w-4 h-4" strokeWidth={2} />
           </button>
