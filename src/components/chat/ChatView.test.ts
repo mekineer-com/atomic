@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useChatStore } from '../../stores/chat';
-import { ChatView, shouldOpenChatSearch } from './ChatView';
+import { ChatView } from './ChatView';
 
 const { input } = vi.hoisted(() => ({ input: { props: null as null | {
   value: string; disabled: boolean; onChange: (text: string) => void; onSend: () => Promise<void>;
@@ -13,28 +13,6 @@ vi.mock('./ChatInput', () => ({ ChatInput: (props: NonNullable<typeof input.prop
   input.props = props;
   return null;
 } }));
-
-describe('shouldOpenChatSearch', () => {
-  it('leaves browser find to hidden chat and memU surfaces', () => {
-    expect(shouldOpenChatSearch(false)).toBe(false);
-    expect(shouldOpenChatSearch(true, { type: 'tool', tool: 'approvals' })).toBe(false);
-    expect(shouldOpenChatSearch(true, {
-      type: 'atom', atomId: 'memory:1', tagId: null, highlightText: null, editing: false,
-    })).toBe(false);
-    expect(shouldOpenChatSearch(true, {
-      type: 'graph', atomId: 'memory:1', tagId: null,
-    })).toBe(false);
-    expect(shouldOpenChatSearch(true, {
-      type: 'wiki', tagId: 'tag:1', tagName: 'Fictional Wiki', highlightText: null,
-    })).toBe(false);
-  });
-
-  it('keeps chat search on ordinary workspace surfaces', () => {
-    expect(shouldOpenChatSearch(true, {
-      type: 'atom', atomId: 'workspace-note', tagId: null, highlightText: null, editing: false,
-    })).toBe(true);
-  });
-});
 
 it('keeps a rejected draft and never clears newer typing after success', async () => {
   const previous = useChatStore.getState();

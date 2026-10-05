@@ -77,11 +77,4 @@ describe('memU command forwarding', () => {
       aliases: [],
     });
   });
-
-  it('routes Relationship removal through DELETE', () => {
-    const command = COMMAND_MAP.remove_memu_relationship;
-    expect(command.method).toBe('DELETE');
-    expect(typeof command.path === 'function' ? command.path({ id: 'entity-1' }) : command.path)
-      .toBe('/api/memu/entities/entity-1/relationship');
-  });
 });

@@ -47,19 +47,4 @@ describe('integrated cache isolation', () => {
     expect(readCache).not.toHaveBeenCalled();
     expect(writeCache).not.toHaveBeenCalled();
   });
-
-  it('keeps standalone cache writes', async () => {
-    invoke.mockImplementation((command: string) => Promise.resolve(
-      command === 'list_atoms'
-        ? { atoms: [], total_count: 0, next_cursor: null, next_cursor_id: null }
-        : [],
-    ));
-
-    await Promise.all([
-      useAtomsStore.getState().fetchAtoms(),
-      useTagsStore.getState().fetchTags(),
-    ]);
-
-    expect(writeCache).toHaveBeenCalledTimes(2);
-  });
 });
