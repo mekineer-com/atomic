@@ -33,19 +33,12 @@ function makePlugin(app: App) {
 }
 
 describe("OnboardingModal", () => {
-  it("opens on Welcome step without throwing", () => {
-    const app = new App();
-    const plugin = makePlugin(app);
-    const modal = new OnboardingModal(app, plugin);
-    expect(() => modal.onOpen()).not.toThrow();
-    expect(modal.contentEl.querySelector("h2")?.textContent).toMatch(/Welcome/);
-  });
-
   it("transitions Welcome -> Connect when 'Get Started' is clicked", () => {
     const app = new App();
     const plugin = makePlugin(app);
     const modal = new OnboardingModal(app, plugin);
     modal.onOpen();
+    expect(modal.contentEl.querySelector("h2")?.textContent).toMatch(/Welcome/);
     const btn = Array.from(modal.contentEl.querySelectorAll("button")).find(
       (b) => b.textContent === "Get started"
     );

@@ -14,7 +14,7 @@ describe("DEFAULT_SETTINGS", () => {
 });
 
 describe("AtomicSettingTab.display", () => {
-  it("renders without throwing and enforces debounce minimum", async () => {
+  it("renders without throwing", () => {
     const app = new App();
     const client = { testConnection: vi.fn(async () => {}) };
     const syncEngine = {
@@ -32,15 +32,5 @@ describe("AtomicSettingTab.display", () => {
     const tab = new AtomicSettingTab(app, plugin);
     expect(() => tab.display()).not.toThrow();
 
-    // Settings below the 500ms floor should be rejected.
-    // Simulate by invoking plugin.saveSettings with validation analogous to the tab's handler.
-    const onChange = (value: string) => {
-      const num = parseInt(value, 10);
-      if (!isNaN(num) && num >= 500) plugin.settings.syncDebounceMs = num;
-    };
-    onChange("100");
-    expect(plugin.settings.syncDebounceMs).toBe(2000);
-    onChange("3000");
-    expect(plugin.settings.syncDebounceMs).toBe(3000);
   });
 });

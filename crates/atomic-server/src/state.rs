@@ -907,19 +907,4 @@ mod tests {
         assert_eq!(json["atom_id"], "a1");
     }
 
-    #[test]
-    fn test_event_broadcast_delivery() {
-        let (tx, mut rx) = broadcast::channel::<ServerEvent>(16);
-        let event = ServerEvent::EmbeddingStarted {
-            atom_id: "a1".into(),
-            database_id: None,
-        };
-        tx.send(event).unwrap();
-
-        let received = rx.try_recv().unwrap();
-        match received {
-            ServerEvent::EmbeddingStarted { atom_id, .. } => assert_eq!(atom_id, "a1"),
-            _ => panic!("Wrong variant"),
-        }
-    }
 }

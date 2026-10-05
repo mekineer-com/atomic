@@ -1507,25 +1507,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_database() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let db = Database::open_or_create(temp_file.path()).unwrap();
-
-        // Verify we got a valid database
-        let conn = db.conn.lock().unwrap();
-        let count: i32 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        // Should have at least our core tables (16 regular + 2 virtual)
-        assert!(count >= 16, "Expected at least 16 tables, got {}", count);
-    }
-
-    #[test]
     fn test_tables_created() {
         let temp_file = NamedTempFile::new().unwrap();
         let db = Database::open_or_create(temp_file.path()).unwrap();

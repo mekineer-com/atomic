@@ -22,17 +22,11 @@ beforeEach(() => {
 });
 
 describe('getOrCreateTag', () => {
-  it('creates a tag when not cached', async () => {
-    const cache = createTagCache();
-    const id = await getOrCreateTag('Work', null, cache);
-    expect(id).toMatch(/^root:Work:/);
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(invokeMock).toHaveBeenCalledWith('create_tag', { name: 'Work', parentId: null });
-  });
-
   it('reuses a cached tag id for the same (name, parent)', async () => {
     const cache = createTagCache();
     const a = await getOrCreateTag('Work', null, cache);
+    expect(a).toMatch(/^root:Work:/);
+    expect(invokeMock).toHaveBeenCalledWith('create_tag', { name: 'Work', parentId: null });
     const b = await getOrCreateTag('Work', null, cache);
     expect(a).toBe(b);
     expect(invokeMock).toHaveBeenCalledTimes(1);

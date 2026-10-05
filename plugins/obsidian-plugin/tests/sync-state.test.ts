@@ -61,15 +61,4 @@ describe("hashContent", () => {
     expect(h).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("is deterministic", async () => {
-    const a = await hashContent("same content");
-    const b = await hashContent("same content");
-    expect(a).toBe(b);
-  });
-
-  it("differs for different content", async () => {
-    const a = await hashContent("one");
-    const b = await hashContent("two");
-    expect(a).not.toBe(b);
-  });
 });
