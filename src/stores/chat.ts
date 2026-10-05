@@ -121,6 +121,7 @@ interface ChatStore {
   // Current conversation (when view === 'conversation')
   currentConversation: ConversationWithTags | null;
   messages: ChatMessageWithContext[];
+  lastSend: ChatMessageWithContext | null;
 
   // Conversations list
   conversations: ConversationWithTags[];
@@ -145,7 +146,7 @@ interface ChatStore {
 
   // Actions - Navigation
   showList: (filterTagId?: string) => void;
-  openConversation: (id: string, onlyIfCurrent?: boolean) => Promise<void>;
+  openConversation: (id: string, send?: ChatMessageWithContext) => Promise<void>;
   openOrCreateForTag: (tagId: string) => Promise<void>;
   goBack: () => void;
 
@@ -182,6 +183,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   view: 'list',
   currentConversation: null,
   messages: [],
+  lastSend: null,
   conversations: [],
   listFilterTagId: null,
   isLoading: false,
@@ -204,14 +206,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     get().fetchConversations(filterTagId);
   },
 
-  openConversation: async (id: string, onlyIfCurrent = false) => {
-    if (onlyIfCurrent && get().currentConversation?.id !== id) return;
+  openConversation: async (id: string, send?: ChatMessageWithContext) => {
+    const stale = () => send && (get().currentConversation?.id !== id || get().lastSend !== send);
+    if (stale()) return;
     set({ isLoading: true, error: null });
     try {
       const result = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', {
         conversationId: id,
       });
-      if (onlyIfCurrent && get().currentConversation?.id !== id) return;
+      if (stale()) return;
 
       if (result) {
         set({
@@ -235,7 +238,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         get().showList();
       }
     } catch (e) {
-      if (onlyIfCurrent && get().currentConversation?.id !== id) return;
+      if (stale()) return;
       set({ error: String(e), isLoading: false });
     }
   },
@@ -419,6 +422,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     set({
       messages: [...messages, userMessage],
+      lastSend: userMessage,
       isStreaming: true,
       streamingContent: '',
       streamingToolCalls: [],
@@ -459,7 +463,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       // Refetch the conversation to get the properly saved messages
       // This ensures correct IDs and ordering from the database
-      await openConversation(currentConversation.id, true);
+      await openConversation(currentConversation.id, userMessage);
       return 'sent';
     } catch (e) {
       const paused = e instanceof Error && 'code' in e && e.code === 'soul_paused';
@@ -471,11 +475,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (saved) {
           unsaved = !saved.messages.some(m => m.role === 'user' && m.content === content
             && !messages.some(previous => previous.id === m.id));
-          if (get().currentConversation?.id === currentConversation.id) set({ messages: saved.messages });
+          if (get().currentConversation?.id === currentConversation.id && get().lastSend === userMessage) set({ messages: saved.messages });
         }
       }
       // Remove the temp user message on error
-      set((state) => state.currentConversation?.id === currentConversation.id ? {
+      set((state) => state.currentConversation?.id === currentConversation.id && state.lastSend === userMessage ? {
         messages: state.messages.filter((m) => !m.id.startsWith('temp-')),
         error: String(e),
         isStreaming: false,
@@ -584,6 +588,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       view: 'list',
       currentConversation: null,
       messages: [],
+      lastSend: null,
       conversations: [],
       listFilterTagId: null,
       isLoading: false,

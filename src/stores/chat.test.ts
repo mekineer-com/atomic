@@ -43,9 +43,15 @@ it('restores input only when a successful history read proves it was not saved',
   expect(useChatStore.getState().messages).toEqual([earlier]);
   invoke.mockRejectedValue('History unavailable');
   expect(await useChatStore.getState().sendMessage('Draft')).toBe('failed');
+  invoke.mockImplementation((command: string) => command === 'send_chat_message'
+    ? Promise.reject('Send failed') : Promise.resolve(null));
+  expect(await useChatStore.getState().sendMessage('Draft')).toBe('failed');
 });
 
-it.each(['send-failure', 'refresh-success', 'refresh-failure'])('leaves B untouched when A finishes late: %s', async (mode) => {
+it.each([
+  ['send-failure', false], ['refresh-success', false], ['refresh-failure', false],
+  ['send-failure', true], ['refresh-success', true], ['refresh-failure', true],
+])('leaves a newer send untouched when A finishes late: %s, reentry=%s', async (mode, reentry) => {
   const conversationA = useChatStore.getState().currentConversation!;
   const conversationB = { ...conversationA, id: 'chat-b' };
   let readStarted!: () => void;
@@ -54,19 +60,26 @@ it.each(['send-failure', 'refresh-success', 'refresh-failure'])('leaves B untouc
   let failRead!: (error: Error) => void;
   const read = new Promise((resolve, reject) => { finishRead = resolve; failRead = reject; });
   let finishB!: () => void;
+  let readsA = 0, sendsA = 0;
   invoke.mockImplementation((command: string, args: { conversationId: string }) => {
     if (command === 'get_conversation') {
-      if (args.conversationId === conversationA.id) { readStarted(); return read; }
+      if (args.conversationId === conversationA.id && ++readsA === 1) { readStarted(); return read; }
+      if (args.conversationId === conversationA.id) return Promise.resolve({ ...conversationA, messages: [] });
       return Promise.resolve({ ...conversationB, messages: [] });
     }
-    if (args.conversationId === conversationA.id) {
+    if (args.conversationId === conversationA.id && ++sendsA === 1) {
       return mode === 'send-failure' ? Promise.reject(new Error('A failed')) : Promise.resolve({});
     }
     return new Promise<void>(resolve => { finishB = resolve; });
   });
   const sendA = useChatStore.getState().sendMessage('Draft A');
   await started;
+  if (reentry) useChatStore.getState().completeMessage({
+    id: 'old-answer', conversation_id: conversationA.id, role: 'assistant', content: 'Old answer',
+    created_at: '', message_index: 1, tool_calls: [], citations: [],
+  });
   await useChatStore.getState().openConversation(conversationB.id);
+  if (reentry) await useChatStore.getState().openConversation(conversationA.id);
   const sendB = useChatStore.getState().sendMessage('Draft B');
   useChatStore.getState().appendStreamContent('B is speaking');
   const before = useChatStore.getState();

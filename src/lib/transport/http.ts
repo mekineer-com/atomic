@@ -258,6 +258,7 @@ export class HttpTransport implements Transport {
     const resp = await fetch(url, fetchOpts);
 
     if (!resp.ok) {
+      if (resp.status === 404 && command === 'get_conversation') return null as T;
       if (resp.status === 401) {
         // Token is invalid or revoked — stop all activity and trigger logout
         this.authExpired = true;

@@ -4,6 +4,16 @@ import { HttpTransport } from './http';
 describe('HttpTransport cancellation', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('returns null only for a missing conversation read, without granting resend permission', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"error":"missing"}', { status: 404 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const transport = new HttpTransport({ baseUrl: 'http://localhost', authToken: 'test' });
+    await expect(transport.invoke('get_conversation', { conversationId: 'deleted-chat' })).resolves.toBeNull();
+    await expect(transport.invoke('send_chat_message', { conversationId: 'deleted-chat', content: 'Draft' })).rejects.toBe('missing');
+    fetchMock.mockImplementation(async () => new Response('{"error":"unavailable"}', { status: 503 }));
+    await expect(transport.invoke('get_conversation', { conversationId: 'deleted-chat' })).rejects.toBe('unavailable');
+  });
+
   it('passes the caller signal to fetch', async () => {
     vi.stubGlobal('fetch', vi.fn((_url, init: RequestInit) => new Promise((_resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
