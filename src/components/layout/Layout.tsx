@@ -57,13 +57,15 @@ export function Layout() {
       return;
     }
     const proposed = window.prompt('What is the new Soul\'s name?')?.trim() || '';
-    if (!proposed || !window.confirm(`Create ${proposed} as a new Soul?`)) return;
+    if (!proposed) return;
     if (souls.includes(proposed)) {
       window.alert(`${proposed} already exists. Select it from the list.`);
       return;
     }
+    const userName = window.prompt(`What should ${proposed} call you?`)?.trim() || '';
+    if (!userName || !window.confirm(`Create ${proposed} as a new Soul, calling you ${userName}?`)) return;
     try {
-      const soulId = await createOpenAlmaSoul(getTransport(), proposed);
+      const soulId = await createOpenAlmaSoul(getTransport(), proposed, userName);
       if (!identity) throw new Error('OpenAlma owner is missing');
       selectSoul(identity.userId, soulId);
       window.location.reload();
