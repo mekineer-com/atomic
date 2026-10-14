@@ -15,13 +15,10 @@ export function selectSoul(userId: string, soulId: string): void {
   localStorage.setItem(SOUL_KEY, soulId);
 }
 
-export async function createOpenAlmaSoul(transport: Transport, soulId: string, userName: string): Promise<string> {
-  userName = userName.trim();
-  if (!userName) throw new Error('Enter what this Soul should call you');
+export async function createOpenAlmaSoul(transport: Transport, soulId: string): Promise<string> {
   const created = await transport.invoke<{ soul_id: string }>('create_openalma_soul', {
     soul_id: soulId,
     use_existing: false,
-    user_name: userName,
   });
   const { souls } = await transport.invoke<{ souls: string[] }>('get_openalma_souls');
   if (!souls.includes(created.soul_id)) throw new Error('Created Soul was not returned by the server');
@@ -38,22 +35,20 @@ export async function ensureOpenAlmaIdentity(transport: Transport): Promise<{ us
   if (!userId && souls.length === 0) {
     const proposedUser = window.prompt('What is your name?')?.trim() || '';
     const proposedSoul = window.prompt('What is your first Soul\'s name?')?.trim() || '';
-    const userName = proposedUser && proposedSoul ? window.prompt(`What should ${proposedSoul} call you?`)?.trim() || '' : '';
-    if (!proposedUser || !proposedSoul || !userName || !window.confirm(`Create OpenAlma for ${proposedUser} with ${proposedSoul} calling you ${userName}?`)) {
+    if (!proposedUser || !proposedSoul || !window.confirm(`Create OpenAlma for ${proposedUser} with ${proposedSoul}?`)) {
       throw new Error('OpenAlma owner confirmation is required');
     }
     userId = (await transport.invoke<{ user_id: string }>('create_openalma_owner', { user_id: proposedUser })).user_id;
-    await createOpenAlmaSoul(transport, proposedSoul, userName);
+    await createOpenAlmaSoul(transport, proposedSoul);
     souls = (await transport.invoke<{ souls: string[] }>('get_openalma_souls')).souls;
   }
 
   if (souls.length === 0) {
     const proposed = window.prompt('What is your first Soul\'s name?')?.trim() || '';
-    const userName = proposed ? window.prompt(`What should ${proposed} call you?`)?.trim() || '' : '';
-    if (!proposed || !userName || !window.confirm(`Create ${proposed} as your first Soul, calling you ${userName}?`)) {
+    if (!proposed || !window.confirm(`Create ${proposed} as your first Soul?`)) {
       throw new Error('First Soul confirmation is required');
     }
-    await createOpenAlmaSoul(transport, proposed, userName);
+    await createOpenAlmaSoul(transport, proposed);
     souls = (await transport.invoke<{ souls: string[] }>('get_openalma_souls')).souls;
   }
 

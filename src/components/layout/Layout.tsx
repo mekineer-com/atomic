@@ -62,10 +62,9 @@ export function Layout() {
       window.alert(`${proposed} already exists. Select it from the list.`);
       return;
     }
-    const userName = window.prompt(`What should ${proposed} call you?`)?.trim() || '';
-    if (!userName || !window.confirm(`Create ${proposed} as a new Soul, calling you ${userName}?`)) return;
+    if (!window.confirm(`Create ${proposed} as a new Soul?`)) return;
     try {
-      const soulId = await createOpenAlmaSoul(getTransport(), proposed, userName);
+      const soulId = await createOpenAlmaSoul(getTransport(), proposed);
       if (!identity) throw new Error('OpenAlma owner is missing');
       selectSoul(identity.userId, soulId);
       window.location.reload();

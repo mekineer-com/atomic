@@ -14,11 +14,10 @@ describe('createOpenAlmaSoul', () => {
       .mockResolvedValueOnce({ soul_id: 'Fable', created: true })
       .mockResolvedValueOnce({ souls: ['Fable'] });
 
-    await expect(createOpenAlmaSoul({ invoke } as unknown as Transport, 'Fable', ' Rowan ')).resolves.toBe('Fable');
+    await expect(createOpenAlmaSoul({ invoke } as unknown as Transport, 'Fable')).resolves.toBe('Fable');
     expect(invoke).toHaveBeenNthCalledWith(1, 'create_openalma_soul', {
       soul_id: 'Fable',
       use_existing: false,
-      user_name: 'Rowan',
     });
     expect(invoke).toHaveBeenNthCalledWith(2, 'get_openalma_souls');
   });
@@ -28,19 +27,13 @@ describe('createOpenAlmaSoul', () => {
       .mockResolvedValueOnce({ soul_id: 'Fable', created: true })
       .mockResolvedValueOnce({ souls: ['Quill'] });
 
-    await expect(createOpenAlmaSoul({ invoke } as unknown as Transport, 'Fable', 'Rowan')).rejects.toThrow(
+    await expect(createOpenAlmaSoul({ invoke } as unknown as Transport, 'Fable')).rejects.toThrow(
       'Created Soul was not returned by the server',
     );
     expect(sessionStorage.getItem('openalma.soul')).toBeNull();
   });
 
-  it('refuses a blank human name before sending a creation request', async () => {
-    const invoke = vi.fn();
-    await expect(createOpenAlmaSoul({ invoke } as unknown as Transport, 'Fable', ' ')).rejects.toThrow('call you');
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it.each([null, 'AccountKey'])('asks for the first Soul human name with owner %s', async (owner) => {
+  it.each([null, 'AccountKey'])('creates the first Soul without a separate human name with owner %s', async (owner) => {
     let published = false;
     const invoke = vi.fn(async (command: string) => {
       if (command === 'get_memu_review_status') return { enabled: true };
@@ -52,20 +45,21 @@ describe('createOpenAlmaSoul', () => {
     });
     const prompt = vi.spyOn(window, 'prompt');
     if (!owner) prompt.mockReturnValueOnce('AccountKey');
-    prompt.mockReturnValueOnce('Fable').mockReturnValueOnce(' Rowan ');
+    prompt.mockReturnValueOnce('Fable');
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     await expect(ensureOpenAlmaIdentity({ invoke } as unknown as Transport)).resolves.toEqual({ userId: 'AccountKey', souls: ['Fable'] });
-    expect(invoke).toHaveBeenCalledWith('create_openalma_soul', { soul_id: 'Fable', use_existing: false, user_name: 'Rowan' });
+    expect(invoke).toHaveBeenCalledWith('create_openalma_soul', { soul_id: 'Fable', use_existing: false });
+    expect(prompt).toHaveBeenCalledTimes(owner ? 1 : 2);
     expect(sessionStorage.getItem('openalma.user')).toBe('AccountKey');
   });
 
-  it('does not publish an owner or Soul after cancelling the human-name prompt', async () => {
+  it('does not publish an owner or Soul after cancelling the Soul-name prompt', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'get_memu_review_status') return { enabled: true };
       if (command === 'get_openalma_owner') return { user_id: null };
       return { souls: [] };
     });
-    vi.spyOn(window, 'prompt').mockReturnValueOnce('AccountKey').mockReturnValueOnce('Fable').mockReturnValueOnce(null);
+    vi.spyOn(window, 'prompt').mockReturnValueOnce('AccountKey').mockReturnValueOnce(null);
     await expect(ensureOpenAlmaIdentity({ invoke } as unknown as Transport)).rejects.toThrow('confirmation');
     expect(invoke.mock.calls.some(([command]) => command.startsWith('create_'))).toBe(false);
     expect(sessionStorage.getItem('openalma.soul')).toBeNull();
