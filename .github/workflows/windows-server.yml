@@ -1,0 +1,94 @@
+name: OpenAlma Windows server
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Published source tag to build
+        required: true
+        default: v0.1.12
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      SOURCE_REF: ${{ inputs.source_ref }}
+      CARGO_BUILD_JOBS: 2
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - name: Validate source tag
+        shell: pwsh
+        run: |
+          if ($env:SOURCE_REF -notmatch '^v\d+\.\d+\.\d+$') { throw 'Use a numeric release tag' }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - name: Verify source identity
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:SOURCE_REF -eq 'v0.1.12' -and $sha -ne 'd3d6d2e99b6e907d10c97a670abffe5a58e8a42c') { throw 'Release source changed' }
+          New-Item -ItemType Directory package | Out-Null
+          "$env:SOURCE_REF`n$sha`nx86_64-pc-windows-msvc" | Set-Content package/SOURCE.txt -Encoding utf8
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: windows-static-server-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build server
+        run: cargo build --locked -p atomic-server --bin atomic-server --profile server --target x86_64-pc-windows-msvc
+      - name: Package and inspect
+        shell: pwsh
+        run: |
+          $directory = 'package/target/server'
+          New-Item -ItemType Directory $directory -Force | Out-Null
+          $exe = "$directory/atomic-server.exe"
+          Copy-Item target/x86_64-pc-windows-msvc/server/atomic-server.exe $exe
+          Copy-Item LICENSE package/LICENSE
+          @'
+          Atomic for OpenAlma on Windows x64
+
+          1. Install Atomic from OpenAlma's Services section, then stop Atomic.
+          2. Find the Apps root in OpenAlma Settings. Extract this ZIP into its
+             atomic folder, so target/server/atomic-server.exe is inside it.
+          3. Start memU Server and Atomic from OpenAlma, then click Open.
+
+          Node/npm and the launcher's installed UI dependencies are still required.
+          Rust and Visual Studio are not required on your computer.
+          This is the launcher server package, not a standalone Tauri desktop app.
+          SOURCE.txt identifies the source tag and commit; the health endpoint's
+          internal crate version is separate from the OpenAlma release version.
+          '@ | Set-Content package/INSTALL.txt -Encoding utf8
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $dumpbin = Get-ChildItem "$vs/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin not found' }
+          $imports = & $dumpbin.FullName /DEPENDENTS $exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $imports | Set-Content package/DEPENDENCIES.txt -Encoding utf8
+          if ($imports -match '(?i)(VCRUNTIME|MSVCP|sqlite|libssl|libcrypto).*\.dll') { throw 'Unexpected external runtime dependency' }
+          & $exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $archive = "Atomic-$env:SOURCE_REF-Windows-x64.zip"
+          Compress-Archive -Path package/* -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          "$hash  $archive" | Set-Content SHA256SUMS -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Atomic-Windows-server
+          path: |
+            Atomic-*-Windows-x64.zip
+            SHA256SUMS
