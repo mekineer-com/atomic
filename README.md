@@ -11,6 +11,8 @@
 
 This fork supplies the mind map for [OpenAlma](https://github.com/mekineer-com/OpenAlma). For OpenAlma questions and ideas, use [OpenAlma Discussions](https://github.com/mekineer-com/OpenAlma/discussions).
 
+**OpenAlma on Windows:** the [v0.1.12 Beta release](https://github.com/mekineer-com/atomic/releases/tag/v0.1.12) includes a prebuilt server ZIP for the existing launcher/browser UI. Follow its `INSTALL.txt`, including the Node 24 dependency-install workaround. No Rust or Visual Studio build is needed; this is not the standalone Tauri installer described below.
+
 A personal knowledge base that turns markdown notes into a semantically-connected, AI-augmented knowledge graph.
 
 Atomic stores knowledge as **atoms** — markdown notes that are automatically chunked, embedded, tagged, and linked by semantic similarity. Your atoms can be synthesized into wiki articles, explored on a spatial canvas, and queried through an agentic chat interface.
