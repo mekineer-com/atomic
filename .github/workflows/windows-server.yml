@@ -61,13 +61,21 @@ jobs:
           Atomic for OpenAlma on Windows x64
 
           1. Install Atomic from OpenAlma's Services section, then stop Atomic.
-          2. Find the Apps root in OpenAlma Settings. Extract this ZIP into its
+             On Node 24 this may stop on an unused better-sqlite3 build. Do not
+             install Visual Studio to work around that beta setup issue.
+          2. Open a terminal in the atomic folder under your OpenAlma Apps root:
+             npm.cmd ci --ignore-scripts --include=dev --include=optional
+             This prepares the UI without compiling the unused helper.
+          3. Find the Apps root in OpenAlma Settings. Extract this ZIP into its
              atomic folder, so target/server/atomic-server.exe is inside it.
-          3. Start memU Server and Atomic from OpenAlma, then click Open.
+          4. Start memU Server and Atomic from OpenAlma, then click Open.
+             Do not rerun Install/Retry afterward: v0.1.12 uses plain npm ci.
 
           Node/npm and the launcher's installed UI dependencies are still required.
           Rust and Visual Studio are not required on your computer.
           This is the launcher server package, not a standalone Tauri desktop app.
+          Old JavaScript import/reset utilities are not part of this UI setup;
+          those utilities still require their native SQLite helper.
           SOURCE.txt identifies the source tag and commit; the health endpoint's
           internal crate version is separate from the OpenAlma release version.
           '@ | Set-Content package/INSTALL.txt -Encoding utf8
