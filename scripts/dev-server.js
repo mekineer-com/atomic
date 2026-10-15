@@ -121,7 +121,7 @@ function startProcess(name, command, args, opts = {}) {
   proc.on('exit', (code) => {
     console.log(`\x1b[90m[${prefix}] exited (code ${code})\x1b[0m`);
     if (!stopping) {
-      cleanup();
+      cleanup(name);
       process.exitCode = code || 1;
     }
   });
@@ -129,7 +129,7 @@ function startProcess(name, command, args, opts = {}) {
   proc.on('error', (error) => {
     console.error(`\x1b[31m[${prefix}] failed to start:\x1b[0m ${error.message}`);
     process.exitCode = 1;
-    cleanup();
+    if (process.platform !== 'win32' || !proc.pid) cleanup(name);
   });
 
   proc.on('close', finishCleanup);
@@ -242,14 +242,14 @@ startProcess('web', process.execPath, [resolve(root, 'node_modules/vite/bin/vite
 });
 
 // Clean shutdown on Ctrl+C
-function cleanup() {
+function cleanup(failedProcess = '') {
   if (stopping) return;
   stopping = true;
-  // Windows children receive Ctrl+C in the launcher's shared private console.
-  // Node's Windows kill() forcibly terminates them instead of delivering it.
-  if (process.platform !== 'win32') {
+  // Windows Ctrl+C reaches both children. Only a dead API justifies killing
+  // its surviving Vite process; a web failure must not kill working API tasks.
+  if (process.platform !== 'win32' || failedProcess === 'api') {
     for (const child of children) {
-      if (child.exitCode === null && child.signalCode === null && !child.killed) {
+      if (child.pid && child.exitCode === null && child.signalCode === null && !child.killed) {
         child.kill('SIGTERM');
       }
     }
