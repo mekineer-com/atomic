@@ -260,7 +260,7 @@ pub async fn run_report_now(
     let core = db.0.clone();
     let id_owned = id.clone();
     let event_tx = state.event_tx.clone();
-    tokio::spawn(async move {
+    atomic_core::executor::spawn(async move {
         match core.run_report_now(&id_owned).await {
             Ok(outcome) => {
                 tracing::info!(

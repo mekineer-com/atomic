@@ -12,6 +12,7 @@ pub mod log_buffer;
 pub mod mcp;
 pub mod mcp_auth;
 pub mod routes;
+pub mod shutdown;
 pub mod state;
 pub mod ws;
 

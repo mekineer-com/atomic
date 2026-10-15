@@ -60,15 +60,22 @@ pub async fn ws_handler(
     // Subscribe to broadcast channel
     let mut rx = state.event_tx.subscribe();
     let manager = state.manager.clone();
+    let shutdown = req
+        .app_data::<web::Data<crate::shutdown::Shutdown>>()
+        .cloned()
+        .unwrap_or_else(|| web::Data::new(crate::shutdown::Shutdown::default()));
+    let socket_work = shutdown.websocket();
 
     // Spawn task to forward broadcast events to this WebSocket client
     actix_web::rt::spawn(async move {
+        let _socket_work = socket_work;
         let mut ownership = HashMap::<(String, String), bool>::new();
         let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_seen = tokio::time::Instant::now();
         loop {
             tokio::select! {
+            biased;
             broadcast = rx.recv() => match broadcast {
                 Ok(event) => {
                     if let Some(scope) = scope.as_ref() {
@@ -129,6 +136,7 @@ pub async fn ws_handler(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            _ = shutdown.streams_closed() => break,
             inbound = msg_stream.next() => match inbound {
                 Some(Ok(actix_ws::Message::Close(_))) | None => break,
                 Some(Ok(actix_ws::Message::Ping(bytes))) => {

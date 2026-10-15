@@ -14,13 +14,15 @@ use actix_web::{
     },
     middleware,
     web::{self, Bytes, Data},
-    HttpRequest, HttpResponse, Result, Scope,
+    HttpMessage, HttpRequest, HttpResponse, Result, Scope,
 };
+use atomic_core::executor::{WorkGuard, WorkTracker};
 use atomic_core::manager::DatabaseManager;
 use futures::{Stream, StreamExt};
 use rmcp::{
     model::{ClientJsonRpcMessage, ClientRequest, GetExtensions},
     serve_server,
+    service::{NotificationContext, RequestContext},
     transport::{
         common::http_header::{
             EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID, HEADER_SESSION_ID, JSON_MIME_TYPE,
@@ -28,9 +30,10 @@ use rmcp::{
         streamable_http_server::session::{local::LocalSessionManager, SessionManager},
         TransportAdapterIdentity,
     },
+    ErrorData, RoleServer, Service,
 };
 use std::{sync::Arc, time::Duration};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 const HEADER_X_ACCEL_BUFFERING: &str = "X-Accel-Buffering";
 const TEXT_MIME_TYPE: &str = "text/plain; charset=utf-8";
@@ -52,8 +55,23 @@ impl AtomicMcpTransport {
                 event_tx,
                 session_manager: Arc::new(LocalSessionManager::default()),
                 sse_keep_alive,
+                requests: WorkTracker::default(),
+                sessions: WorkTracker::default(),
+                idle_stop: watch::channel(false).0,
+                protocol_stop: watch::channel(false).0,
             }),
         }
+    }
+
+    pub fn close_idle_streams(&self) {
+        self.state.idle_stop.send_replace(true);
+    }
+
+    pub async fn shutdown(&self) {
+        // HTTP bodies may have disconnected while their MCP calls still run.
+        self.state.requests.wait_idle().await;
+        self.state.protocol_stop.send_replace(true);
+        self.state.sessions.wait_idle().await;
     }
 
     pub fn scope(
@@ -81,12 +99,52 @@ struct TransportState {
     event_tx: broadcast::Sender<ServerEvent>,
     session_manager: Arc<LocalSessionManager>,
     sse_keep_alive: Duration,
+    requests: WorkTracker,
+    sessions: WorkTracker,
+    idle_stop: watch::Sender<bool>,
+    protocol_stop: watch::Sender<bool>,
 }
 
 impl TransportState {
-    fn server(&self) -> AtomicMcpServer {
-        AtomicMcpServer::new(Arc::clone(&self.manager), self.event_tx.clone())
+    fn server(&self) -> DrainingMcpServer {
+        DrainingMcpServer(AtomicMcpServer::new(
+            Arc::clone(&self.manager),
+            self.event_tx.clone(),
+        ))
     }
+}
+
+// Keep admission accounting alive across rmcp's detached request dispatch,
+// even if a tool consumes/drops its RequestContext before finishing work.
+struct DrainingMcpServer(AtomicMcpServer);
+
+impl Service<RoleServer> for DrainingMcpServer {
+    async fn handle_request(
+        &self,
+        request: ClientRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ServerResult, ErrorData> {
+        let _work = context.extensions.get::<Arc<WorkGuard>>().cloned();
+        self.0.handle_request(request, context).await
+    }
+
+    async fn handle_notification(
+        &self,
+        notification: rmcp::model::ClientNotification,
+        context: NotificationContext<RoleServer>,
+    ) -> Result<(), ErrorData> {
+        self.0.handle_notification(notification, context).await
+    }
+
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        Service::get_info(&self.0)
+    }
+}
+
+async fn stopped(mut stop: watch::Receiver<bool>) {
+    stop.wait_for(|value| *value)
+        .await
+        .expect("MCP stop closed");
 }
 
 fn text_error(status: StatusCode, message: &'static str) -> HttpResponse {
@@ -221,6 +279,9 @@ async fn handle_get(req: HttpRequest, state: Data<TransportState>) -> Result<Htt
         .get(HEADER_LAST_EVENT_ID)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+    // rmcp's validated event IDs are <index> for the idle common channel,
+    // or <index>/<request-id> for a finite request response stream.
+    let resumed_request = last_event_id.as_deref().is_some_and(|id| id.contains('/'));
 
     let sse_stream: std::pin::Pin<Box<dyn Stream<Item = _> + Send>> =
         if let Some(last_event_id) = last_event_id {
@@ -256,12 +317,19 @@ async fn handle_get(req: HttpRequest, state: Data<TransportState>) -> Result<Htt
         Ok::<_, actix_web::Error>(Bytes::from(output))
     });
 
+    let idle_stop = state.idle_stop.subscribe();
     Ok(HttpResponse::Ok()
         .content_type(EVENT_STREAM_MIME_TYPE)
         .append_header((CACHE_CONTROL, "no-cache"))
         .append_header((HEADER_X_ACCEL_BUFFERING, "no"))
         .streaming(wrap_with_sse_keepalive(
-            formatted_stream,
+            formatted_stream.take_until(async move {
+                if resumed_request {
+                    std::future::pending::<()>().await;
+                } else {
+                    stopped(idle_stop).await;
+                }
+            }),
             state.sse_keep_alive,
         )))
 }
@@ -296,6 +364,28 @@ async fn handle_post(
     };
 
     attach_request_extensions(&req, &mut message);
+    if *state.protocol_stop.borrow() {
+        return Ok(HttpResponse::ServiceUnavailable().finish());
+    }
+    if let ClientJsonRpcMessage::Request(request) = &mut message {
+        if (req.app_data::<Data<crate::shutdown::Shutdown>>().is_some()
+            || *state.idle_stop.borrow())
+            && req
+                .extensions()
+                .get::<crate::shutdown::AdmittedRequest>()
+                .is_none()
+        {
+            return Ok(HttpResponse::ServiceUnavailable().finish());
+        }
+        // rmcp retains initialize's request until the client finishes its
+        // handshake. It is read-only; that idle lifetime is not admitted work.
+        if !matches!(request.request, ClientRequest::InitializeRequest(_)) {
+            request
+                .request
+                .extensions_mut()
+                .insert(Arc::new(state.requests.start()));
+        }
+    }
 
     if let Some(session_id) = request_session_id(&req) {
         let has_session = state
@@ -377,22 +467,36 @@ async fn handle_post(
         .await
         .map_err(|e| InternalError::new(e, StatusCode::INTERNAL_SERVER_ERROR))?;
 
+    let session_work = state.sessions.start();
+    let protocol_stop = state.protocol_stop.subscribe();
     tokio::spawn({
         let session_manager = Arc::clone(&state.session_manager);
         let session_id = Arc::clone(&session_id);
         let service_instance = state.server();
         async move {
-            let service = serve_server::<AtomicMcpServer, _, _, TransportAdapterIdentity>(
-                service_instance,
-                transport,
-            )
-            .await;
+            let _session_work = session_work;
+            let service = tokio::select! {
+                result = serve_server::<DrainingMcpServer, _, _, TransportAdapterIdentity>(
+                    service_instance, transport,
+                ) => Some(result),
+                _ = stopped(protocol_stop.clone()) => None,
+            };
 
             match service {
-                Ok(service) => {
-                    let _ = service.waiting().await;
+                Some(Ok(service)) => {
+                    let cancel = service.cancellation_token();
+                    let waiting = service.waiting();
+                    tokio::pin!(waiting);
+                    tokio::select! {
+                        _ = &mut waiting => {},
+                        _ = stopped(protocol_stop) => {
+                            cancel.cancel();
+                            let _ = waiting.await;
+                        }
+                    }
                 }
-                Err(e) => tracing::error!("Failed to create MCP service: {e}"),
+                Some(Err(e)) => tracing::error!("Failed to create MCP service: {e}"),
+                None => {}
             }
 
             let _ = session_manager
@@ -547,7 +651,7 @@ mod tests {
         }};
     }
 
-    fn assert_content_type(resp: &actix_web::dev::ServiceResponse, expected: &str) {
+    fn assert_content_type<B>(resp: &actix_web::dev::ServiceResponse<B>, expected: &str) {
         let content_type = resp
             .headers()
             .get(header::CONTENT_TYPE)
@@ -641,6 +745,191 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_content_type(&resp, "text/plain");
+    }
+
+    #[actix_web::test]
+    async fn shutdown_closes_idle_handshake_without_waiting_for_client() {
+        let (transport, _temp) = test_transport();
+        let app = actix_test::init_service(
+            App::new().service(web::scope("/mcp").service(transport.clone().scope())),
+        )
+        .await;
+        let _session_id = initialize_session!(app);
+        transport.close_idle_streams();
+        tokio::time::timeout(Duration::from_secs(1), transport.shutdown())
+            .await
+            .unwrap();
+        assert!(transport
+            .state
+            .session_manager
+            .sessions
+            .read()
+            .await
+            .is_empty());
+    }
+
+    #[actix_web::test]
+    async fn shutdown_waits_for_queued_request_after_http_disconnect() {
+        let fetched = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let fetched_handler = fetched.clone();
+        let release_handler = release.clone();
+        let source = actix_web::HttpServer::new(move || {
+            let fetched = fetched_handler.clone();
+            let release = release_handler.clone();
+            App::new().route(
+                "/",
+                web::get().to(move || {
+                    let fetched = fetched.clone();
+                    let release = release.clone();
+                    async move {
+                        fetched.notify_one();
+                        release.notified().await;
+                        let paragraphs = "<p>This fictional field report records observations from a synthetic greenhouse. The sample plants received equal amounts of water, light, and nutrients throughout the trial. These invented observations exist only to exercise article ingestion and durable storage during shutdown.</p>".repeat(8);
+                        HttpResponse::Ok().content_type("text/html").body(format!(
+                            "<html><head><title>Fictional field report</title></head><body><article><h1>Fictional field report</h1>{paragraphs}</article></body></html>"
+                        ))
+                    }
+                }),
+            )
+        })
+        .workers(1)
+        .disable_signals()
+        .bind(("127.0.0.1", 0))
+        .unwrap();
+        let source_url = format!("http://{}/", source.addrs()[0]);
+        let source = source.run();
+        let source_handle = source.handle();
+        actix_web::rt::spawn(source);
+
+        let (transport, _temp) = test_transport();
+        let shutdown = Data::new(crate::shutdown::Shutdown::default());
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(shutdown.clone())
+                .wrap(middleware::from_fn(crate::shutdown::admission))
+                .service(web::scope("/mcp").service(transport.clone().scope())),
+        )
+        .await;
+        let session_id = initialize_session!(app);
+        send_initialized!(app, session_id);
+        let req = actix_test::TestRequest::post()
+            .uri("/mcp")
+            .insert_header((
+                header::ACCEPT,
+                format!("{JSON_MIME_TYPE}, {EVENT_STREAM_MIME_TYPE}"),
+            ))
+            .insert_header((header::CONTENT_TYPE, JSON_MIME_TYPE))
+            .insert_header((HEADER_SESSION_ID, session_id.clone()))
+            .set_payload(
+                json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": {"name": "ingest_url", "arguments": {"url": source_url.clone()}}
+                })
+                .to_string(),
+            )
+            .to_request();
+        drop(actix_test::call_service(&app, req).await);
+        tokio::time::timeout(Duration::from_secs(2), fetched.notified())
+            .await
+            .unwrap();
+        // The first request-wise channel is 0. Prime its resumable cursor
+        // through rmcp's own disconnect API while the mutation is held.
+        transport
+            .state
+            .session_manager
+            .sessions
+            .read()
+            .await
+            .get(session_id.as_str())
+            .unwrap()
+            .close_sse_stream(0, Some(Duration::from_millis(1)))
+            .await
+            .unwrap();
+        let resumed = actix_test::TestRequest::get()
+            .uri("/mcp")
+            .insert_header((header::ACCEPT, EVENT_STREAM_MIME_TYPE))
+            .insert_header((HEADER_SESSION_ID, session_id.clone()))
+            .insert_header((HEADER_LAST_EVENT_ID, "0/0"))
+            .to_request();
+        let resumed = actix_test::call_service(&app, resumed).await;
+        assert_eq!(resumed.status(), StatusCode::OK);
+        let resumed_body = to_bytes(resumed.into_body());
+        tokio::pin!(resumed_body);
+        shutdown.begin();
+        transport.close_idle_streams();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut resumed_body)
+                .await
+                .is_err()
+        );
+        let refused = actix_test::TestRequest::post()
+            .uri("/mcp")
+            .insert_header((
+                header::ACCEPT,
+                format!("{JSON_MIME_TYPE}, {EVENT_STREAM_MIME_TYPE}"),
+            ))
+            .insert_header((header::CONTENT_TYPE, JSON_MIME_TYPE))
+            .insert_header((HEADER_SESSION_ID, session_id.clone()))
+            .set_payload(tools_list_request(3).to_string())
+            .to_request();
+        assert_eq!(
+            actix_test::call_service(&app, refused).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), transport.shutdown())
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        let terminal = tokio::time::timeout(Duration::from_secs(2), &mut resumed_body)
+            .await
+            .unwrap()
+            .unwrap();
+        let terminal = String::from_utf8(terminal.to_vec()).unwrap();
+        assert!(
+            terminal.contains("\"result\""),
+            "missing terminal result: {terminal}"
+        );
+        assert!(terminal.contains("\"id\":2"), "wrong request: {terminal}");
+        shutdown.wait_idle().await;
+        tokio::time::timeout(Duration::from_secs(1), transport.shutdown())
+            .await
+            .unwrap();
+        let core = transport.state.manager.active_core().await.unwrap();
+        assert!(core
+            .get_atom_by_source_url(&source_url)
+            .await
+            .unwrap()
+            .is_some());
+        atomic_core::executor::wait_idle().await;
+        source_handle.stop(true).await;
+    }
+
+    #[actix_web::test]
+    async fn shutdown_closes_standalone_sse_without_waiting_for_keepalive() {
+        let (transport, _temp) = test_transport();
+        let app = actix_test::init_service(
+            App::new().service(web::scope("/mcp").service(transport.clone().scope())),
+        )
+        .await;
+        let session_id = initialize_session!(app);
+        send_initialized!(app, session_id);
+        let req = actix_test::TestRequest::get()
+            .uri("/mcp")
+            .insert_header((header::ACCEPT, EVENT_STREAM_MIME_TYPE))
+            .insert_header((HEADER_SESSION_ID, session_id))
+            .to_request();
+        let response = actix_test::call_service(&app, req).await;
+        transport.close_idle_streams();
+        tokio::time::timeout(Duration::from_secs(1), to_bytes(response.into_body()))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), transport.shutdown())
+            .await
+            .unwrap();
     }
 
     #[actix_web::test]

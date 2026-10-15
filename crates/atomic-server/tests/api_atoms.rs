@@ -1607,6 +1607,64 @@ async fn test_openapi_spec_is_valid() {
 }
 
 #[actix_web::test]
+async fn test_shutdown_websocket_keeps_final_events_without_blocking_http_drain() {
+    let ctx = TestCtx::new().await;
+    let shutdown = web::Data::new(atomic_server::shutdown::Shutdown::default());
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(ctx.state.clone())
+            .app_data(shutdown.clone())
+            .wrap(actix_web::middleware::from_fn(atomic_server::shutdown::admission))
+            .route("/ws", web::get().to(
+                |req: HttpRequest,
+                 state: web::Data<atomic_server::state::AppState>,
+                 query: web::Query<atomic_server::ws::WsQuery>| async move {
+                    // An idle client whose input remains open until shutdown.
+                    let input: std::pin::Pin<Box<dyn futures::Stream<
+                        Item = Result<web::Bytes, actix_web::error::PayloadError>,
+                    >>> = Box::pin(futures::stream::pending());
+                    let mut input = actix_web::dev::Payload::from(input);
+                    let payload = <web::Payload as actix_web::FromRequest>::from_request(
+                        &req, &mut input,
+                    ).await?;
+                    atomic_server::ws::ws_handler(req, payload, state, query).await
+                },
+            )),
+    ).await;
+    let req = actix_test::TestRequest::get()
+        .uri(&format!("/ws?token={}", ctx.token))
+        .insert_header(("connection", "upgrade"))
+        .insert_header(("upgrade", "websocket"))
+        .insert_header(("sec-websocket-version", "13"))
+        .insert_header(("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+    assert_eq!(response.status(), actix_web::http::StatusCode::SWITCHING_PROTOCOLS);
+    shutdown.begin();
+    tokio::time::timeout(Duration::from_millis(100), shutdown.wait_idle())
+        .await.unwrap();
+    ctx.state.event_tx.send(atomic_server::state::ServerEvent::EmbeddingComplete {
+        atom_id: "fictional-final-atom".into(),
+        database_id: None,
+    }).unwrap();
+    let close_streams = shutdown.close_streams();
+    tokio::pin!(close_streams);
+    // Let the actor enqueue completion and Close while the body is unpolled.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut close_streams)
+            .await.is_err(),
+        "WS drain ended before response body EOF"
+    );
+    let ((), body) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(&mut close_streams, actix_web::body::to_bytes(response.into_body()))
+    }).await.unwrap();
+    let body = body.unwrap();
+    let frames = String::from_utf8_lossy(&body);
+    assert!(frames.contains("EmbeddingComplete"), "missing completion: {frames}");
+    assert!(frames.contains("fictional-final-atom"));
+}
+
+#[actix_web::test]
 async fn test_database_markdown_export_job_downloads_zip() {
     let ctx = TestCtx::new().await;
     let app = actix_test::init_service(test_app(&ctx)).await;
@@ -1657,4 +1715,13 @@ async fn test_database_markdown_export_job_downloads_zip() {
     assert_eq!(resp.status(), 200);
     let body = actix_test::read_body(resp).await;
     assert!(body.starts_with(b"PK"));
+
+    // Shutdown waits for the writer, not its 24-hour artifact retention timer.
+    atomic_core::executor::wait_idle().await;
+    let job_dir = ctx._temp.path().join("exports").join(&job_id);
+    assert!(job_dir.join("markdown.zip").exists());
+    assert!(!job_dir.join("markdown.zip.part").exists());
+    assert!(!job_dir.join("snapshot.db").exists());
+    ctx.state.export_jobs.cleanup_finished();
+    assert!(!job_dir.exists());
 }

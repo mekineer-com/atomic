@@ -21,7 +21,7 @@
  *
  * All other flags are forwarded to atomic-server. By default this helper passes
  * --dangerously-skip-setup-token for local development.
- * Both processes are killed together on Ctrl+C.
+ * Ctrl+C waits for both processes to finish before stopping managed Docker.
  */
 
 import { spawn, spawnSync, execSync } from 'node:child_process';
@@ -131,6 +131,8 @@ function startProcess(name, command, args, opts = {}) {
     process.exitCode = 1;
     cleanup();
   });
+
+  proc.on('close', finishCleanup);
 
   children.push(proc);
   return proc;
@@ -243,13 +245,22 @@ startProcess('web', process.execPath, [resolve(root, 'node_modules/vite/bin/vite
 function cleanup() {
   if (stopping) return;
   stopping = true;
-  for (const child of children) {
-    if (!child.killed) {
-      child.kill('SIGTERM');
+  // Windows children receive Ctrl+C in the launcher's shared private console.
+  // Node's Windows kill() forcibly terminates them instead of delivering it.
+  if (process.platform !== 'win32') {
+    for (const child of children) {
+      if (child.exitCode === null && child.signalCode === null && !child.killed) {
+        child.kill('SIGTERM');
+      }
     }
   }
+  finishCleanup();
+}
 
+function finishCleanup() {
+  if (!stopping || children.some((child) => child.exitCode === null && child.signalCode === null && child.pid)) return;
   if (dockerStarted) {
+    dockerStarted = false;
     console.log('\x1b[35m[postgres]\x1b[0m Stopping Docker containers...');
     try {
       execSync(`docker compose -f ${resolve(root, 'docker-compose.dev.yml')} stop`, {

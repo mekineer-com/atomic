@@ -15,6 +15,7 @@ use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use actix_web::web;
 use actix_web::Error;
 use actix_web::HttpResponse;
+use actix_web::HttpMessage;
 use futures::future::{ok, LocalBoxFuture, Ready};
 use std::rc::Rc;
 use std::task::{Context, Poll};
@@ -129,11 +130,21 @@ where
             };
 
             // Fire-and-forget last_used_at update
-            let token_id = token_info.id.clone();
-            let core_clone = core.clone();
-            tokio::spawn(async move {
-                let _ = core_clone.update_token_last_used(&token_id).await;
-            });
+            // Drain-only protocol replies must not introduce fresh DB writers.
+            if req
+                .app_data::<web::Data<crate::shutdown::Shutdown>>()
+                .is_none()
+                || req
+                    .extensions()
+                    .get::<crate::shutdown::AdmittedRequest>()
+                    .is_some()
+            {
+                let token_id = token_info.id.clone();
+                let core_clone = core.clone();
+                atomic_core::executor::spawn(async move {
+                    let _ = core_clone.update_token_last_used(&token_id).await;
+                });
+            }
 
             if state.memu_session.is_some() {
                 return Ok(req

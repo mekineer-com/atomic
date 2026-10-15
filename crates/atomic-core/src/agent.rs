@@ -953,7 +953,7 @@ fn enqueue_agent_pipeline_in_background(
     on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static>,
 ) {
     let failure_callback = Arc::clone(&on_embedding_event);
-    tokio::spawn(async move {
+    crate::executor::spawn(async move {
         let result = enqueue_and_process_agent_pipeline(
             &storage,
             &atom_id,
@@ -1409,7 +1409,7 @@ async fn run_agent_loop(
                 let conversation_id = ctx.conversation_id.clone();
                 let model = model.clone();
                 let messages = call_messages.clone();
-                tokio::spawn(async move {
+                crate::executor::spawn(async move {
                     forward_atomic_prompt_log(&config, &conversation_id, &model, &messages).await;
                 });
             }

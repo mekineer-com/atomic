@@ -12,6 +12,7 @@ use atomic_server::{
     export_jobs::ExportJobManager,
     log_buffer::LogBuffer,
     mcp, mcp_auth, routes,
+    shutdown::{self, Shutdown},
     state::{AppState, MemuSessionConfig, ServerEvent, SetupClaimLimiter, SetupToken},
     ws, Scalar, Servable,
 };
@@ -223,6 +224,15 @@ async fn run_server(
     log_buffer: LogBuffer,
 ) -> std::io::Result<()> {
     let manager = Arc::new(manager);
+    let shutdown = web::Data::new(Shutdown::default());
+    let signal_shutdown = shutdown.clone();
+    let stop_signal = tokio::spawn(async move {
+        let graceful = wait_stop_signal().await?;
+        if graceful {
+            signal_shutdown.begin();
+        }
+        Ok::<_, std::io::Error>(graceful)
+    });
 
     // Get active core for startup tasks
     let core = manager
@@ -442,7 +452,7 @@ async fn run_server(
     // worker.
     {
         let warm_manager = Arc::clone(&manager);
-        tokio::spawn(async move {
+        atomic_core::executor::spawn(async move {
             if integrated_mode {
                 return;
             }
@@ -487,19 +497,26 @@ async fn run_server(
     {
         let poll_manager = Arc::clone(&manager);
         let poll_tx = event_tx.clone();
-        tokio::spawn(async move {
+        let shutdown = shutdown.clone();
+        atomic_core::executor::spawn(async move {
             if integrated_mode {
                 return;
             }
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             interval.tick().await; // first tick fires immediately — skip it
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.stopped() => break,
+                    _ = interval.tick() => {}
+                }
+                let Some(_tick) = shutdown.admit() else { break };
                 let databases = match poll_manager.list_databases().await {
                     Ok((dbs, _)) => dbs,
                     Err(_) => continue,
                 };
                 for db_info in &databases {
+                    let Some(_poll) = shutdown.admit() else { break };
                     let db_core = match poll_manager.get_core(&db_info.id).await {
                         Ok(c) => c,
                         Err(_) => continue,
@@ -531,7 +548,8 @@ async fn run_server(
     {
         let task_manager = Arc::clone(&manager);
         let task_tx = event_tx.clone();
-        tokio::spawn(async move {
+        let shutdown = shutdown.clone();
+        atomic_core::executor::spawn(async move {
             if integrated_mode {
                 return;
             }
@@ -548,7 +566,12 @@ async fn run_server(
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.tick().await;
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.stopped() => break,
+                    _ = interval.tick() => {}
+                }
+                let Some(_tick) = shutdown.admit() else { break };
                 let databases = match task_manager.list_databases().await {
                     Ok((dbs, _)) => dbs,
                     Err(_) => continue,
@@ -559,6 +582,7 @@ async fn run_server(
                         Err(_) => continue,
                     };
                     for task in registry.tasks() {
+                        let Some(work) = shutdown.admit() else { break };
                         let Some(guard) = registry.try_lock(task.id(), &db_info.id) else {
                             continue;
                         };
@@ -567,7 +591,8 @@ async fn run_server(
                         let tx = task_tx.clone();
                         let embedding_tx = task_tx.clone();
                         let db_id = db_info.id.clone();
-                        tokio::spawn(async move {
+                        atomic_core::executor::spawn(async move {
+                            let _work = work;
                             let ctx = atomic_core::scheduler::TaskContext {
                                 event_cb: event_bridge::task_event_callback(tx),
                                 embedding_event_cb: Arc::new(
@@ -599,14 +624,20 @@ async fn run_server(
     {
         let reports_manager = Arc::clone(&manager);
         let reports_tx = event_tx.clone();
-        tokio::spawn(async move {
+        let shutdown = shutdown.clone();
+        atomic_core::executor::spawn(async move {
             if integrated_mode {
                 return;
             }
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             interval.tick().await;
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    biased;
+                    _ = shutdown.stopped() => break,
+                    _ = interval.tick() => {}
+                }
+                let Some(_tick) = shutdown.admit() else { break };
                 let databases = match reports_manager.list_databases().await {
                     Ok((dbs, _)) => dbs,
                     Err(_) => continue,
@@ -628,9 +659,11 @@ async fn run_server(
                         if !atomic_core::reports::schedule::is_due(&report, now) {
                             continue;
                         }
+                        let Some(work) = shutdown.admit() else { break };
                         let core_clone = core.clone();
                         let run_tx = reports_tx.clone();
-                        tokio::spawn(async move {
+                        atomic_core::executor::spawn(async move {
+                            let _work = work;
                             match atomic_core::reports::run_report(
                                 &core_clone,
                                 &report,
@@ -694,13 +727,18 @@ async fn run_server(
     let bind_owned = bind.to_string();
     let shutdown_manager = Arc::clone(&manager);
     let cors_public_url = public_url.clone();
+    let server_shutdown = shutdown.clone();
+    let shutdown_exports = app_state.export_jobs.clone();
+    let shutdown_mcp = mcp_transport.clone();
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let cors = build_cors(cors_public_url.as_deref());
 
         App::new()
             .wrap(cors)
             .wrap(middleware::Compress::default())
+            .wrap(middleware::from_fn(shutdown::admission))
+            .app_data(server_shutdown.clone())
             .app_data(app_state.clone())
             // Public routes (no auth)
             .route("/health", web::get().to(health))
@@ -768,16 +806,59 @@ async fn run_server(
             )
     })
     .workers(4)
+    .disable_signals()
+    // Only idle connections remain when stop(true) is called below.
     .shutdown_timeout(2)
     .bind((bind_owned.as_str(), port))?
-    .run()
-    .await?;
-
-    // Graceful shutdown: update query planner statistics
-    tracing::info!("shutting down — running PRAGMA optimize...");
-    shutdown_manager.optimize_all();
+    .run();
+    let handle = server.handle();
+    let stop = async move {
+        if !stop_signal.await.map_err(std::io::Error::other)?? {
+            // Preserve explicit POSIX SIGQUIT's existing forced behavior.
+            handle.stop(false).await;
+            return Ok::<_, std::io::Error>(());
+        }
+        tracing::info!("stopping admission; waiting for admitted work");
+        shutdown.begin();
+        shutdown_mcp.close_idle_streams();
+        shutdown.wait_idle().await;
+        shutdown_mcp.shutdown().await;
+        atomic_core::executor::wait_idle().await;
+        shutdown.close_streams().await;
+        shutdown_exports.cleanup_finished();
+        tracing::info!("work finished; running PRAGMA optimize");
+        shutdown_manager.optimize_all();
+        handle.stop(true).await;
+        Ok(())
+    };
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result?,
+        result = stop => {
+            result?;
+            server.await?;
+        }
+    }
 
     Ok(())
+}
+
+async fn wait_stop_signal() -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut quit = signal(SignalKind::quit())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.map(|()| true),
+            _ = terminate.recv() => Ok(true),
+            _ = quit.recv() => Ok(false),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.map(|()| true)
+    }
 }
 
 async fn backfill_setup_claimed_at(

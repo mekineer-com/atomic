@@ -170,7 +170,7 @@ impl ExportJobManager {
         }
 
         let jobs = self.clone();
-        tokio::spawn(async move {
+        atomic_core::executor::spawn(async move {
             jobs.run_markdown_export(job, manager).await;
         });
 
@@ -342,6 +342,14 @@ impl ExportJobManager {
             export_result.atom_count,
             export_result.bytes_written,
         ))
+    }
+
+    /// Called only after export workers finish; do not wait for retention timers.
+    pub fn cleanup_finished(&self) {
+        let mut jobs = self.jobs.lock().expect("export jobs poisoned");
+        for (_, job) in jobs.drain() {
+            job.remove_artifacts();
+        }
     }
 
     fn schedule_cleanup(&self, job_id: String, delay: std::time::Duration) {

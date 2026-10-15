@@ -162,7 +162,7 @@ where
             // Fire-and-forget last_used_at update
             let token_id = token_info.id.clone();
             let core_clone = core.clone();
-            tokio::spawn(async move {
+            atomic_core::executor::spawn(async move {
                 let _ = core_clone.update_token_last_used(&token_id).await;
             });
 
