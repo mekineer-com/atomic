@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Published source tag to build
+        description: Numeric release tag or full source commit SHA to build
         required: true
         default: v0.1.12
 
@@ -20,10 +20,10 @@ jobs:
       CARGO_BUILD_JOBS: 2
       RUSTFLAGS: -C target-feature=+crt-static
     steps:
-      - name: Validate source tag
+      - name: Validate source reference
         shell: pwsh
         run: |
-          if ($env:SOURCE_REF -notmatch '^v\d+\.\d+\.\d+$') { throw 'Use a numeric release tag' }
+          if ($env:SOURCE_REF -cnotmatch '^(v\d+\.\d+\.\d+|[0-9a-f]{40})$') { throw 'Use a numeric release tag or full lowercase commit SHA' }
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref }}
@@ -32,6 +32,7 @@ jobs:
         run: |
           $sha = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:SOURCE_REF -cmatch '^[0-9a-f]{40}$' -and $sha -cne $env:SOURCE_REF) { throw 'Source commit changed' }
           if ($env:SOURCE_REF -eq 'v0.1.12' -and $sha -ne 'd3d6d2e99b6e907d10c97a670abffe5a58e8a42c') { throw 'Release source changed' }
           New-Item -ItemType Directory package | Out-Null
           "$env:SOURCE_REF`n$sha`nx86_64-pc-windows-msvc" | Set-Content package/SOURCE.txt -Encoding utf8
@@ -79,6 +80,14 @@ jobs:
           SOURCE.txt identifies the source tag and commit; the health endpoint's
           internal crate version is separate from the OpenAlma release version.
           '@ | Set-Content package/INSTALL.txt -Encoding utf8
+          if ($env:SOURCE_REF -cmatch '^[0-9a-f]{40}$') {
+            @'
+          Commit-qualified verification artifact, not a published release package.
+          Use only an explicitly selected manual binary and disposable test data.
+          Do not feed this SHA-qualified SOURCE.txt to OpenAlma's release installer.
+          SOURCE.txt retains the exact source commit and target for verification.
+          '@ | Set-Content package/INSTALL.txt -Encoding utf8
+          }
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
