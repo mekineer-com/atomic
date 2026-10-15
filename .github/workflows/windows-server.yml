@@ -61,16 +61,18 @@ jobs:
           @'
           Atomic for OpenAlma on Windows x64
 
-          1. Install Atomic from OpenAlma's Services section, then stop Atomic.
-             On Node 24 this may stop on an unused better-sqlite3 build. Do not
-             install Visual Studio to work around that beta setup issue.
-          2. Open a terminal in the atomic folder under your OpenAlma Apps root:
+          Matching OpenAlma launchers download this server and prepare the UI
+          automatically through Atomic's Install/Update action in Services.
+
+          Manual recovery only:
+          1. Stop Atomic. Verify SOURCE.txt's commit matches git rev-parse HEAD
+             in the atomic folder under your OpenAlma Apps root.
+          2. If UI dependencies need preparation, run there:
              npm.cmd ci --ignore-scripts --include=dev --include=optional
-             This prepares the UI without compiling the unused helper.
+             This skips the unused native SQLite helper.
           3. Find the Apps root in OpenAlma Settings. Extract this ZIP into its
              atomic folder, so target/server/atomic-server.exe is inside it.
           4. Start memU Server and Atomic from OpenAlma, then click Open.
-             Do not rerun Install/Retry afterward: v0.1.12 uses plain npm ci.
 
           Node/npm and the launcher's installed UI dependencies are still required.
           Rust and Visual Studio are not required on your computer.
