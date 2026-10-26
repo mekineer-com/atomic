@@ -2023,7 +2023,8 @@ mod tests {
         let atom = core
             .create_atom(
                 CreateAtomRequest {
-                    content: "A fictional observatory tracks bright comets.".to_string(),
+                    content: "# Observatory\n\nA fictional observatory tracks bright comets."
+                        .to_string(),
                     ..Default::default()
                 },
                 |_| {},
