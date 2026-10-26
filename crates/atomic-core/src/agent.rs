@@ -22,7 +22,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -1322,48 +1322,357 @@ fn chat_messages_to_provider_messages(
         .collect()
 }
 
+/// Owned tool state shared by API chat and the scoped Claude bridge.
+/// Callers serialize execution for the whole call, including citation allocation.
+pub struct ChatToolSession {
+    storage: StorageBackend,
+    conversation_id: String,
+    scope_tag_ids: Vec<String>,
+    external_settings: Option<HashMap<String, String>>,
+    memu_tool_config: Option<MemuToolConfig>,
+    page_context: Option<PageContext>,
+    canvas_cache: Option<crate::CanvasCache>,
+    on_event: ChatEventCallback,
+    tools: Vec<ToolDefinition>,
+    citations: Vec<(String, Option<i32>, String)>,
+    tool_calls_record: Vec<ChatToolCall>,
+}
+
+impl ChatToolSession {
+    pub fn new(
+        storage: StorageBackend,
+        conversation_id: String,
+        scope_tag_ids: Vec<String>,
+        external_settings: Option<HashMap<String, String>>,
+        memu_tool_config: Option<MemuToolConfig>,
+        page_context: Option<PageContext>,
+        canvas_context: Option<CanvasContext>,
+        canvas_cache: Option<crate::CanvasCache>,
+        on_event: Arc<dyn Fn(ChatEvent) + Send + Sync + 'static>,
+    ) -> Self {
+        let mut tools = get_tools(memu_tool_config.is_some());
+        if page_context.is_some() {
+            tools.extend(get_page_context_tools());
+        }
+        if canvas_context.is_some() {
+            tools.extend(get_canvas_tools());
+        }
+        Self {
+            storage,
+            conversation_id,
+            scope_tag_ids,
+            external_settings,
+            memu_tool_config,
+            page_context,
+            canvas_cache,
+            on_event,
+            tools,
+            citations: Vec::new(),
+            tool_calls_record: Vec::new(),
+        }
+    }
+
+    pub fn tools(&self) -> &[ToolDefinition] {
+        &self.tools
+    }
+
+    pub async fn execute(
+        &mut self,
+        call_id: &str,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+    ) -> String {
+        let on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static> = {
+            let on_event = Arc::clone(&self.on_event);
+            let conversation_id = self.conversation_id.clone();
+            Arc::new(move |event| {
+                on_event(ChatEvent::AtomPipelineEvent {
+                    conversation_id: conversation_id.clone(),
+                    event,
+                });
+            })
+        };
+
+        // Emit tool start event
+        (self.on_event)(ChatEvent::ToolStart {
+            conversation_id: self.conversation_id.clone(),
+            tool_call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            tool_input: tool_args.clone(),
+        });
+
+        // Execute tool
+        let (tool_result, results_count) = match tool_name {
+            _ if !self.tools.iter().any(|tool| tool.name == tool_name) => {
+                (format!("Tool unavailable in this session: {tool_name}"), 0)
+            }
+            "search_atoms" => {
+                let query = tool_args["query"].as_str().unwrap_or("");
+                let limit = tool_args["limit"].as_i64().unwrap_or(5) as i32;
+                let since_days = tool_args
+                    .get("since_days")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as i32)
+                    .filter(|d| *d > 0);
+                match execute_search_atoms(
+                    &self.storage,
+                    query,
+                    limit,
+                    since_days,
+                    &self.scope_tag_ids,
+                    self.external_settings.clone(),
+                    self.memu_tool_config.as_ref(),
+                )
+                .await
+                {
+                    Ok(results) => {
+                        let count = results.len() as i32;
+                        for result in results.iter() {
+                            self.citations.push((
+                                result.atom.atom.id.clone(),
+                                Some(result.matching_chunk_index),
+                                result.matching_chunk_content.chars().take(200).collect(),
+                            ));
+                        }
+                        let result_text = results
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| {
+                                format!(
+                                    "[{}] (atom_id: {}, similarity: {:.2})\n{}",
+                                    self.citations.len() - results.len() + i + 1,
+                                    r.atom.atom.id,
+                                    r.similarity_score,
+                                    r.matching_chunk_content
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        (result_text, count)
+                    }
+                    Err(e) => (format!("Error: {}", e), 0),
+                }
+            }
+            "get_atom" => {
+                let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
+                let offset = tool_args
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(0);
+                let limit = tool_args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| (v as usize).clamp(1, GET_ATOM_MAX_LIMIT))
+                    .unwrap_or(GET_ATOM_DEFAULT_LIMIT);
+                match execute_get_atom(
+                    &self.storage,
+                    atom_id,
+                    offset,
+                    limit,
+                    &self.scope_tag_ids,
+                    self.memu_tool_config.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(content)) => {
+                        let citation_index = self.citations.len() + 1;
+                        self.citations.push((
+                            atom_id.to_string(),
+                            None,
+                            content.chars().take(200).collect(),
+                        ));
+                        (
+                            format!("[{}] (atom_id: {})\n{}", citation_index, atom_id, content),
+                            1,
+                        )
+                    }
+                    Ok(None) => ("Atom not found".to_string(), 0),
+                    Err(e) => (format!("Error: {}", e), 0),
+                }
+            }
+            "get_current_page_context" => {
+                match execute_get_current_page_context(
+                    &self.storage,
+                    self.page_context.as_ref(),
+                    &self.scope_tag_ids,
+                    self.memu_tool_config.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(mut context)) => {
+                        let visible_atom_id = context
+                            .get("visible_atom")
+                            .and_then(|atom| atom.get("id"))
+                            .and_then(|id| id.as_str())
+                            .map(str::to_string);
+
+                        if let Some(atom_id) = visible_atom_id {
+                            let excerpt: String = context
+                                .get("visible_atom")
+                                .and_then(|atom| atom.get("snippet"))
+                                .and_then(|snippet| snippet.as_str())
+                                .unwrap_or("")
+                                .chars()
+                                .take(200)
+                                .collect();
+                            if !excerpt.is_empty() {
+                                let citation_index = self.citations.len() + 1;
+                                self.citations.push((atom_id, None, excerpt));
+                                if let Some(atom) = context
+                                    .get_mut("visible_atom")
+                                    .and_then(|atom| atom.as_object_mut())
+                                {
+                                    atom.insert(
+                                        "citation_index".to_string(),
+                                        json!(citation_index),
+                                    );
+                                }
+                            }
+                        }
+
+                        (
+                            serde_json::to_string_pretty(&context)
+                                .unwrap_or_else(|_| context.to_string()),
+                            1,
+                        )
+                    }
+                    Ok(None) => ("No current page context was provided.".to_string(), 0),
+                    Err(e) => (format!("Error: {}", e), 0),
+                }
+            }
+            "create_atom" => {
+                match execute_create_atom(
+                    &self.storage,
+                    &tool_args,
+                    self.external_settings.clone(),
+                    self.canvas_cache.as_ref(),
+                    Arc::clone(&on_embedding_event),
+                )
+                .await
+                {
+                    Ok(atom) => {
+                        (self.on_event)(ChatEvent::AtomCreated {
+                            conversation_id: self.conversation_id.clone(),
+                            atom: atom.clone(),
+                        });
+                        self.citations.push((
+                            atom.atom.id.clone(),
+                            None,
+                            atom.atom.snippet.chars().take(200).collect(),
+                        ));
+                        (
+                            serde_json::to_string_pretty(&json!({
+                                "atom_id": atom.atom.id,
+                                "title": atom.atom.title,
+                                "snippet": atom.atom.snippet,
+                                "reference": format!("[[{}]]", atom.atom.id),
+                            }))
+                            .unwrap_or_else(|_| atom.atom.id),
+                            1,
+                        )
+                    }
+                    Err(e) => (format!("Error: {}", e), 0),
+                }
+            }
+            "edit_atom" => {
+                match execute_edit_atom(
+                    &self.storage,
+                    &tool_args,
+                    self.external_settings.clone(),
+                    self.canvas_cache.as_ref(),
+                    Arc::clone(&on_embedding_event),
+                    self.memu_tool_config.as_ref(),
+                )
+                .await
+                {
+                    Ok(Some(atom)) => {
+                        if self.memu_tool_config.is_none() {
+                            (self.on_event)(ChatEvent::AtomUpdated {
+                                conversation_id: self.conversation_id.clone(),
+                                atom: atom.clone(),
+                            });
+                        }
+                        self.citations.push((
+                            atom.atom.id.clone(),
+                            None,
+                            atom.atom.snippet.chars().take(200).collect(),
+                        ));
+                        (
+                            serde_json::to_string_pretty(&json!({
+                                "atom_id": atom.atom.id,
+                                "title": atom.atom.title,
+                                "snippet": atom.atom.snippet,
+                                "reference": format!("[[{}]]", atom.atom.id),
+                            }))
+                            .unwrap_or_else(|_| atom.atom.id),
+                            1,
+                        )
+                    }
+                    Ok(None) => ("Atom not found".to_string(), 0),
+                    Err(e) => (format!("Error: {}", e), 0),
+                }
+            }
+            "zoom_to_cluster" => {
+                let cluster_label = tool_args["cluster_label"].as_str().unwrap_or("");
+                (self.on_event)(ChatEvent::CanvasAction {
+                    conversation_id: self.conversation_id.clone(),
+                    action: "zoom_to_cluster".to_string(),
+                    params: json!({ "cluster_label": cluster_label }),
+                });
+                (format!("Zoomed canvas to cluster '{}'", cluster_label), 1)
+            }
+            "focus_atom" => {
+                let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
+                (self.on_event)(ChatEvent::CanvasAction {
+                    conversation_id: self.conversation_id.clone(),
+                    action: "focus_atom".to_string(),
+                    params: json!({ "atom_id": atom_id }),
+                });
+                (format!("Focused canvas on atom '{}'", atom_id), 1)
+            }
+            _ => (format!("Unknown tool: {}", tool_name), 0),
+        };
+
+        // Record tool call
+        self.tool_calls_record.push(ChatToolCall {
+            id: call_id.to_string(),
+            message_id: String::new(), // Set when saving
+            tool_name: tool_name.to_string(),
+            tool_input: tool_args,
+            tool_output: Some(serde_json::Value::String(tool_result.clone())),
+            status: "complete".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            completed_at: Some(Utc::now().to_rfc3339()),
+        });
+
+        // Emit tool complete event
+        (self.on_event)(ChatEvent::ToolComplete {
+            conversation_id: self.conversation_id.clone(),
+            tool_call_id: call_id.to_string(),
+            results_count,
+        });
+
+        tool_result
+    }
+}
+
 // ==================== Agent Loop ====================
 
 struct AgentContext {
     conversation_id: String,
-    scope_tag_ids: Vec<String>,
     messages: Vec<Message>,
-    citations: Vec<(String, Option<i32>, String)>, // (atom_id, chunk_index, excerpt)
-    tool_calls_record: Vec<ChatToolCall>,
+    tools: ChatToolSession,
 }
 
 async fn run_agent_loop(
     on_event: ChatEventCallback,
-    storage: StorageBackend,
     provider_config: ProviderConfig,
     model: String,
     mut ctx: AgentContext,
-    external_settings: Option<std::collections::HashMap<String, String>>,
-    memu_tool_config: Option<MemuToolConfig>,
-    page_context: Option<&PageContext>,
-    canvas_context: Option<&CanvasContext>,
-    canvas_cache: Option<&crate::CanvasCache>,
 ) -> Result<ChatMessageWithContext, String> {
     let provider = create_streaming_llm_provider(&provider_config)
         .map_err(|e| format!("Failed to create streaming provider: {}", e))?;
-    let mut tools = get_tools(memu_tool_config.is_some());
-    if page_context.is_some() {
-        tools.extend(get_page_context_tools());
-    }
-    if canvas_context.is_some() {
-        tools.extend(get_canvas_tools());
-    }
-    let allowed_tool_names: HashSet<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
-    let on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static> = {
-        let on_event = Arc::clone(&on_event);
-        let conversation_id = ctx.conversation_id.clone();
-        Arc::new(move |event| {
-            on_event(ChatEvent::AtomPipelineEvent {
-                conversation_id: conversation_id.clone(),
-                event,
-            });
-        })
-    };
     let max_iterations = 10;
 
     for _iteration in 0..max_iterations {
@@ -1391,20 +1700,24 @@ async fn run_agent_loop(
             ctx.messages.clone(),
             provider_config.context_length_for_model(&model),
         );
-        if memu_tool_config.is_some() {
-            if let Some(limit) = external_settings
+        if ctx.tools.memu_tool_config.is_some() {
+            if let Some(limit) = ctx
+                .tools
+                .external_settings
                 .as_ref()
                 .and_then(memu_response_sentence_limit)
             {
                 call_messages = append_memu_response_limit(call_messages, limit);
             }
         }
-        let should_forward_prompt_log = external_settings
+        let should_forward_prompt_log = ctx
+            .tools
+            .external_settings
             .as_ref()
             .map(memu_prompt_logging_enabled)
             .unwrap_or(false);
         if should_forward_prompt_log {
-            if let Some(config) = memu_tool_config.as_ref() {
+            if let Some(config) = ctx.tools.memu_tool_config.as_ref() {
                 let config = config.clone();
                 let conversation_id = ctx.conversation_id.clone();
                 let model = model.clone();
@@ -1416,7 +1729,7 @@ async fn run_agent_loop(
         }
 
         let response = provider
-            .complete_streaming_with_tools(&call_messages, &tools, &config, on_delta)
+            .complete_streaming_with_tools(&call_messages, ctx.tools.tools(), &config, on_delta)
             .await
             .map_err(|e| format!("API request failed: {}", e))?;
 
@@ -1449,268 +1762,7 @@ async fn run_agent_loop(
                 let tool_args: serde_json::Value =
                     serde_json::from_str(tool_args_str).unwrap_or(serde_json::Value::Null);
 
-                // Emit tool start event
-                on_event(ChatEvent::ToolStart {
-                    conversation_id: ctx.conversation_id.clone(),
-                    tool_call_id: tool_call.id.clone(),
-                    tool_name: tool_name.to_string(),
-                    tool_input: tool_args.clone(),
-                });
-
-                // Execute tool
-                let (tool_result, results_count) = match tool_name {
-                    _ if !allowed_tool_names.contains(tool_name) => {
-                        (format!("Tool unavailable in this session: {tool_name}"), 0)
-                    }
-                    "search_atoms" => {
-                        let query = tool_args["query"].as_str().unwrap_or("");
-                        let limit = tool_args["limit"].as_i64().unwrap_or(5) as i32;
-                        let since_days = tool_args
-                            .get("since_days")
-                            .and_then(|v| v.as_f64())
-                            .map(|v| v as i32)
-                            .filter(|d| *d > 0);
-                        match execute_search_atoms(
-                            &storage,
-                            query,
-                            limit,
-                            since_days,
-                            &ctx.scope_tag_ids,
-                            external_settings.clone(),
-                            memu_tool_config.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(results) => {
-                                let count = results.len() as i32;
-                                for result in results.iter() {
-                                    ctx.citations.push((
-                                        result.atom.atom.id.clone(),
-                                        Some(result.matching_chunk_index),
-                                        result.matching_chunk_content.chars().take(200).collect(),
-                                    ));
-                                }
-                                let result_text = results
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, r)| {
-                                        format!(
-                                            "[{}] (atom_id: {}, similarity: {:.2})\n{}",
-                                            ctx.citations.len() - results.len() + i + 1,
-                                            r.atom.atom.id,
-                                            r.similarity_score,
-                                            r.matching_chunk_content
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n\n");
-                                (result_text, count)
-                            }
-                            Err(e) => (format!("Error: {}", e), 0),
-                        }
-                    }
-                    "get_atom" => {
-                        let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
-                        let offset = tool_args
-                            .get("offset")
-                            .and_then(|v| v.as_u64())
-                            .map(|v| v as usize)
-                            .unwrap_or(0);
-                        let limit = tool_args
-                            .get("limit")
-                            .and_then(|v| v.as_u64())
-                            .map(|v| (v as usize).clamp(1, GET_ATOM_MAX_LIMIT))
-                            .unwrap_or(GET_ATOM_DEFAULT_LIMIT);
-                        match execute_get_atom(
-                            &storage,
-                            atom_id,
-                            offset,
-                            limit,
-                            &ctx.scope_tag_ids,
-                            memu_tool_config.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(Some(content)) => {
-                                let citation_index = ctx.citations.len() + 1;
-                                ctx.citations.push((
-                                    atom_id.to_string(),
-                                    None,
-                                    content.chars().take(200).collect(),
-                                ));
-                                (
-                                    format!(
-                                        "[{}] (atom_id: {})\n{}",
-                                        citation_index, atom_id, content
-                                    ),
-                                    1,
-                                )
-                            }
-                            Ok(None) => ("Atom not found".to_string(), 0),
-                            Err(e) => (format!("Error: {}", e), 0),
-                        }
-                    }
-                    "get_current_page_context" => {
-                        match execute_get_current_page_context(
-                            &storage,
-                            page_context,
-                            &ctx.scope_tag_ids,
-                            memu_tool_config.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(Some(mut context)) => {
-                                let visible_atom_id = context
-                                    .get("visible_atom")
-                                    .and_then(|atom| atom.get("id"))
-                                    .and_then(|id| id.as_str())
-                                    .map(str::to_string);
-
-                                if let Some(atom_id) = visible_atom_id {
-                                    let excerpt: String = context
-                                        .get("visible_atom")
-                                        .and_then(|atom| atom.get("snippet"))
-                                        .and_then(|snippet| snippet.as_str())
-                                        .unwrap_or("")
-                                        .chars()
-                                        .take(200)
-                                        .collect();
-                                    if !excerpt.is_empty() {
-                                        let citation_index = ctx.citations.len() + 1;
-                                        ctx.citations.push((atom_id, None, excerpt));
-                                        if let Some(atom) = context
-                                            .get_mut("visible_atom")
-                                            .and_then(|atom| atom.as_object_mut())
-                                        {
-                                            atom.insert(
-                                                "citation_index".to_string(),
-                                                json!(citation_index),
-                                            );
-                                        }
-                                    }
-                                }
-
-                                (
-                                    serde_json::to_string_pretty(&context)
-                                        .unwrap_or_else(|_| context.to_string()),
-                                    1,
-                                )
-                            }
-                            Ok(None) => ("No current page context was provided.".to_string(), 0),
-                            Err(e) => (format!("Error: {}", e), 0),
-                        }
-                    }
-                    "create_atom" => {
-                        match execute_create_atom(
-                            &storage,
-                            &tool_args,
-                            external_settings.clone(),
-                            canvas_cache,
-                            Arc::clone(&on_embedding_event),
-                        )
-                        .await
-                        {
-                            Ok(atom) => {
-                                on_event(ChatEvent::AtomCreated {
-                                    conversation_id: ctx.conversation_id.clone(),
-                                    atom: atom.clone(),
-                                });
-                                ctx.citations.push((
-                                    atom.atom.id.clone(),
-                                    None,
-                                    atom.atom.snippet.chars().take(200).collect(),
-                                ));
-                                (
-                                    serde_json::to_string_pretty(&json!({
-                                        "atom_id": atom.atom.id,
-                                        "title": atom.atom.title,
-                                        "snippet": atom.atom.snippet,
-                                        "reference": format!("[[{}]]", atom.atom.id),
-                                    }))
-                                    .unwrap_or_else(|_| atom.atom.id),
-                                    1,
-                                )
-                            }
-                            Err(e) => (format!("Error: {}", e), 0),
-                        }
-                    }
-                    "edit_atom" => {
-                        match execute_edit_atom(
-                            &storage,
-                            &tool_args,
-                            external_settings.clone(),
-                            canvas_cache,
-                            Arc::clone(&on_embedding_event),
-                            memu_tool_config.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(Some(atom)) => {
-                                if memu_tool_config.is_none() {
-                                    on_event(ChatEvent::AtomUpdated {
-                                        conversation_id: ctx.conversation_id.clone(),
-                                        atom: atom.clone(),
-                                    });
-                                }
-                                ctx.citations.push((
-                                    atom.atom.id.clone(),
-                                    None,
-                                    atom.atom.snippet.chars().take(200).collect(),
-                                ));
-                                (
-                                    serde_json::to_string_pretty(&json!({
-                                        "atom_id": atom.atom.id,
-                                        "title": atom.atom.title,
-                                        "snippet": atom.atom.snippet,
-                                        "reference": format!("[[{}]]", atom.atom.id),
-                                    }))
-                                    .unwrap_or_else(|_| atom.atom.id),
-                                    1,
-                                )
-                            }
-                            Ok(None) => ("Atom not found".to_string(), 0),
-                            Err(e) => (format!("Error: {}", e), 0),
-                        }
-                    }
-                    "zoom_to_cluster" => {
-                        let cluster_label = tool_args["cluster_label"].as_str().unwrap_or("");
-                        on_event(ChatEvent::CanvasAction {
-                            conversation_id: ctx.conversation_id.clone(),
-                            action: "zoom_to_cluster".to_string(),
-                            params: json!({ "cluster_label": cluster_label }),
-                        });
-                        (format!("Zoomed canvas to cluster '{}'", cluster_label), 1)
-                    }
-                    "focus_atom" => {
-                        let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
-                        on_event(ChatEvent::CanvasAction {
-                            conversation_id: ctx.conversation_id.clone(),
-                            action: "focus_atom".to_string(),
-                            params: json!({ "atom_id": atom_id }),
-                        });
-                        (format!("Focused canvas on atom '{}'", atom_id), 1)
-                    }
-                    _ => (format!("Unknown tool: {}", tool_name), 0),
-                };
-
-                // Record tool call
-                ctx.tool_calls_record.push(ChatToolCall {
-                    id: tool_call.id.clone(),
-                    message_id: String::new(), // Set when saving
-                    tool_name: tool_name.to_string(),
-                    tool_input: tool_args,
-                    tool_output: Some(serde_json::Value::String(tool_result.clone())),
-                    status: "complete".to_string(),
-                    created_at: Utc::now().to_rfc3339(),
-                    completed_at: Some(Utc::now().to_rfc3339()),
-                });
-
-                // Emit tool complete event
-                on_event(ChatEvent::ToolComplete {
-                    conversation_id: ctx.conversation_id.clone(),
-                    tool_call_id: tool_call.id.clone(),
-                    results_count,
-                });
+                let tool_result = ctx.tools.execute(&tool_call.id, tool_name, tool_args).await;
 
                 // Add tool result to messages
                 ctx.messages
@@ -1722,6 +1774,7 @@ async fn run_agent_loop(
 
             // Build citations from collected data
             let citations: Vec<ChatCitation> = ctx
+                .tools
                 .citations
                 .iter()
                 .enumerate()
@@ -1745,7 +1798,7 @@ async fn run_agent_loop(
                     created_at: Utc::now().to_rfc3339(),
                     message_index: 0, // Set when saving
                 },
-                tool_calls: ctx.tool_calls_record,
+                tool_calls: ctx.tools.tool_calls_record,
                 citations,
             });
         }
@@ -1904,26 +1957,22 @@ where
     // Create agent context
     let ctx = AgentContext {
         conversation_id: conversation_id.to_string(),
-        scope_tag_ids,
         messages: api_messages,
-        citations: Vec::new(),
-        tool_calls_record: Vec::new(),
+        tools: ChatToolSession::new(
+            storage.clone(),
+            conversation_id.to_string(),
+            scope_tag_ids,
+            Some(settings_map),
+            memu_tool_config,
+            page_context,
+            canvas_context,
+            canvas_cache,
+            Arc::clone(&on_event),
+        ),
     };
 
     // Run agent loop with canvas context
-    let mut result = run_agent_loop(
-        Arc::clone(&on_event),
-        storage.clone(),
-        provider_config,
-        model,
-        ctx,
-        Some(settings_map),
-        memu_tool_config,
-        page_context.as_ref(),
-        canvas_context.as_ref(),
-        canvas_cache.as_ref(),
-    )
-    .await?;
+    let mut result = run_agent_loop(Arc::clone(&on_event), provider_config, model, ctx).await?;
 
     // Save assistant message
     {
@@ -1966,6 +2015,130 @@ mod tests {
     use super::*;
     use crate::{AtomicCore, CreateAtomRequest};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn chat_tool_session_preserves_dispatch_citations_and_events() {
+        let dir = TempDir::new().expect("create tempdir");
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).expect("open core");
+        let atom = core
+            .create_atom(
+                CreateAtomRequest {
+                    content: "A fictional observatory tracks bright comets.".to_string(),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .await
+            .expect("create atom")
+            .expect("atom was not skipped");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut session = ChatToolSession::new(
+            core.storage.clone(),
+            "test-conversation".to_string(),
+            Vec::new(),
+            None,
+            None,
+            Some(PageContext {
+                view: Some("atom".to_string()),
+                atom_id: Some(atom.atom.id.clone()),
+                atom_title: None,
+                atom_snippet: None,
+                wiki_tag_id: None,
+                wiki_tag_name: None,
+                selected_tag_id: None,
+            }),
+            None,
+            None,
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+        );
+        for (call_id, expected) in [("call-1", "[1]"), ("call-2", "[2]")] {
+            let result = session
+                .execute(call_id, "get_atom", json!({"atom_id": atom.atom.id}))
+                .await;
+            assert!(result.starts_with(expected));
+            assert!(result.contains("bright comets"));
+        }
+        let page = session
+            .execute("call-page", "get_current_page_context", json!({}))
+            .await;
+        let page: serde_json::Value = serde_json::from_str(&page).expect("page result");
+        assert_eq!(page["visible_atom"]["citation_index"], 3);
+        let refused = session
+            .execute(
+                "call-unavailable",
+                "focus_atom",
+                json!({"atom_id": atom.atom.id}),
+            )
+            .await;
+        assert!(refused.contains("Tool unavailable"));
+        assert_eq!(session.citations.len(), 3);
+        assert_eq!(session.tool_calls_record.len(), 4);
+        let record = &session.tool_calls_record[0];
+        assert_eq!(record.id, "call-1");
+        assert_eq!(record.tool_input["atom_id"], atom.atom.id);
+        assert!(
+            record
+                .tool_output
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .starts_with("[1]")
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 8);
+        assert!(
+            matches!(&events[0], ChatEvent::ToolStart { tool_call_id, .. } if tool_call_id == "call-1")
+        );
+        assert!(
+            matches!(&events[1], ChatEvent::ToolComplete { tool_call_id, results_count: 1, .. } if tool_call_id == "call-1")
+        );
+        assert!(matches!(
+            &events[7],
+            ChatEvent::ToolComplete {
+                results_count: 0,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_tool_session_keeps_integrated_create_atom_unavailable() {
+        let dir = TempDir::new().expect("create tempdir");
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).expect("open core");
+        let mut session = ChatToolSession::new(
+            core.storage.clone(),
+            "test-conversation".to_string(),
+            Vec::new(),
+            None,
+            Some(MemuToolConfig {
+                base_url: "http://127.0.0.1:1".to_string(),
+                user_id: "TestOwner".to_string(),
+                soul_id: "TestSoul".to_string(),
+            }),
+            None,
+            None,
+            None,
+            Arc::new(|_| {}),
+        );
+        assert!(
+            !session
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "create_atom")
+        );
+        let result = session
+            .execute(
+                "call-refused",
+                "create_atom",
+                json!({"content": "must not be created"}),
+            )
+            .await;
+        assert!(result.contains("Tool unavailable"));
+        assert!(session.citations.is_empty());
+        assert_eq!(session.tool_calls_record.len(), 1);
+    }
 
     #[tokio::test]
     async fn get_atom_enforces_conversation_tag_scope() {
