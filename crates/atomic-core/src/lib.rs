@@ -2579,7 +2579,7 @@ impl AtomicCore {
             ));
         }
         let tag_ids = self.storage.get_scope_tag_ids_sync(conversation_id).await?;
-        Ok(agent::ChatToolSession::new(
+        let mut session = agent::ChatToolSession::new(
             self.storage.clone(),
             conversation_id.to_string(),
             tag_ids,
@@ -2589,7 +2589,50 @@ impl AtomicCore {
             canvas_context,
             Some(self.canvas_cache()),
             Arc::new(on_event),
-        ))
+        );
+        let user_turn = conversation
+            .messages
+            .iter()
+            .find(|row| row.message.id == user_message_id)
+            .expect("validated user turn");
+        let prior = conversation
+            .messages
+            .iter()
+            .filter(|row| row.message.id != user_message_id)
+            .flat_map(|row| row.citations.iter().cloned())
+            .collect();
+        let high_water = self
+            .storage
+            .get_chat_citation_index_sync(conversation_id)
+            .await?;
+        session
+            .bind_user_turn(
+                user_message_id,
+                high_water,
+                prior,
+                user_turn.tool_calls.clone(),
+                user_turn.citations.clone(),
+            )
+            .map_err(AtomicCoreError::Validation)?;
+        Ok(session)
+    }
+
+    /// Save already-executed tool work without running tools again.
+    pub async fn save_chat_tool_records(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        records: &agent::ChatToolRecords,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage
+            .save_chat_tool_state_sync(
+                conversation_id,
+                message_id,
+                &records.tool_calls,
+                &records.citations,
+                records.citation_index,
+            )
+            .await
     }
 
     /// Update a conversation (title, archive status)

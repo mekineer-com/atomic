@@ -173,6 +173,38 @@ impl SqliteStorage {
         crate::chat::get_scope_tag_ids(&conn, conversation_id)
     }
 
+    pub(crate) fn get_chat_citation_index_sync(&self, conversation_id: &str) -> StorageResult<i32> {
+        let conn = self.db.read_conn()?;
+        Ok(conn.query_row(
+            "SELECT atomic_citation_index FROM conversations WHERE id=?1",
+            [conversation_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn save_chat_tool_state_sync(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<()> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::chat::save_chat_tool_state(
+            &conn,
+            conversation_id,
+            message_id,
+            tool_calls,
+            citations,
+            citation_index,
+        )
+    }
+
     pub(crate) fn get_scope_description_sync(&self, tag_ids: &[String]) -> StorageResult<String> {
         let conn = self
             .db
@@ -185,6 +217,39 @@ impl SqliteStorage {
 
 #[async_trait]
 impl ChatStore for SqliteStorage {
+    async fn get_chat_citation_index(&self, conversation_id: &str) -> StorageResult<i32> {
+        let storage = self.clone();
+        let conversation_id = conversation_id.to_string();
+        tokio::task::spawn_blocking(move || storage.get_chat_citation_index_sync(&conversation_id))
+            .await
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
+    async fn save_chat_tool_state(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<()> {
+        let storage = self.clone();
+        let conversation_id = conversation_id.to_string();
+        let message_id = message_id.to_string();
+        let tool_calls = tool_calls.to_vec();
+        let citations = citations.to_vec();
+        tokio::task::spawn_blocking(move || {
+            storage.save_chat_tool_state_sync(
+                &conversation_id,
+                &message_id,
+                &tool_calls,
+                &citations,
+                citation_index,
+            )
+        })
+        .await
+        .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
     async fn create_conversation(
         &self,
         tag_ids: &[String],

@@ -817,9 +817,16 @@ pub fn save_tool_calls(
     tool_calls: &[ChatToolCall],
 ) -> Result<(), AtomicCoreError> {
     for tool_call in tool_calls {
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO chat_tool_calls (id, message_id, tool_name, tool_input, tool_output, status, created_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET message_id=excluded.message_id,
+                 tool_output=excluded.tool_output, status=excluded.status, completed_at=excluded.completed_at
+             WHERE (SELECT conversation_id FROM chat_messages WHERE id=chat_tool_calls.message_id)
+                 = (SELECT conversation_id FROM chat_messages WHERE id=excluded.message_id)
+                 AND (chat_tool_calls.message_id=excluded.message_id
+                     OR ((SELECT role FROM chat_messages WHERE id=chat_tool_calls.message_id)='user'
+                         AND (SELECT role FROM chat_messages WHERE id=excluded.message_id)='assistant'))",
             rusqlite::params![
                 &tool_call.id,
                 message_id,
@@ -831,6 +838,11 @@ pub fn save_tool_calls(
                 &tool_call.completed_at,
             ],
         )?;
+        if changed != 1 {
+            return Err(AtomicCoreError::Validation(
+                "Tool record identity or publication target does not match".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -842,9 +854,15 @@ pub fn save_citations(
     citations: &[ChatCitation],
 ) -> Result<(), AtomicCoreError> {
     for citation in citations {
-        conn.execute(
+        let changed = conn.execute(
             "INSERT INTO chat_citations (id, message_id, citation_index, atom_id, chunk_index, excerpt, relevance_score)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET message_id=excluded.message_id
+             WHERE (SELECT conversation_id FROM chat_messages WHERE id=chat_citations.message_id)
+                 = (SELECT conversation_id FROM chat_messages WHERE id=excluded.message_id)
+                 AND (chat_citations.message_id=excluded.message_id
+                     OR ((SELECT role FROM chat_messages WHERE id=chat_citations.message_id)='user'
+                         AND (SELECT role FROM chat_messages WHERE id=excluded.message_id)='assistant'))",
             rusqlite::params![
                 &citation.id,
                 message_id,
@@ -855,7 +873,41 @@ pub fn save_citations(
                 citation.relevance_score,
             ],
         )?;
+        if changed != 1 {
+            return Err(AtomicCoreError::Validation(
+                "Citation identity or publication target does not match".to_string(),
+            ));
+        }
     }
+    Ok(())
+}
+
+pub fn save_chat_tool_state(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    tool_calls: &[ChatToolCall],
+    citations: &[ChatCitation],
+    citation_index: i32,
+) -> Result<(), AtomicCoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let belongs: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id=?1 AND conversation_id=?2)",
+        rusqlite::params![message_id, conversation_id],
+        |row| row.get(0),
+    )?;
+    if !belongs {
+        return Err(AtomicCoreError::Validation(
+            "Tool state target is outside this conversation".to_string(),
+        ));
+    }
+    save_tool_calls(&tx, message_id, tool_calls)?;
+    save_citations(&tx, message_id, citations)?;
+    tx.execute(
+        "UPDATE conversations SET atomic_citation_index=MAX(atomic_citation_index, ?1) WHERE id=?2",
+        rusqlite::params![citation_index, conversation_id],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 

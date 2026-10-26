@@ -189,17 +189,22 @@ impl ChatMcpServer {
                 .expect("active tool session")
                 .execute(&call_id, &name, arguments)
                 .await;
-            let content = vec![Content::text(result.content)];
-            let result = if result.is_error {
-                CallToolResult::error(content)
-            } else {
-                CallToolResult::success(content)
+            let result = match result {
+                Ok(result) => {
+                    let content = vec![Content::text(result.content)];
+                    Ok(if result.is_error {
+                        CallToolResult::error(content)
+                    } else {
+                        CallToolResult::success(content)
+                    })
+                }
+                Err(error) => Err(ErrorData::internal_error(error, None)),
             };
             let _ = send.send(result);
         });
         receive
             .await
-            .map_err(|_| ErrorData::internal_error("Chat tool worker failed", None))
+            .map_err(|_| ErrorData::internal_error("Chat tool worker failed", None))?
     }
 }
 

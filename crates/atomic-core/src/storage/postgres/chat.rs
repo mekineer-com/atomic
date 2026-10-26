@@ -6,6 +6,91 @@ use crate::storage::traits::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+async fn write_tool_calls(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    message_id: &str,
+    tool_calls: &[ChatToolCall],
+) -> StorageResult<()> {
+    for tool_call in tool_calls {
+        let tool_input_str = serde_json::to_string(&tool_call.tool_input).unwrap_or_default();
+        let tool_result_str = tool_call
+            .tool_output
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default())
+            .unwrap_or_default();
+
+        let result = sqlx::query(
+                "INSERT INTO chat_tool_calls (id, message_id, tool_name, tool_input, tool_result, created_at, db_id, status, completed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(id) DO UPDATE SET message_id=EXCLUDED.message_id, tool_result=EXCLUDED.tool_result,
+                     status=EXCLUDED.status, completed_at=EXCLUDED.completed_at
+                 WHERE chat_tool_calls.db_id=EXCLUDED.db_id
+                     AND (SELECT conversation_id FROM chat_messages WHERE id=chat_tool_calls.message_id AND db_id=EXCLUDED.db_id)
+                         = (SELECT conversation_id FROM chat_messages WHERE id=EXCLUDED.message_id AND db_id=EXCLUDED.db_id)
+                 AND (chat_tool_calls.message_id=EXCLUDED.message_id
+                     OR ((SELECT role FROM chat_messages WHERE id=chat_tool_calls.message_id)='user'
+                         AND (SELECT role FROM chat_messages WHERE id=EXCLUDED.message_id)='assistant'))",
+            )
+            .bind(&tool_call.id)
+            .bind(message_id)
+            .bind(&tool_call.tool_name)
+            .bind(&tool_input_str)
+            .bind(&tool_result_str)
+            .bind(&tool_call.created_at)
+            .bind(db_id)
+            .bind(&tool_call.status)
+            .bind(&tool_call.completed_at)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        if result.rows_affected() != 1 {
+            return Err(AtomicCoreError::Validation(
+                "Tool record identity or publication target does not match".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn write_citations(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    message_id: &str,
+    citations: &[ChatCitation],
+) -> StorageResult<()> {
+    for citation in citations {
+        let result = sqlx::query(
+                "INSERT INTO chat_citations (id, message_id, atom_id, chunk_index, excerpt, relevance_score, db_id, citation_index)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT(id) DO UPDATE SET message_id=EXCLUDED.message_id
+                 WHERE chat_citations.db_id=EXCLUDED.db_id
+                     AND (SELECT conversation_id FROM chat_messages WHERE id=chat_citations.message_id AND db_id=EXCLUDED.db_id)
+                         = (SELECT conversation_id FROM chat_messages WHERE id=EXCLUDED.message_id AND db_id=EXCLUDED.db_id)
+                 AND (chat_citations.message_id=EXCLUDED.message_id
+                     OR ((SELECT role FROM chat_messages WHERE id=chat_citations.message_id)='user'
+                         AND (SELECT role FROM chat_messages WHERE id=EXCLUDED.message_id)='assistant'))",
+            )
+            .bind(&citation.id)
+            .bind(message_id)
+            .bind(&citation.atom_id)
+            .bind(citation.chunk_index)
+            .bind(&citation.excerpt)
+            .bind(citation.relevance_score)
+            .bind(db_id)
+            .bind(citation.citation_index)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        if result.rows_affected() != 1 {
+            return Err(AtomicCoreError::Validation(
+                "Citation identity or publication target does not match".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Helper: fetch conversation tags for a single conversation.
 async fn fetch_conversation_tags(
     pool: &sqlx::PgPool,
@@ -478,7 +563,7 @@ impl ChatStore for PostgresStorage {
 
         // Batch fetch tool calls
         let tc_rows = sqlx::query_as::<_, (String, String, String, String, Option<String>, String, String, Option<String>)>(
-            "SELECT id, message_id, tool_name, tool_input, tool_result, 'complete', created_at, NULL
+            "SELECT id, message_id, tool_name, tool_input, tool_result, status, created_at, completed_at
              FROM chat_tool_calls
              WHERE message_id = ANY($1) AND db_id = $2
              ORDER BY created_at",
@@ -507,6 +592,7 @@ impl ChatStore for PostgresStorage {
                 tool_name,
                 tool_input: serde_json::from_str(&tool_input).unwrap_or(serde_json::Value::Null),
                 tool_output: tool_output
+                    .filter(|value| !value.is_empty())
                     .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)),
                 status,
                 created_at,
@@ -516,28 +602,36 @@ impl ChatStore for PostgresStorage {
         }
 
         // Batch fetch citations
-        let cit_rows =
-            sqlx::query_as::<_, (String, String, String, Option<i32>, String, Option<f32>)>(
-                "SELECT id, message_id, atom_id, chunk_index, excerpt, relevance_score
+        let cit_rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                i32,
+                String,
+                Option<i32>,
+                String,
+                Option<f32>,
+            ),
+        >(
+            "SELECT id, message_id, citation_index, atom_id, chunk_index, excerpt, relevance_score
              FROM chat_citations
-             WHERE message_id = ANY($1) AND db_id = $2",
-            )
-            .bind(&msg_ids)
-            .bind(&self.db_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+             WHERE message_id = ANY($1) AND db_id = $2 ORDER BY citation_index",
+        )
+        .bind(&msg_ids)
+        .bind(&self.db_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
         let mut citations_map: HashMap<String, Vec<ChatCitation>> = HashMap::new();
-        // The Postgres schema lacks citation_index; we assign based on order.
-        let mut per_message_idx: HashMap<String, i32> = HashMap::new();
-        for (id, message_id, atom_id, chunk_index, excerpt, relevance_score) in cit_rows {
-            let idx = per_message_idx.entry(message_id.clone()).or_insert(0);
-            *idx += 1;
+        for (id, message_id, citation_index, atom_id, chunk_index, excerpt, relevance_score) in
+            cit_rows
+        {
             let cit = ChatCitation {
                 id,
                 message_id: message_id.clone(),
-                citation_index: *idx,
+                citation_index,
                 atom_id,
                 chunk_index,
                 excerpt,
@@ -794,30 +888,12 @@ impl ChatStore for PostgresStorage {
         message_id: &str,
         tool_calls: &[ChatToolCall],
     ) -> StorageResult<()> {
-        for tool_call in tool_calls {
-            let tool_input_str = serde_json::to_string(&tool_call.tool_input).unwrap_or_default();
-            let tool_result_str = tool_call
-                .tool_output
-                .as_ref()
-                .map(|v| serde_json::to_string(v).unwrap_or_default())
-                .unwrap_or_default();
-
-            sqlx::query(
-                "INSERT INTO chat_tool_calls (id, message_id, tool_name, tool_input, tool_result, created_at, db_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind(&tool_call.id)
-            .bind(message_id)
-            .bind(&tool_call.tool_name)
-            .bind(&tool_input_str)
-            .bind(&tool_result_str)
-            .bind(&tool_call.created_at)
-            .bind(&self.db_id)
-            .execute(&self.pool)
+        let mut conn = self
+            .pool
+            .acquire()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        }
-        Ok(())
+        write_tool_calls(&mut conn, &self.db_id, message_id, tool_calls).await
     }
 
     async fn save_citations(
@@ -825,23 +901,54 @@ impl ChatStore for PostgresStorage {
         message_id: &str,
         citations: &[ChatCitation],
     ) -> StorageResult<()> {
-        for citation in citations {
-            sqlx::query(
-                "INSERT INTO chat_citations (id, message_id, atom_id, chunk_index, excerpt, relevance_score, db_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
-            .bind(&citation.id)
-            .bind(message_id)
-            .bind(&citation.atom_id)
-            .bind(citation.chunk_index)
-            .bind(&citation.excerpt)
-            .bind(citation.relevance_score)
-            .bind(&self.db_id)
-            .execute(&self.pool)
+        let mut conn = self
+            .pool
+            .acquire()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        write_citations(&mut conn, &self.db_id, message_id, citations).await
+    }
+
+    async fn get_chat_citation_index(&self, conversation_id: &str) -> StorageResult<i32> {
+        sqlx::query_scalar(
+            "SELECT atomic_citation_index FROM conversations WHERE id=$1 AND db_id=$2",
+        )
+        .bind(conversation_id)
+        .bind(&self.db_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
+    }
+
+    async fn save_chat_tool_state(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let belongs: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id=$1 AND conversation_id=$2 AND db_id=$3)")
+            .bind(message_id).bind(conversation_id).bind(&self.db_id).fetch_one(&mut *tx).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        if !belongs {
+            return Err(AtomicCoreError::Validation(
+                "Tool state target is outside this conversation".to_string(),
+            ));
         }
-        Ok(())
+        write_tool_calls(&mut tx, &self.db_id, message_id, tool_calls).await?;
+        write_citations(&mut tx, &self.db_id, message_id, citations).await?;
+        sqlx::query("UPDATE conversations SET atomic_citation_index=GREATEST(atomic_citation_index,$1) WHERE id=$2 AND db_id=$3")
+            .bind(citation_index).bind(conversation_id).bind(&self.db_id).execute(&mut *tx).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
     }
 
     async fn get_scope_tag_ids(&self, conversation_id: &str) -> StorageResult<Vec<String>> {

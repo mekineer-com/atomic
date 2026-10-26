@@ -22,8 +22,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 use uuid::Uuid;
@@ -1326,6 +1326,34 @@ fn chat_messages_to_provider_messages(
 pub struct ChatToolRecords {
     pub tool_calls: Vec<ChatToolCall>,
     pub citations: Vec<ChatCitation>,
+    pub citation_index: i32,
+    prior_citations: Vec<ChatCitation>,
+}
+
+impl ChatToolRecords {
+    pub fn for_reply(mut self, content: &str) -> Self {
+        static REFERENCES: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"\[(\d+)\]").expect("citation regex"));
+        let referenced: HashSet<i32> = REFERENCES
+            .captures_iter(content)
+            .filter_map(|capture| capture[1].parse().ok())
+            .collect();
+        for mut citation in self.prior_citations.drain(..) {
+            if referenced.contains(&citation.citation_index)
+                && !self
+                    .citations
+                    .iter()
+                    .any(|new| new.citation_index == citation.citation_index)
+            {
+                citation.id = Uuid::new_v4().to_string();
+                citation.message_id.clear();
+                self.citations.push(citation);
+            }
+        }
+        self.citations
+            .sort_by_key(|citation| citation.citation_index);
+        self
+    }
 }
 
 pub struct ChatToolResult {
@@ -1345,7 +1373,10 @@ pub struct ChatToolSession {
     canvas_cache: Option<crate::CanvasCache>,
     on_event: ChatEventCallback,
     tools: Vec<ToolDefinition>,
-    citations: Vec<(String, Option<i32>, String)>,
+    citations: Vec<ChatCitation>,
+    citation_index: i32,
+    prior_citations: Vec<ChatCitation>,
+    durable_message_id: Option<String>,
     tool_calls_record: Vec<ChatToolCall>,
 }
 
@@ -1379,29 +1410,78 @@ impl ChatToolSession {
             on_event,
             tools,
             citations: Vec::new(),
+            citation_index: 0,
+            prior_citations: Vec::new(),
+            durable_message_id: None,
             tool_calls_record: Vec::new(),
         }
     }
 
-    pub fn finish(self) -> ChatToolRecords {
-        let citations = self
-            .citations
-            .into_iter()
-            .enumerate()
-            .map(|(i, (atom_id, chunk_index, excerpt))| ChatCitation {
-                id: Uuid::new_v4().to_string(),
-                message_id: String::new(), // Set when saving
-                citation_index: (i + 1) as i32,
-                atom_id,
-                chunk_index,
-                excerpt,
-                relevance_score: None,
-            })
-            .collect();
+    pub(crate) fn bind_user_turn(
+        &mut self,
+        message_id: &str,
+        high_water: i32,
+        prior: Vec<ChatCitation>,
+        calls: Vec<ChatToolCall>,
+        citations: Vec<ChatCitation>,
+    ) -> Result<(), String> {
+        let mut catalog = BTreeMap::<i32, ChatCitation>::new();
+        for citation in prior.iter().chain(citations.iter()) {
+            if let Some(existing) = catalog.get(&citation.citation_index) {
+                if existing.atom_id != citation.atom_id
+                    || existing.chunk_index != citation.chunk_index
+                {
+                    return Err("This sitting contains conflicting citation numbers".to_string());
+                }
+            }
+            catalog
+                .entry(citation.citation_index)
+                .or_insert_with(|| citation.clone());
+        }
+        self.citation_index = high_water.max(catalog.keys().next_back().copied().unwrap_or(0));
+        self.prior_citations = catalog.into_values().collect();
+        self.durable_message_id = Some(message_id.to_string());
+        self.tool_calls_record = calls;
+        self.citations = citations;
+        Ok(())
+    }
 
+    fn add_citation(&mut self, atom_id: String, chunk_index: Option<i32>, excerpt: String) -> i32 {
+        self.citation_index += 1;
+        self.citations.push(ChatCitation {
+            id: Uuid::new_v4().to_string(),
+            message_id: self.durable_message_id.clone().unwrap_or_default(),
+            citation_index: self.citation_index,
+            atom_id,
+            chunk_index,
+            excerpt,
+            relevance_score: None,
+        });
+        self.citation_index
+    }
+
+    async fn checkpoint(&self) -> Result<(), String> {
+        if let Some(message_id) = &self.durable_message_id {
+            self.storage
+                .save_chat_tool_state_sync(
+                    &self.conversation_id,
+                    message_id,
+                    &self.tool_calls_record,
+                    &self.citations,
+                    self.citation_index,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> ChatToolRecords {
         ChatToolRecords {
             tool_calls: self.tool_calls_record,
-            citations,
+            citations: self.citations,
+            citation_index: self.citation_index,
+            prior_citations: self.prior_citations,
         }
     }
 
@@ -1414,7 +1494,37 @@ impl ChatToolSession {
         call_id: &str,
         tool_name: &str,
         tool_args: serde_json::Value,
-    ) -> ChatToolResult {
+    ) -> Result<ChatToolResult, String> {
+        if self
+            .tool_calls_record
+            .iter()
+            .any(|record| record.id == call_id)
+        {
+            return Err(
+                "This tool call is already recorded; reconcile its outcome instead of replaying it"
+                    .to_string(),
+            );
+        }
+        self.tool_calls_record.push(ChatToolCall {
+            id: call_id.to_string(),
+            message_id: self.durable_message_id.clone().unwrap_or_default(),
+            tool_name: tool_name.to_string(),
+            tool_input: tool_args.clone(),
+            tool_output: None,
+            status: "running".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+        });
+        if let Err(error) = self.checkpoint().await {
+            let record = self
+                .tool_calls_record
+                .last_mut()
+                .expect("unstarted tool record");
+            record.status = "failed".to_string();
+            record.completed_at = Some(Utc::now().to_rfc3339());
+            record.tool_output = Some(json!({"error": error, "executed": false}));
+            return Err(format!("Tool was not executed: {error}"));
+        }
         let on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static> = {
             let on_event = Arc::clone(&self.on_event);
             let conversation_id = self.conversation_id.clone();
@@ -1462,12 +1572,13 @@ impl ChatToolSession {
                 {
                     Ok(results) => {
                         let count = results.len() as i32;
+                        let first_index = self.citation_index + 1;
                         for result in results.iter() {
-                            self.citations.push((
+                            self.add_citation(
                                 result.atom.atom.id.clone(),
                                 Some(result.matching_chunk_index),
                                 result.matching_chunk_content.chars().take(200).collect(),
-                            ));
+                            );
                         }
                         let result_text = results
                             .iter()
@@ -1475,7 +1586,7 @@ impl ChatToolSession {
                             .map(|(i, r)| {
                                 format!(
                                     "[{}] (atom_id: {}, similarity: {:.2})\n{}",
-                                    self.citations.len() - results.len() + i + 1,
+                                    first_index + i as i32,
                                     r.atom.atom.id,
                                     r.similarity_score,
                                     r.matching_chunk_content
@@ -1511,12 +1622,11 @@ impl ChatToolSession {
                 .await
                 {
                     Ok(Some(content)) => {
-                        let citation_index = self.citations.len() + 1;
-                        self.citations.push((
+                        let citation_index = self.add_citation(
                             atom_id.to_string(),
                             None,
                             content.chars().take(200).collect(),
-                        ));
+                        );
                         (
                             format!("[{}] (atom_id: {})\n{}", citation_index, atom_id, content),
                             1,
@@ -1553,8 +1663,7 @@ impl ChatToolSession {
                                 .take(200)
                                 .collect();
                             if !excerpt.is_empty() {
-                                let citation_index = self.citations.len() + 1;
-                                self.citations.push((atom_id, None, excerpt));
+                                let citation_index = self.add_citation(atom_id, None, excerpt);
                                 if let Some(atom) = context
                                     .get_mut("visible_atom")
                                     .and_then(|atom| atom.as_object_mut())
@@ -1593,11 +1702,11 @@ impl ChatToolSession {
                             conversation_id: self.conversation_id.clone(),
                             atom: atom.clone(),
                         });
-                        self.citations.push((
+                        self.add_citation(
                             atom.atom.id.clone(),
                             None,
                             atom.atom.snippet.chars().take(200).collect(),
-                        ));
+                        );
                         (
                             serde_json::to_string_pretty(&json!({
                                 "atom_id": atom.atom.id,
@@ -1631,11 +1740,11 @@ impl ChatToolSession {
                                 atom: atom.clone(),
                             });
                         }
-                        self.citations.push((
+                        self.add_citation(
                             atom.atom.id.clone(),
                             None,
                             atom.atom.snippet.chars().take(200).collect(),
-                        ));
+                        );
                         (
                             serde_json::to_string_pretty(&json!({
                                 "atom_id": atom.atom.id,
@@ -1677,17 +1786,16 @@ impl ChatToolSession {
             _ => (format!("Unknown tool: {}", tool_name), 0, true),
         };
 
-        // Record tool call
-        self.tool_calls_record.push(ChatToolCall {
-            id: call_id.to_string(),
-            message_id: String::new(), // Set when saving
-            tool_name: tool_name.to_string(),
-            tool_input: tool_args,
-            tool_output: Some(serde_json::Value::String(tool_result.clone())),
-            status: if is_error { "failed" } else { "complete" }.to_string(),
-            created_at: Utc::now().to_rfc3339(),
-            completed_at: Some(Utc::now().to_rfc3339()),
-        });
+        let record = self
+            .tool_calls_record
+            .last_mut()
+            .expect("running tool record");
+        record.tool_output = Some(serde_json::Value::String(tool_result.clone()));
+        record.status = if is_error { "failed" } else { "complete" }.to_string();
+        record.completed_at = Some(Utc::now().to_rfc3339());
+        self.checkpoint()
+            .await
+            .map_err(|e| format!("Tool finished, but saving its outcome failed: {e}"))?;
 
         // Emit tool complete event
         (self.on_event)(ChatEvent::ToolComplete {
@@ -1697,10 +1805,10 @@ impl ChatToolSession {
             is_error,
         });
 
-        ChatToolResult {
+        Ok(ChatToolResult {
             content: tool_result,
             is_error,
-        }
+        })
     }
 }
 
@@ -1797,7 +1905,10 @@ async fn run_agent_loop(
                 let tool_args: serde_json::Value =
                     serde_json::from_str(tool_args_str).unwrap_or(serde_json::Value::Null);
 
-                let tool_result = ctx.tools.execute(&tool_call.id, tool_name, tool_args).await;
+                let tool_result = ctx
+                    .tools
+                    .execute(&tool_call.id, tool_name, tool_args)
+                    .await?;
 
                 // Add tool result to messages
                 ctx.messages
@@ -2037,6 +2148,448 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
+    async fn durable_tools_preserve_numbering_retry_and_reply_membership() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("atomic.db");
+        let core = AtomicCore::open_or_create(&db_path).unwrap();
+        let conversation = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conversation.conversation.id;
+        let prior_message = core
+            .save_message(cid, "assistant", "Earlier [2] and [7]")
+            .await
+            .unwrap();
+        let prior = ChatToolRecords {
+            tool_calls: Vec::new(),
+            prior_citations: Vec::new(),
+            citation_index: 7,
+            citations: [2, 7]
+                .into_iter()
+                .map(|number| ChatCitation {
+                    id: Uuid::new_v4().to_string(),
+                    message_id: prior_message.id.clone(),
+                    citation_index: number,
+                    atom_id: format!("memory:old-{number}"),
+                    chunk_index: Some(0),
+                    excerpt: "Older evidence".to_string(),
+                    relevance_score: None,
+                })
+                .collect(),
+        };
+        core.save_chat_tool_records(cid, &prior_message.id, &prior)
+            .await
+            .unwrap();
+        core.database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM chat_citations WHERE citation_index=7", [])
+            .unwrap();
+        let server = MockServer::start().await;
+        let captured_path = db_path.clone();
+        Mock::given(method("GET"))
+            .and(path("/integration/atomic/search"))
+            .and(query_param("user_id", "TestOwner"))
+            .and(query_param("soul_id", "TestSoul"))
+            .respond_with(move |_request: &wiremock::Request| {
+                let con = rusqlite::Connection::open(&captured_path).unwrap();
+                let running: i32 = con
+                    .query_row(
+                        "SELECT COUNT(*) FROM chat_tool_calls WHERE status='running'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    running, 1,
+                    "running state must commit before the tool starts"
+                );
+                ResponseTemplate::new(200).set_body_json(json!({"nodes": [
+                    {"id": "memory:one", "kind": "memory", "summary": "A fictional voyage"},
+                    {"id": "memory:two", "kind": "memory", "summary": "A fictional observatory"},
+                ]}))
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let scope = MemuToolConfig {
+            base_url: server.uri(),
+            user_id: "TestOwner".to_string(),
+            soul_id: "TestSoul".to_string(),
+        };
+        let user = core
+            .save_message(cid, "user", "Find the voyage")
+            .await
+            .unwrap();
+        let mut session = core
+            .chat_tool_session(
+                cid,
+                &user.id,
+                HashMap::new(),
+                scope.clone(),
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let result = session
+            .execute(
+                "native-first-search",
+                "search_atoms",
+                json!({"query": "voyage"}),
+            )
+            .await
+            .unwrap();
+        assert!(result.content.starts_with("[8]"));
+        assert!(result.content.contains("[9]"));
+        assert!(
+            session
+                .execute("native-unavailable", "create_atom", json!({}))
+                .await
+                .unwrap()
+                .is_error
+        );
+        let saved = core.get_conversation(cid).await.unwrap().unwrap();
+        let saved = saved
+            .messages
+            .iter()
+            .find(|row| row.message.id == user.id)
+            .unwrap();
+        assert_eq!(saved.tool_calls.len(), 2);
+        assert!(saved.tool_calls.iter().any(|call| call.status == "failed"));
+        assert_eq!(
+            saved
+                .citations
+                .iter()
+                .map(|citation| citation.citation_index)
+                .collect::<Vec<_>>(),
+            [8, 9]
+        );
+        drop(session); // A failed provider turn must not discard completed tools.
+        let reopened = AtomicCore::open_or_create(&db_path).unwrap();
+        let mut retry = reopened
+            .chat_tool_session(
+                cid,
+                &user.id,
+                HashMap::new(),
+                scope.clone(),
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert!(
+            retry
+                .execute(
+                    "native-first-search",
+                    "search_atoms",
+                    json!({"query": "voyage"})
+                )
+                .await
+                .is_err()
+        );
+        let reply_text = "Earlier [2], new [8], and no known source for [777].";
+        let records = retry.finish().for_reply(reply_text);
+        assert_eq!(
+            records
+                .citations
+                .iter()
+                .map(|citation| citation.citation_index)
+                .collect::<Vec<_>>(),
+            [2, 8, 9]
+        );
+        let reply = reopened
+            .save_message(cid, "assistant", reply_text)
+            .await
+            .unwrap();
+        reopened
+            .save_chat_tool_records(cid, &reply.id, &records)
+            .await
+            .unwrap();
+        let saved = reopened.get_conversation(cid).await.unwrap().unwrap();
+        let old = saved
+            .messages
+            .iter()
+            .find(|row| row.message.id == prior_message.id)
+            .unwrap();
+        assert_eq!(old.citations[0].id, prior.citations[0].id);
+        let answered = saved
+            .messages
+            .iter()
+            .find(|row| row.message.id == user.id)
+            .unwrap();
+        assert!(answered.tool_calls.is_empty() && answered.citations.is_empty());
+        let published = saved
+            .messages
+            .iter()
+            .find(|row| row.message.id == reply.id)
+            .unwrap();
+        assert_eq!(published.tool_calls.len(), 2);
+        assert_eq!(published.citations.len(), 3);
+        let next_user = reopened
+            .save_message(cid, "user", "Find another detail")
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .save_chat_tool_records(cid, &next_user.id, &records)
+                .await
+                .is_err(),
+            "a new turn must not take records from an older reply"
+        );
+        let mut next = reopened
+            .chat_tool_session(
+                cid,
+                &next_user.id,
+                HashMap::new(),
+                scope.clone(),
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let result = next
+            .execute(
+                "native-next-search",
+                "search_atoms",
+                json!({"query": "detail"}),
+            )
+            .await
+            .unwrap();
+        assert!(result.content.starts_with("[10]"));
+
+        let other = core
+            .create_conversation(&[], None, Some(("TestOwner", "OtherSoul")))
+            .await
+            .unwrap();
+        let other_id = &other.conversation.id;
+        let other_user = core
+            .save_message(other_id, "user", "Unrelated sitting")
+            .await
+            .unwrap();
+        assert!(
+            core.save_chat_tool_records(cid, &other_user.id, &records)
+                .await
+                .is_err()
+        );
+        let other_scope = MemuToolConfig {
+            soul_id: "OtherSoul".to_string(),
+            ..scope
+        };
+        let mut attempt = core
+            .chat_tool_session(
+                other_id,
+                &other_user.id,
+                HashMap::new(),
+                other_scope,
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap()
+            .finish();
+        attempt.tool_calls = records.tool_calls.clone();
+        attempt.tool_calls[0].id = "fresh-before-conflict".to_string();
+        attempt.citations = records.citations.clone();
+        attempt.citation_index = 100;
+        assert!(
+            core.save_chat_tool_records(other_id, &other_user.id, &attempt)
+                .await
+                .is_err()
+        );
+        let other = core.get_conversation(other_id).await.unwrap().unwrap();
+        assert!(
+            other.messages[0].tool_calls.is_empty(),
+            "conflict must roll back earlier inserts"
+        );
+        assert_eq!(
+            core.storage
+                .get_chat_citation_index_sync(other_id)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_failure_prevents_tool_execution() {
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let conversation = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conversation.conversation.id;
+        let user = core
+            .save_message(cid, "user", "Focus the canvas")
+            .await
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut session = core
+            .chat_tool_session(
+                cid,
+                &user.id,
+                HashMap::new(),
+                MemuToolConfig {
+                    base_url: "http://127.0.0.1:1".to_string(),
+                    user_id: "TestOwner".to_string(),
+                    soul_id: "TestSoul".to_string(),
+                },
+                None,
+                Some(CanvasContext {
+                    clusters: Vec::new(),
+                }),
+                move |event| captured.lock().unwrap().push(event),
+            )
+            .await
+            .unwrap();
+        core.database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE chat_tool_calls", [])
+            .unwrap();
+        assert!(
+            session
+                .execute(
+                    "unstarted-tool",
+                    "focus_atom",
+                    json!({"atom_id": "fictional"})
+                )
+                .await
+                .err()
+                .unwrap()
+                .contains("Tool was not executed")
+        );
+        assert!(events.lock().unwrap().is_empty());
+        let records = session.finish();
+        assert_eq!(records.tool_calls[0].status, "failed");
+        assert_eq!(
+            records.tool_calls[0].tool_output.as_ref().unwrap()["executed"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_completion_checkpoint_retains_the_outcome_without_replaying() {
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let conversation = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conversation.conversation.id;
+        let user = core
+            .save_message(cid, "user", "Focus the canvas")
+            .await
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut session = core
+            .chat_tool_session(
+                cid,
+                &user.id,
+                HashMap::new(),
+                MemuToolConfig {
+                    base_url: "http://127.0.0.1:1".to_string(),
+                    user_id: "TestOwner".to_string(),
+                    soul_id: "TestSoul".to_string(),
+                },
+                None,
+                Some(CanvasContext {
+                    clusters: Vec::new(),
+                }),
+                move |event| captured.lock().unwrap().push(event),
+            )
+            .await
+            .unwrap();
+        core.database().unwrap().conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_completion BEFORE UPDATE ON chat_tool_calls WHEN NEW.status='complete'
+             BEGIN SELECT RAISE(ABORT, 'fictional save failure'); END;"
+        ).unwrap();
+        assert!(
+            session
+                .execute(
+                    "completed-tool",
+                    "focus_atom",
+                    json!({"atom_id": "fictional"})
+                )
+                .await
+                .err()
+                .unwrap()
+                .contains("Tool finished")
+        );
+        let saved = core.get_conversation(cid).await.unwrap().unwrap();
+        assert_eq!(saved.messages[0].tool_calls[0].status, "running");
+        assert!(
+            session
+                .execute(
+                    "completed-tool",
+                    "focus_atom",
+                    json!({"atom_id": "fictional"})
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, ChatEvent::CanvasAction { .. }))
+                .count(),
+            1
+        );
+        let records = session.finish();
+        assert_eq!(records.tool_calls[0].status, "complete");
+        core.database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_completion;")
+            .unwrap();
+        core.save_chat_tool_records(cid, &user.id, &records)
+            .await
+            .unwrap();
+        let saved = core.get_conversation(cid).await.unwrap().unwrap();
+        assert_eq!(saved.messages[0].tool_calls[0].status, "complete");
+    }
+
+    #[test]
+    fn citation_counter_migration_upgrades_v23_and_is_repeatable() {
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let database = core.database().unwrap();
+        let con = database.conn.lock().unwrap();
+        con.execute_batch(
+            "ALTER TABLE conversations DROP COLUMN atomic_citation_index; PRAGMA user_version=23;",
+        )
+        .unwrap();
+        crate::db::Database::run_migrations(&con).unwrap();
+        crate::db::Database::run_migrations(&con).unwrap();
+        let version: i32 = con
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 24);
+        let columns: i32 = con.query_row("SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='atomic_citation_index'", [], |row| row.get(0)).unwrap();
+        assert_eq!(columns, 1);
+    }
+
+    #[tokio::test]
     async fn chat_tool_session_preserves_dispatch_citations_and_events() {
         let dir = TempDir::new().expect("create tempdir");
         let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).expect("open core");
@@ -2076,14 +2629,16 @@ mod tests {
         for (call_id, expected) in [("call-1", "[1]"), ("call-2", "[2]")] {
             let result = session
                 .execute(call_id, "get_atom", json!({"atom_id": atom.atom.id}))
-                .await;
+                .await
+                .expect("dispatch tool");
             assert!(!result.is_error);
             assert!(result.content.starts_with(expected));
             assert!(result.content.contains("bright comets"));
         }
         let page = session
             .execute("call-page", "get_current_page_context", json!({}))
-            .await;
+            .await
+            .expect("dispatch tool");
         let page: serde_json::Value = serde_json::from_str(&page.content).expect("page result");
         assert_eq!(page["visible_atom"]["citation_index"], 3);
         let refused = session
@@ -2092,7 +2647,8 @@ mod tests {
                 "focus_atom",
                 json!({"atom_id": atom.atom.id}),
             )
-            .await;
+            .await
+            .expect("dispatch tool");
         assert!(refused.is_error);
         assert!(refused.content.contains("Tool unavailable"));
         assert_eq!(session.citations.len(), 3);
@@ -2164,7 +2720,8 @@ mod tests {
                 "create_atom",
                 json!({"content": "must not be created"}),
             )
-            .await;
+            .await
+            .expect("dispatch tool");
         assert!(result.is_error);
         assert!(result.content.contains("Tool unavailable"));
         assert!(session.citations.is_empty());

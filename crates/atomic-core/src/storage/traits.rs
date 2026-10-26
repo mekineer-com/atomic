@@ -699,6 +699,18 @@ pub trait ChatStore: Send + Sync {
         citations: &[ChatCitation],
     ) -> StorageResult<()>;
 
+    /// Highest citation number issued, including mappings removed by cleanup.
+    async fn get_chat_citation_index(&self, conversation_id: &str) -> StorageResult<i32>;
+
+    async fn save_chat_tool_state(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<()>;
+
     /// Get the tag IDs that scope a conversation.
     async fn get_scope_tag_ids(&self, conversation_id: &str) -> StorageResult<Vec<String>>;
 

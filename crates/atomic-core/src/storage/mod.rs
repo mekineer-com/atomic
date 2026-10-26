@@ -560,6 +560,10 @@ dispatch! {
         => sqlite: save_citations_sync, pg_trait: ChatStore, pg_method: save_citations;
     fn get_scope_tag_ids_sync(&self, conversation_id: &str) -> Result<Vec<String>, AtomicCoreError>
         => sqlite: get_scope_tag_ids_sync, pg_trait: ChatStore, pg_method: get_scope_tag_ids;
+    fn get_chat_citation_index_sync(&self, conversation_id: &str) -> Result<i32, AtomicCoreError>
+        => sqlite: get_chat_citation_index_sync, pg_trait: ChatStore, pg_method: get_chat_citation_index;
+    fn save_chat_tool_state_sync(&self, conversation_id: &str, message_id: &str, tool_calls: &[ChatToolCall], citations: &[ChatCitation], citation_index: i32) -> Result<(), AtomicCoreError>
+        => sqlite: save_chat_tool_state_sync, pg_trait: ChatStore, pg_method: save_chat_tool_state;
     fn get_scope_description_sync(&self, tag_ids: &[String]) -> Result<String, AtomicCoreError>
         => sqlite: get_scope_description_sync, pg_trait: ChatStore, pg_method: get_scope_description;
 

@@ -120,6 +120,8 @@ impl PostgresStorage {
                 include_str!("migrations/017_task_runs_active_unique.sql"),
             ),
             (18, include_str!("migrations/018_briefings_teardown.sql")),
+            (19, include_str!("migrations/019_conversation_owner.sql")),
+            (20, include_str!("migrations/020_chat_tool_state.sql")),
         ];
 
         // Advisory lock key — arbitrary fixed i64 to serialize migrations
