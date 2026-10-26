@@ -1328,7 +1328,7 @@ pub struct ChatToolSession {
     storage: StorageBackend,
     conversation_id: String,
     scope_tag_ids: Vec<String>,
-    external_settings: Option<HashMap<String, String>>,
+    external_settings: HashMap<String, String>,
     memu_tool_config: Option<MemuToolConfig>,
     page_context: Option<PageContext>,
     canvas_cache: Option<crate::CanvasCache>,
@@ -1343,7 +1343,7 @@ impl ChatToolSession {
         storage: StorageBackend,
         conversation_id: String,
         scope_tag_ids: Vec<String>,
-        external_settings: Option<HashMap<String, String>>,
+        external_settings: HashMap<String, String>,
         memu_tool_config: Option<MemuToolConfig>,
         page_context: Option<PageContext>,
         canvas_context: Option<CanvasContext>,
@@ -1420,7 +1420,7 @@ impl ChatToolSession {
                     limit,
                     since_days,
                     &self.scope_tag_ids,
-                    self.external_settings.clone(),
+                    Some(self.external_settings.clone()),
                     self.memu_tool_config.as_ref(),
                 )
                 .await
@@ -1545,7 +1545,7 @@ impl ChatToolSession {
                 match execute_create_atom(
                     &self.storage,
                     &tool_args,
-                    self.external_settings.clone(),
+                    Some(self.external_settings.clone()),
                     self.canvas_cache.as_ref(),
                     Arc::clone(&on_embedding_event),
                 )
@@ -1579,7 +1579,7 @@ impl ChatToolSession {
                 match execute_edit_atom(
                     &self.storage,
                     &tool_args,
-                    self.external_settings.clone(),
+                    Some(self.external_settings.clone()),
                     self.canvas_cache.as_ref(),
                     Arc::clone(&on_embedding_event),
                     self.memu_tool_config.as_ref(),
@@ -1660,13 +1660,11 @@ impl ChatToolSession {
 // ==================== Agent Loop ====================
 
 struct AgentContext {
-    conversation_id: String,
     messages: Vec<Message>,
     tools: ChatToolSession,
 }
 
 async fn run_agent_loop(
-    on_event: ChatEventCallback,
     provider_config: ProviderConfig,
     model: String,
     mut ctx: AgentContext,
@@ -1701,25 +1699,15 @@ async fn run_agent_loop(
             provider_config.context_length_for_model(&model),
         );
         if ctx.tools.memu_tool_config.is_some() {
-            if let Some(limit) = ctx
-                .tools
-                .external_settings
-                .as_ref()
-                .and_then(memu_response_sentence_limit)
-            {
+            if let Some(limit) = memu_response_sentence_limit(&ctx.tools.external_settings) {
                 call_messages = append_memu_response_limit(call_messages, limit);
             }
         }
-        let should_forward_prompt_log = ctx
-            .tools
-            .external_settings
-            .as_ref()
-            .map(memu_prompt_logging_enabled)
-            .unwrap_or(false);
+        let should_forward_prompt_log = memu_prompt_logging_enabled(&ctx.tools.external_settings);
         if should_forward_prompt_log {
             if let Some(config) = ctx.tools.memu_tool_config.as_ref() {
                 let config = config.clone();
-                let conversation_id = ctx.conversation_id.clone();
+                let conversation_id = ctx.tools.conversation_id.clone();
                 let model = model.clone();
                 let messages = call_messages.clone();
                 crate::executor::spawn(async move {
@@ -1736,8 +1724,8 @@ async fn run_agent_loop(
         // Emit the accumulated content as a stream delta
         if let Ok(content) = accumulated_content.lock() {
             if !content.is_empty() {
-                on_event(ChatEvent::StreamDelta {
-                    conversation_id: ctx.conversation_id.clone(),
+                (ctx.tools.on_event)(ChatEvent::StreamDelta {
+                    conversation_id: ctx.tools.conversation_id.clone(),
                     content: content.clone(),
                 });
             }
@@ -1792,7 +1780,7 @@ async fn run_agent_loop(
             return Ok(ChatMessageWithContext {
                 message: ChatMessage {
                     id: Uuid::new_v4().to_string(),
-                    conversation_id: ctx.conversation_id.clone(),
+                    conversation_id: ctx.tools.conversation_id.clone(),
                     role: "assistant".to_string(),
                     content,
                     created_at: Utc::now().to_rfc3339(),
@@ -1956,13 +1944,12 @@ where
 
     // Create agent context
     let ctx = AgentContext {
-        conversation_id: conversation_id.to_string(),
         messages: api_messages,
         tools: ChatToolSession::new(
             storage.clone(),
             conversation_id.to_string(),
             scope_tag_ids,
-            Some(settings_map),
+            settings_map,
             memu_tool_config,
             page_context,
             canvas_context,
@@ -1972,7 +1959,7 @@ where
     };
 
     // Run agent loop with canvas context
-    let mut result = run_agent_loop(Arc::clone(&on_event), provider_config, model, ctx).await?;
+    let mut result = run_agent_loop(provider_config, model, ctx).await?;
 
     // Save assistant message
     {
@@ -2038,7 +2025,7 @@ mod tests {
             core.storage.clone(),
             "test-conversation".to_string(),
             Vec::new(),
-            None,
+            HashMap::new(),
             None,
             Some(PageContext {
                 view: Some("atom".to_string()),
@@ -2112,7 +2099,7 @@ mod tests {
             core.storage.clone(),
             "test-conversation".to_string(),
             Vec::new(),
-            None,
+            HashMap::new(),
             Some(MemuToolConfig {
                 base_url: "http://127.0.0.1:1".to_string(),
                 user_id: "TestOwner".to_string(),
