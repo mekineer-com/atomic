@@ -169,7 +169,7 @@ interface ChatStore {
   // Actions - Streaming updates (called from event handlers)
   appendStreamContent: (delta: string) => void;
   startStreamingToolCall: (call: { tool_call_id: string; tool_name: string; tool_input: unknown }) => void;
-  completeStreamingToolCall: (update: { tool_call_id: string; results_count: number }) => void;
+  completeStreamingToolCall: (update: { tool_call_id: string; results_count: number; is_error: boolean }) => void;
   completeMessage: (message: ChatMessageWithContext) => void;
   setStreamingError: (error: string) => void;
 
@@ -534,14 +534,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }));
   },
 
-  completeStreamingToolCall: ({ tool_call_id, results_count }) => {
+  completeStreamingToolCall: ({ tool_call_id, results_count, is_error }) => {
     const now = new Date().toISOString();
     set((state) => ({
       streamingToolCalls: state.streamingToolCalls.map((call) =>
         call.id === tool_call_id
           ? {
               ...call,
-              status: 'complete' as const,
+              status: is_error ? 'failed' as const : 'complete' as const,
               tool_output: { results_count },
               completed_at: now,
             }

@@ -420,6 +420,7 @@ pub enum ServerEvent {
         conversation_id: String,
         tool_call_id: String,
         results_count: i32,
+        is_error: bool,
     },
     ChatComplete {
         database_id: String,
@@ -546,11 +547,13 @@ impl ServerEvent {
                 conversation_id,
                 tool_call_id,
                 results_count,
+                is_error,
             } => Self::ChatToolComplete {
                 database_id,
                 conversation_id,
                 tool_call_id,
                 results_count,
+                is_error,
             },
             atomic_core::ChatEvent::Complete {
                 conversation_id,

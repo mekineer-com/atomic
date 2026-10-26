@@ -68,8 +68,13 @@ impl<S: Service<RoleServer> + Clone> AtomicMcpTransport<S> {
         }
     }
 
-    pub(crate) async fn post(&self, req: HttpRequest, body: Bytes) -> Result<HttpResponse> {
-        handle_post(req, body, self.state.clone()).await
+    pub(crate) async fn handle(&self, req: HttpRequest, body: Bytes) -> Result<HttpResponse> {
+        match *req.method() {
+            actix_web::http::Method::POST => handle_post(req, body, self.state.clone()).await,
+            actix_web::http::Method::GET => handle_get(req, self.state.clone()).await,
+            actix_web::http::Method::DELETE => handle_delete(req, self.state.clone()).await,
+            _ => Ok(HttpResponse::MethodNotAllowed().finish()),
+        }
     }
 
     pub fn close_idle_streams(&self) {

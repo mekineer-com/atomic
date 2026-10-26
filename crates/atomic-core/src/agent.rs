@@ -68,6 +68,7 @@ pub enum ChatEvent {
         conversation_id: String,
         tool_call_id: String,
         results_count: i32,
+        is_error: bool,
     },
     /// Full message completed
     Complete {
@@ -1322,6 +1323,11 @@ fn chat_messages_to_provider_messages(
         .collect()
 }
 
+pub struct ChatToolRecords {
+    pub tool_calls: Vec<ChatToolCall>,
+    pub citations: Vec<ChatCitation>,
+}
+
 pub struct ChatToolResult {
     pub content: String,
     pub is_error: bool,
@@ -1344,7 +1350,7 @@ pub struct ChatToolSession {
 }
 
 impl ChatToolSession {
-    pub fn new(
+    pub(crate) fn new(
         storage: StorageBackend,
         conversation_id: String,
         scope_tag_ids: Vec<String>,
@@ -1374,6 +1380,28 @@ impl ChatToolSession {
             tools,
             citations: Vec::new(),
             tool_calls_record: Vec::new(),
+        }
+    }
+
+    pub fn finish(self) -> ChatToolRecords {
+        let citations = self
+            .citations
+            .into_iter()
+            .enumerate()
+            .map(|(i, (atom_id, chunk_index, excerpt))| ChatCitation {
+                id: Uuid::new_v4().to_string(),
+                message_id: String::new(), // Set when saving
+                citation_index: (i + 1) as i32,
+                atom_id,
+                chunk_index,
+                excerpt,
+                relevance_score: None,
+            })
+            .collect();
+
+        ChatToolRecords {
+            tool_calls: self.tool_calls_record,
+            citations,
         }
     }
 
@@ -1666,6 +1694,7 @@ impl ChatToolSession {
             conversation_id: self.conversation_id.clone(),
             tool_call_id: call_id.to_string(),
             results_count,
+            is_error,
         });
 
         ChatToolResult {
@@ -1778,34 +1807,20 @@ async fn run_agent_loop(
             // No tool calls - we have the final answer
             let content = response.content;
 
-            // Build citations from collected data
-            let citations: Vec<ChatCitation> = ctx
-                .tools
-                .citations
-                .iter()
-                .enumerate()
-                .map(|(i, (atom_id, chunk_index, excerpt))| ChatCitation {
-                    id: Uuid::new_v4().to_string(),
-                    message_id: String::new(), // Set when saving
-                    citation_index: (i + 1) as i32,
-                    atom_id: atom_id.clone(),
-                    chunk_index: *chunk_index,
-                    excerpt: excerpt.clone(),
-                    relevance_score: None,
-                })
-                .collect();
+            let conversation_id = ctx.tools.conversation_id.clone();
+            let records = ctx.tools.finish();
 
             return Ok(ChatMessageWithContext {
                 message: ChatMessage {
                     id: Uuid::new_v4().to_string(),
-                    conversation_id: ctx.tools.conversation_id.clone(),
+                    conversation_id,
                     role: "assistant".to_string(),
                     content,
                     created_at: Utc::now().to_rfc3339(),
                     message_index: 0, // Set when saving
                 },
-                tool_calls: ctx.tools.tool_calls_record,
-                citations,
+                tool_calls: records.tool_calls,
+                citations: records.citations,
             });
         }
     }
@@ -2107,9 +2122,15 @@ mod tests {
             &events[7],
             ChatEvent::ToolComplete {
                 results_count: 0,
+                is_error: true,
                 ..
             }
         ));
+        let records = session.finish();
+        assert_eq!(records.tool_calls.len(), 4);
+        assert_eq!(records.citations.len(), 3);
+        assert_eq!(records.citations[2].citation_index, 3);
+        assert_eq!(records.citations[2].atom_id, atom.atom.id);
     }
 
     #[tokio::test]

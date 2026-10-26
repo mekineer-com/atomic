@@ -18,6 +18,7 @@ interface ChatToolComplete {
   conversation_id: string;
   tool_call_id: string;
   results_count: number;
+  is_error: boolean;
 }
 
 interface ChatComplete {
@@ -64,6 +65,7 @@ export function useChatEvents(conversationId: string | null) {
         completeStreamingToolCall({
           tool_call_id: payload.tool_call_id,
           results_count: payload.results_count,
+          is_error: payload.is_error,
         });
       }
     }));

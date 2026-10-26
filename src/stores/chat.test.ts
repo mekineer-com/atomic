@@ -13,6 +13,16 @@ beforeEach(() => {
   } });
 });
 
+it('shows failed tool completion immediately and successful completion normally', () => {
+  const store = useChatStore.getState();
+  store.startStreamingToolCall({ tool_call_id: 'toolu-failed', tool_name: 'get_atom', tool_input: {} });
+  store.completeStreamingToolCall({ tool_call_id: 'toolu-failed', results_count: 0, is_error: true });
+  expect(useChatStore.getState().streamingToolCalls[0].status).toBe('failed');
+  store.startStreamingToolCall({ tool_call_id: 'toolu-success', tool_name: 'get_atom', tool_input: {} });
+  store.completeStreamingToolCall({ tool_call_id: 'toolu-success', results_count: 1, is_error: false });
+  expect(useChatStore.getState().streamingToolCalls[1].status).toBe('complete');
+});
+
 it('reports a refused send without leaving synthetic chat history', async () => {
   invoke.mockRejectedValue(Object.assign(new Error('TestSoul is paused. Retry in OpenAlma launcher.'), { code: 'soul_paused' }));
   expect(await useChatStore.getState().sendMessage('Draft')).toBe('refused');

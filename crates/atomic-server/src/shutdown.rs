@@ -95,11 +95,14 @@ pub async fn admission<B: MessageBody + 'static>(
     // marker; protocol housekeeping itself does not keep shutdown alive.
     if work.is_some() {
         req.extensions_mut().insert(AdmittedRequest);
-    } else if !(req.method() == actix_web::http::Method::POST
-        && matches!(
-            req.path().trim_end_matches('/'),
-            "/mcp" | crate::mcp::chat::CHAT_TOOLS_PATH
-        ))
+    } else if !((req.method() == actix_web::http::Method::POST
+        && req.path().trim_end_matches('/') == "/mcp")
+        || (matches!(
+            *req.method(),
+            actix_web::http::Method::POST
+                | actix_web::http::Method::GET
+                | actix_web::http::Method::DELETE
+        ) && req.path().trim_end_matches('/') == crate::mcp::chat::CHAT_TOOLS_PATH))
     {
         return Ok(req
             .into_response(HttpResponse::ServiceUnavailable().finish())

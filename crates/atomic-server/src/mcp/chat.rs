@@ -3,7 +3,7 @@
 use super::AtomicMcpTransport;
 use actix_web::{http::header, web, HttpMessage, HttpRequest, HttpResponse};
 use atomic_core::{
-    agent::ChatToolSession,
+    agent::{ChatToolRecords, ChatToolSession},
     executor::{self, WorkTracker},
 };
 use rmcp::{
@@ -29,19 +29,19 @@ pub struct ChatToolBridge {
     turns: Arc<Mutex<HashMap<String, AtomicMcpTransport<ChatMcpServer>>>>,
 }
 
-/// The admitted turn owns this lease through native completion and persistence.
-/// Dropping it stops tool admission, drains accepted calls, then revokes access.
+/// Finish the lease before publishing its tool state. Drop is abandonment cleanup.
 pub struct ChatToolLease {
     credential: String,
     bridge: ChatToolBridge,
     server: ChatMcpServer,
     transport: AtomicMcpTransport<ChatMcpServer>,
+    finished: bool,
 }
 
 struct ChatTurn {
     accepting: Mutex<bool>,
     work: WorkTracker,
-    state: AsyncMutex<ChatToolSession>,
+    state: AsyncMutex<Option<ChatToolSession>>,
     tools: Vec<Tool>,
 }
 
@@ -69,7 +69,7 @@ impl ChatToolBridge {
         let server = ChatMcpServer(Arc::new(ChatTurn {
             accepting: Mutex::new(true),
             work: WorkTracker::default(),
-            state: AsyncMutex::new(session),
+            state: AsyncMutex::new(Some(session)),
             tools,
         }));
         let transport = AtomicMcpTransport::with_server(server.clone(), Duration::from_secs(30));
@@ -83,6 +83,7 @@ impl ChatToolBridge {
             bridge: self.clone(),
             server,
             transport,
+            finished: false,
         })
     }
 }
@@ -91,29 +92,67 @@ impl ChatToolLease {
     pub fn credential(&self) -> &str {
         &self.credential
     }
-}
 
-impl Drop for ChatToolLease {
-    fn drop(&mut self) {
+    fn stop_admission(&self) {
         *self
             .server
             .0
             .accepting
             .lock()
             .expect("chat tool admission poisoned") = false;
+    }
+
+    pub async fn finish(mut self) -> ChatToolRecords {
+        self.stop_admission();
+        drain_turn(
+            self.bridge.clone(),
+            self.credential.clone(),
+            Arc::clone(&self.server.0),
+            self.transport.clone(),
+        )
+        .await;
+        let records = self
+            .server
+            .0
+            .state
+            .lock()
+            .await
+            .take()
+            .expect("finished tool session")
+            .finish();
+        self.finished = true;
+        records
+    }
+}
+
+async fn drain_turn(
+    bridge: ChatToolBridge,
+    credential: String,
+    turn: Arc<ChatTurn>,
+    transport: AtomicMcpTransport<ChatMcpServer>,
+) {
+    turn.work.wait_idle().await;
+    bridge
+        .turns
+        .lock()
+        .expect("chat tool registry poisoned")
+        .remove(&credential);
+    transport.close_idle_streams();
+    transport.shutdown().await;
+}
+
+impl Drop for ChatToolLease {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.stop_admission();
         let credential = self.credential.clone();
         let bridge = self.bridge.clone();
         let turn = Arc::clone(&self.server.0);
         let transport = self.transport.clone();
         executor::spawn(async move {
-            turn.work.wait_idle().await;
-            bridge
-                .turns
-                .lock()
-                .expect("chat tool registry poisoned")
-                .remove(&credential);
-            transport.close_idle_streams();
-            transport.shutdown().await;
+            drain_turn(bridge, credential, turn, transport).await;
         });
     }
 }
@@ -121,6 +160,7 @@ impl Drop for ChatToolLease {
 impl ChatMcpServer {
     async fn execute(
         &self,
+        call_id: String,
         name: String,
         arguments: serde_json::Value,
     ) -> Result<CallToolResult, ErrorData> {
@@ -137,14 +177,17 @@ impl ChatMcpServer {
         };
         let turn = Arc::clone(&self.0);
         let (send, receive) = oneshot::channel();
-        // Neither HTTP-body loss nor MCP cancellation owns the actual tool work.
+        // The turn's executor owns work even if a caller drops this future;
+        // do not make that guarantee depend on rmcp's detached-handler policy.
         executor::spawn(async move {
             let _work = work;
             let result = turn
                 .state
                 .lock()
                 .await
-                .execute(&Uuid::new_v4().to_string(), &name, arguments)
+                .as_mut()
+                .expect("active tool session")
+                .execute(&call_id, &name, arguments)
                 .await;
             let content = vec![Content::text(result.content)];
             let result = if result.is_error {
@@ -182,9 +225,18 @@ impl ServerHandler for ChatMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let call_id = context
+            .meta
+            .get("claudecode/toolUseId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ErrorData::invalid_request("Claude tool call is missing claudecode/toolUseId", None)
+            })?;
         self.execute(
+            call_id.to_string(),
             request.name.into_owned(),
             serde_json::Value::Object(request.arguments.unwrap_or_default()),
         )
@@ -219,7 +271,7 @@ pub async fn chat_tools(
     // A live credential belongs to work admitted before graceful drain began.
     req.extensions_mut()
         .insert(crate::shutdown::AdmittedRequest);
-    transport.post(req, body).await
+    transport.handle(req, body).await
 }
 
 #[cfg(test)]
@@ -254,6 +306,36 @@ mod tests {
                 &message.id,
                 HashMap::new(),
                 other_scope,
+                None,
+                None,
+                |_| {}
+            )
+            .await
+            .is_err());
+        let mut other_owner = scope.clone();
+        other_owner.user_id = "OtherOwner".to_string();
+        assert!(core
+            .chat_tool_session(
+                &conversation.conversation.id,
+                &message.id,
+                HashMap::new(),
+                other_owner,
+                None,
+                None,
+                |_| {}
+            )
+            .await
+            .is_err());
+        let assistant = core
+            .save_message(&conversation.conversation.id, "assistant", "Earlier reply")
+            .await
+            .unwrap();
+        assert!(core
+            .chat_tool_session(
+                &conversation.conversation.id,
+                &assistant.id,
+                HashMap::new(),
+                scope.clone(),
                 None,
                 None,
                 |_| {}
@@ -325,7 +407,12 @@ mod tests {
                 .app_data(bridge.clone())
                 .app_data(shutdown.clone())
                 .wrap(middleware::from_fn(crate::shutdown::admission))
-                .route(CHAT_TOOLS_PATH, web::post().to(chat_tools))
+                .service(
+                    web::resource(CHAT_TOOLS_PATH)
+                        .route(web::post().to(chat_tools))
+                        .route(web::get().to(chat_tools))
+                        .route(web::delete().to(chat_tools)),
+                )
                 .route(
                     "/ordinary",
                     web::post().to(|| async { HttpResponse::Ok().finish() }),
@@ -409,8 +496,45 @@ mod tests {
             .status(),
             503
         );
+        let missing_meta = request(lease.credential(), Some(&id), json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "focus_atom", "arguments": {}}})).to_request();
+        let response = test::call_service(&app, missing_meta).await;
+        let body = to_bytes(response.into_body()).await.unwrap();
+        assert!(String::from_utf8(body.to_vec())
+            .unwrap()
+            .contains("missing claudecode/toolUseId"));
+        let unauthorized_get = test::TestRequest::get().uri(CHAT_TOOLS_PATH).to_request();
+        assert_eq!(
+            test::call_service(&app, unauthorized_get).await.status(),
+            401
+        );
+        let idle = test::TestRequest::get()
+            .uri(CHAT_TOOLS_PATH)
+            .insert_header((
+                header::AUTHORIZATION,
+                format!("Bearer {}", lease.credential()),
+            ))
+            .insert_header((header::ACCEPT, "text/event-stream"))
+            .insert_header(("mcp-session-id", id.clone()))
+            .to_request();
+        let response = test::call_service(&app, idle).await;
+        assert_eq!(response.status(), 200);
+        let mut idle_body = Box::pin(to_bytes(response.into_body()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), idle_body.as_mut())
+                .await
+                .is_err()
+        );
+        let missing_delete = test::TestRequest::delete()
+            .uri(CHAT_TOOLS_PATH)
+            .insert_header((
+                header::AUTHORIZATION,
+                format!("Bearer {}", lease.credential()),
+            ))
+            .insert_header(("mcp-session-id", "unknown-session"))
+            .to_request();
+        assert_eq!(test::call_service(&app, missing_delete).await.status(), 404);
         for (name, error) in [("focus_atom", false), ("create_atom", true)] {
-            let call = request(lease.credential(), Some(&id), json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": name, "arguments": {"atom_id": "fictional-atom"}}})).to_request();
+            let call = request(lease.credential(), Some(&id), json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": name, "arguments": {"atom_id": "fictional-atom"}, "_meta": {"claudecode/toolUseId": format!("toolu-{name}")}}})).to_request();
             let response = test::call_service(&app, call).await;
             assert_eq!(response.status(), 200);
             let body = to_bytes(response.into_body()).await.unwrap();
@@ -425,7 +549,16 @@ mod tests {
         }
         assert!(events.lock().unwrap().iter().any(|event| matches!(event, ChatEvent::CanvasAction { action, .. } if action == "focus_atom")));
         let token = lease.credential().to_string();
-        drop(lease);
+        let records = lease.finish().await;
+        assert_eq!(records.tool_calls.len(), 2);
+        assert_eq!(records.tool_calls[0].id, "toolu-focus_atom");
+        assert_eq!(records.tool_calls[1].id, "toolu-create_atom");
+        assert_eq!(records.tool_calls[1].status, "failed");
+        assert!(records.citations.is_empty());
+        tokio::time::timeout(Duration::from_secs(5), idle_body)
+            .await
+            .unwrap()
+            .unwrap();
         drop(other_lease);
         tokio::time::timeout(Duration::from_secs(5), executor::wait_idle())
             .await
@@ -446,6 +579,7 @@ mod tests {
         let server = lease.server.clone();
         let held = server.0.state.lock().await;
         let mut call = Box::pin(server.execute(
+            "toolu-detached".to_string(),
             "focus_atom".to_string(),
             json!({"atom_id": "fictional-atom"}),
         ));
@@ -471,9 +605,52 @@ mod tests {
             .iter()
             .any(|event| matches!(event, ChatEvent::CanvasAction { .. })));
         assert!(server
-            .execute("focus_atom".to_string(), json!({}))
+            .execute(
+                "toolu-after-close".to_string(),
+                "focus_atom".to_string(),
+                json!({})
+            )
             .await
             .is_err());
+        assert!(bridge.turns.lock().unwrap().is_empty());
+    }
+
+    #[actix_web::test]
+    async fn finish_waits_for_tools_then_returns_records_and_revokes_the_credential() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let bridge = ChatToolBridge::default();
+        let lease = bridge
+            .register(session(&core, Arc::new(Mutex::new(Vec::new()))).await)
+            .unwrap();
+        let token = lease.credential().to_string();
+        let server = lease.server.clone();
+        let held = server.0.state.lock().await;
+        let mut call = Box::pin(server.execute(
+            "toolu-finish".to_string(),
+            "focus_atom".to_string(),
+            json!({"atom_id": "fictional-atom"}),
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), call.as_mut())
+                .await
+                .is_err()
+        );
+        drop(call);
+        let mut finish = Box::pin(lease.finish());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), finish.as_mut())
+                .await
+                .is_err()
+        );
+        assert!(bridge.turns.lock().unwrap().contains_key(&token));
+        drop(held);
+        let records = tokio::time::timeout(Duration::from_secs(5), finish)
+            .await
+            .unwrap();
+        assert_eq!(records.tool_calls.len(), 1);
+        assert_eq!(records.tool_calls[0].id, "toolu-finish");
+        assert_eq!(records.tool_calls[0].status, "complete");
         assert!(bridge.turns.lock().unwrap().is_empty());
     }
 }

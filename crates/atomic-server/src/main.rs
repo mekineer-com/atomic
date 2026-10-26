@@ -790,9 +790,11 @@ async fn run_server(
                 web::get().to(routes::exports::download_export),
             )
             .app_data(chat_tools.clone())
-            .route(
-                mcp::chat::CHAT_TOOLS_PATH,
-                web::post().to(mcp::chat::chat_tools),
+            .service(
+                web::resource(mcp::chat::CHAT_TOOLS_PATH)
+                    .route(web::post().to(mcp::chat::chat_tools))
+                    .route(web::get().to(mcp::chat::chat_tools))
+                    .route(web::delete().to(mcp::chat::chat_tools)),
             )
             // MCP endpoint with MCP-aware auth
             .service(
