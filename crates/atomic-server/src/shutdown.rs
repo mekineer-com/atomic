@@ -96,7 +96,10 @@ pub async fn admission<B: MessageBody + 'static>(
     if work.is_some() {
         req.extensions_mut().insert(AdmittedRequest);
     } else if !(req.method() == actix_web::http::Method::POST
-        && req.path().trim_end_matches('/') == "/mcp")
+        && matches!(
+            req.path().trim_end_matches('/'),
+            "/mcp" | crate::mcp::chat::CHAT_TOOLS_PATH
+        ))
     {
         return Ok(req
             .into_response(HttpResponse::ServiceUnavailable().finish())

@@ -1322,6 +1322,11 @@ fn chat_messages_to_provider_messages(
         .collect()
 }
 
+pub struct ChatToolResult {
+    pub content: String,
+    pub is_error: bool,
+}
+
 /// Owned tool state shared by API chat and the scoped Claude bridge.
 /// Callers serialize execution for the whole call, including citation allocation.
 pub struct ChatToolSession {
@@ -1381,7 +1386,7 @@ impl ChatToolSession {
         call_id: &str,
         tool_name: &str,
         tool_args: serde_json::Value,
-    ) -> String {
+    ) -> ChatToolResult {
         let on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static> = {
             let on_event = Arc::clone(&self.on_event);
             let conversation_id = self.conversation_id.clone();
@@ -1402,10 +1407,12 @@ impl ChatToolSession {
         });
 
         // Execute tool
-        let (tool_result, results_count) = match tool_name {
-            _ if !self.tools.iter().any(|tool| tool.name == tool_name) => {
-                (format!("Tool unavailable in this session: {tool_name}"), 0)
-            }
+        let (tool_result, results_count, is_error) = match tool_name {
+            _ if !self.tools.iter().any(|tool| tool.name == tool_name) => (
+                format!("Tool unavailable in this session: {tool_name}"),
+                0,
+                true,
+            ),
             "search_atoms" => {
                 let query = tool_args["query"].as_str().unwrap_or("");
                 let limit = tool_args["limit"].as_i64().unwrap_or(5) as i32;
@@ -1448,9 +1455,9 @@ impl ChatToolSession {
                             })
                             .collect::<Vec<_>>()
                             .join("\n\n");
-                        (result_text, count)
+                        (result_text, count, false)
                     }
-                    Err(e) => (format!("Error: {}", e), 0),
+                    Err(e) => (format!("Error: {}", e), 0, true),
                 }
             }
             "get_atom" => {
@@ -1485,10 +1492,11 @@ impl ChatToolSession {
                         (
                             format!("[{}] (atom_id: {})\n{}", citation_index, atom_id, content),
                             1,
+                            false,
                         )
                     }
-                    Ok(None) => ("Atom not found".to_string(), 0),
-                    Err(e) => (format!("Error: {}", e), 0),
+                    Ok(None) => ("Atom not found".to_string(), 0, true),
+                    Err(e) => (format!("Error: {}", e), 0, true),
                 }
             }
             "get_current_page_context" => {
@@ -1535,10 +1543,11 @@ impl ChatToolSession {
                             serde_json::to_string_pretty(&context)
                                 .unwrap_or_else(|_| context.to_string()),
                             1,
+                            false,
                         )
                     }
-                    Ok(None) => ("No current page context was provided.".to_string(), 0),
-                    Err(e) => (format!("Error: {}", e), 0),
+                    Ok(None) => ("No current page context was provided.".to_string(), 0, true),
+                    Err(e) => (format!("Error: {}", e), 0, true),
                 }
             }
             "create_atom" => {
@@ -1570,9 +1579,10 @@ impl ChatToolSession {
                             }))
                             .unwrap_or_else(|_| atom.atom.id),
                             1,
+                            false,
                         )
                     }
-                    Err(e) => (format!("Error: {}", e), 0),
+                    Err(e) => (format!("Error: {}", e), 0, true),
                 }
             }
             "edit_atom" => {
@@ -1607,10 +1617,11 @@ impl ChatToolSession {
                             }))
                             .unwrap_or_else(|_| atom.atom.id),
                             1,
+                            false,
                         )
                     }
-                    Ok(None) => ("Atom not found".to_string(), 0),
-                    Err(e) => (format!("Error: {}", e), 0),
+                    Ok(None) => ("Atom not found".to_string(), 0, true),
+                    Err(e) => (format!("Error: {}", e), 0, true),
                 }
             }
             "zoom_to_cluster" => {
@@ -1620,7 +1631,11 @@ impl ChatToolSession {
                     action: "zoom_to_cluster".to_string(),
                     params: json!({ "cluster_label": cluster_label }),
                 });
-                (format!("Zoomed canvas to cluster '{}'", cluster_label), 1)
+                (
+                    format!("Zoomed canvas to cluster '{}'", cluster_label),
+                    1,
+                    false,
+                )
             }
             "focus_atom" => {
                 let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
@@ -1629,9 +1644,9 @@ impl ChatToolSession {
                     action: "focus_atom".to_string(),
                     params: json!({ "atom_id": atom_id }),
                 });
-                (format!("Focused canvas on atom '{}'", atom_id), 1)
+                (format!("Focused canvas on atom '{}'", atom_id), 1, false)
             }
-            _ => (format!("Unknown tool: {}", tool_name), 0),
+            _ => (format!("Unknown tool: {}", tool_name), 0, true),
         };
 
         // Record tool call
@@ -1641,7 +1656,7 @@ impl ChatToolSession {
             tool_name: tool_name.to_string(),
             tool_input: tool_args,
             tool_output: Some(serde_json::Value::String(tool_result.clone())),
-            status: "complete".to_string(),
+            status: if is_error { "failed" } else { "complete" }.to_string(),
             created_at: Utc::now().to_rfc3339(),
             completed_at: Some(Utc::now().to_rfc3339()),
         });
@@ -1653,7 +1668,10 @@ impl ChatToolSession {
             results_count,
         });
 
-        tool_result
+        ChatToolResult {
+            content: tool_result,
+            is_error,
+        }
     }
 }
 
@@ -1754,7 +1772,7 @@ async fn run_agent_loop(
 
                 // Add tool result to messages
                 ctx.messages
-                    .push(Message::tool_result(&tool_call.id, tool_result));
+                    .push(Message::tool_result(&tool_call.id, tool_result.content));
             }
         } else {
             // No tool calls - we have the final answer
@@ -2044,13 +2062,14 @@ mod tests {
             let result = session
                 .execute(call_id, "get_atom", json!({"atom_id": atom.atom.id}))
                 .await;
-            assert!(result.starts_with(expected));
-            assert!(result.contains("bright comets"));
+            assert!(!result.is_error);
+            assert!(result.content.starts_with(expected));
+            assert!(result.content.contains("bright comets"));
         }
         let page = session
             .execute("call-page", "get_current_page_context", json!({}))
             .await;
-        let page: serde_json::Value = serde_json::from_str(&page).expect("page result");
+        let page: serde_json::Value = serde_json::from_str(&page.content).expect("page result");
         assert_eq!(page["visible_atom"]["citation_index"], 3);
         let refused = session
             .execute(
@@ -2059,9 +2078,11 @@ mod tests {
                 json!({"atom_id": atom.atom.id}),
             )
             .await;
-        assert!(refused.contains("Tool unavailable"));
+        assert!(refused.is_error);
+        assert!(refused.content.contains("Tool unavailable"));
         assert_eq!(session.citations.len(), 3);
         assert_eq!(session.tool_calls_record.len(), 4);
+        assert_eq!(session.tool_calls_record[3].status, "failed");
         let record = &session.tool_calls_record[0];
         assert_eq!(record.id, "call-1");
         assert_eq!(record.tool_input["atom_id"], atom.atom.id);
@@ -2123,7 +2144,8 @@ mod tests {
                 json!({"content": "must not be created"}),
             )
             .await;
-        assert!(result.contains("Tool unavailable"));
+        assert!(result.is_error);
+        assert!(result.content.contains("Tool unavailable"));
         assert!(session.citations.is_empty());
         assert_eq!(session.tool_calls_record.len(), 1);
     }

@@ -1,3 +1,4 @@
+pub mod chat;
 mod server;
 mod transport;
 mod types;

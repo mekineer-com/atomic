@@ -301,6 +301,7 @@ async fn run_server(
         event_tx.clone(),
         Duration::from_secs(30),
     );
+    let chat_tools = web::Data::new(mcp::chat::ChatToolBridge::default());
 
     tracing::info!("Atomic Server starting...");
     tracing::info!(data_dir = data_dir, "data directory");
@@ -787,6 +788,11 @@ async fn run_server(
             .route(
                 "/api/exports/{id}/download",
                 web::get().to(routes::exports::download_export),
+            )
+            .app_data(chat_tools.clone())
+            .route(
+                mcp::chat::CHAT_TOOLS_PATH,
+                web::post().to(mcp::chat::chat_tools),
             )
             // MCP endpoint with MCP-aware auth
             .service(

@@ -39,20 +39,25 @@ const HEADER_X_ACCEL_BUFFERING: &str = "X-Accel-Buffering";
 const TEXT_MIME_TYPE: &str = "text/plain; charset=utf-8";
 
 #[derive(Clone)]
-pub struct AtomicMcpTransport {
-    state: Data<TransportState>,
+pub struct AtomicMcpTransport<S = AtomicMcpServer> {
+    state: Data<TransportState<S>>,
 }
 
-impl AtomicMcpTransport {
+impl AtomicMcpTransport<AtomicMcpServer> {
     pub fn new(
         manager: Arc<DatabaseManager>,
         event_tx: broadcast::Sender<ServerEvent>,
         sse_keep_alive: Duration,
     ) -> Self {
+        Self::with_server(AtomicMcpServer::new(manager, event_tx), sse_keep_alive)
+    }
+}
+
+impl<S: Service<RoleServer> + Clone> AtomicMcpTransport<S> {
+    pub(crate) fn with_server(server: S, sse_keep_alive: Duration) -> Self {
         Self {
             state: Data::new(TransportState {
-                manager,
-                event_tx,
+                server,
                 session_manager: Arc::new(LocalSessionManager::default()),
                 sse_keep_alive,
                 requests: WorkTracker::default(),
@@ -61,6 +66,10 @@ impl AtomicMcpTransport {
                 protocol_stop: watch::channel(false).0,
             }),
         }
+    }
+
+    pub(crate) async fn post(&self, req: HttpRequest, body: Bytes) -> Result<HttpResponse> {
+        handle_post(req, body, self.state.clone()).await
     }
 
     pub fn close_idle_streams(&self) {
@@ -88,15 +97,14 @@ impl AtomicMcpTransport {
         web::scope("")
             .app_data(self.state.clone())
             .wrap(middleware::NormalizePath::trim())
-            .route("", web::get().to(handle_get))
-            .route("", web::post().to(handle_post))
-            .route("", web::delete().to(handle_delete))
+            .route("", web::get().to(handle_get::<S>))
+            .route("", web::post().to(handle_post::<S>))
+            .route("", web::delete().to(handle_delete::<S>))
     }
 }
 
-struct TransportState {
-    manager: Arc<DatabaseManager>,
-    event_tx: broadcast::Sender<ServerEvent>,
+struct TransportState<S> {
+    server: S,
     session_manager: Arc<LocalSessionManager>,
     sse_keep_alive: Duration,
     requests: WorkTracker,
@@ -105,20 +113,17 @@ struct TransportState {
     protocol_stop: watch::Sender<bool>,
 }
 
-impl TransportState {
-    fn server(&self) -> DrainingMcpServer {
-        DrainingMcpServer(AtomicMcpServer::new(
-            Arc::clone(&self.manager),
-            self.event_tx.clone(),
-        ))
+impl<S: Service<RoleServer> + Clone> TransportState<S> {
+    fn server(&self) -> DrainingMcpServer<S> {
+        DrainingMcpServer(self.server.clone())
     }
 }
 
 // Keep admission accounting alive across rmcp's detached request dispatch,
 // even if a tool consumes/drops its RequestContext before finishing work.
-struct DrainingMcpServer(AtomicMcpServer);
+struct DrainingMcpServer<S>(S);
 
-impl Service<RoleServer> for DrainingMcpServer {
+impl<S: Service<RoleServer>> Service<RoleServer> for DrainingMcpServer<S> {
     async fn handle_request(
         &self,
         request: ClientRequest,
@@ -246,7 +251,10 @@ where
     }
 }
 
-async fn handle_get(req: HttpRequest, state: Data<TransportState>) -> Result<HttpResponse> {
+async fn handle_get<S: Service<RoleServer> + Clone>(
+    req: HttpRequest,
+    state: Data<TransportState<S>>,
+) -> Result<HttpResponse> {
     if !accepts(&req, EVENT_STREAM_MIME_TYPE) {
         return Ok(text_error(
             StatusCode::NOT_ACCEPTABLE,
@@ -334,10 +342,10 @@ async fn handle_get(req: HttpRequest, state: Data<TransportState>) -> Result<Htt
         )))
 }
 
-async fn handle_post(
+async fn handle_post<S: Service<RoleServer> + Clone>(
     req: HttpRequest,
     body: Bytes,
-    state: Data<TransportState>,
+    state: Data<TransportState<S>>,
 ) -> Result<HttpResponse> {
     if !accepts_all(&req, &[JSON_MIME_TYPE, EVENT_STREAM_MIME_TYPE]) {
         return Ok(text_error(
@@ -476,7 +484,7 @@ async fn handle_post(
         async move {
             let _session_work = session_work;
             let service = tokio::select! {
-                result = serve_server::<DrainingMcpServer, _, _, TransportAdapterIdentity>(
+                result = serve_server::<DrainingMcpServer<S>, _, _, TransportAdapterIdentity>(
                     service_instance, transport,
                 ) => Some(result),
                 _ = stopped(protocol_stop.clone()) => None,
@@ -527,7 +535,10 @@ async fn handle_post(
         .streaming(sse_stream))
 }
 
-async fn handle_delete(req: HttpRequest, state: Data<TransportState>) -> Result<HttpResponse> {
+async fn handle_delete<S: Service<RoleServer> + Clone>(
+    req: HttpRequest,
+    state: Data<TransportState<S>>,
+) -> Result<HttpResponse> {
     let Some(session_id) = request_session_id(&req) else {
         return Ok(text_error(
             StatusCode::BAD_REQUEST,
@@ -564,13 +575,14 @@ mod tests {
     use actix_web::{body::to_bytes, http::header, test as actix_test, App};
     use serde_json::json;
 
-    fn test_transport() -> (AtomicMcpTransport, tempfile::TempDir) {
+    fn test_transport() -> (AtomicMcpTransport, tempfile::TempDir, Arc<DatabaseManager>) {
         let temp = tempfile::TempDir::new().unwrap();
         let manager = Arc::new(DatabaseManager::new(temp.path()).unwrap());
         let (event_tx, _) = broadcast::channel::<ServerEvent>(16);
-        let transport = AtomicMcpTransport::new(manager, event_tx, Duration::from_secs(30));
+        let transport =
+            AtomicMcpTransport::new(Arc::clone(&manager), event_tx, Duration::from_secs(30));
 
-        (transport, temp)
+        (transport, temp, manager)
     }
 
     fn initialize_request() -> serde_json::Value {
@@ -665,7 +677,7 @@ mod tests {
 
     #[actix_web::test]
     async fn get_missing_session_returns_400_with_content_type() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )
@@ -683,7 +695,7 @@ mod tests {
 
     #[actix_web::test]
     async fn get_unknown_session_returns_404_with_content_type() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )
@@ -702,7 +714,7 @@ mod tests {
 
     #[actix_web::test]
     async fn post_unknown_session_returns_404_with_content_type() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )
@@ -726,7 +738,7 @@ mod tests {
 
     #[actix_web::test]
     async fn post_without_session_requires_initialize_with_content_type() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )
@@ -749,7 +761,7 @@ mod tests {
 
     #[actix_web::test]
     async fn shutdown_closes_idle_handshake_without_waiting_for_client() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.clone().scope())),
         )
@@ -802,7 +814,7 @@ mod tests {
         let source_handle = source.handle();
         actix_web::rt::spawn(source);
 
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, manager) = test_transport();
         let shutdown = Data::new(crate::shutdown::Shutdown::default());
         let app = actix_test::init_service(
             App::new()
@@ -897,7 +909,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), transport.shutdown())
             .await
             .unwrap();
-        let core = transport.state.manager.active_core().await.unwrap();
+        let core = manager.active_core().await.unwrap();
         assert!(core
             .get_atom_by_source_url(&source_url)
             .await
@@ -909,7 +921,7 @@ mod tests {
 
     #[actix_web::test]
     async fn shutdown_closes_standalone_sse_without_waiting_for_keepalive() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.clone().scope())),
         )
@@ -934,7 +946,7 @@ mod tests {
 
     #[actix_web::test]
     async fn initialize_returns_sse_and_session_header() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )
@@ -946,7 +958,7 @@ mod tests {
 
     #[actix_web::test]
     async fn notification_with_session_returns_accepted() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )
@@ -977,7 +989,7 @@ mod tests {
 
     #[actix_web::test]
     async fn request_with_session_returns_sse_stream() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )
@@ -1004,7 +1016,7 @@ mod tests {
 
     #[actix_web::test]
     async fn delete_unknown_session_returns_404_with_content_type() {
-        let (transport, _temp) = test_transport();
+        let (transport, _temp, _manager) = test_transport();
         let app = actix_test::init_service(
             App::new().service(web::scope("/mcp").service(transport.scope())),
         )

@@ -2549,6 +2549,49 @@ impl AtomicCore {
         self.storage.get_conversation_sync(conversation_id).await
     }
 
+    /// Bind tool execution to a saved user turn in an integrated conversation.
+    pub async fn chat_tool_session<F>(
+        &self,
+        conversation_id: &str,
+        user_message_id: &str,
+        settings: HashMap<String, String>,
+        scope: agent::MemuToolConfig,
+        page_context: Option<agent::PageContext>,
+        canvas_context: Option<agent::CanvasContext>,
+        on_event: F,
+    ) -> Result<agent::ChatToolSession, AtomicCoreError>
+    where
+        F: Fn(agent::ChatEvent) + Send + Sync + 'static,
+    {
+        let conversation = self
+            .get_conversation(conversation_id)
+            .await?
+            .ok_or_else(|| AtomicCoreError::Validation("Conversation not found".to_string()))?;
+        if conversation.conversation.user_id.as_deref() != Some(scope.user_id.as_str())
+            || conversation.conversation.soul_id.as_deref() != Some(scope.soul_id.as_str())
+            || !conversation
+                .messages
+                .iter()
+                .any(|row| row.message.id == user_message_id && row.message.role == "user")
+        {
+            return Err(AtomicCoreError::Validation(
+                "Tool scope does not match this saved user turn".to_string(),
+            ));
+        }
+        let tag_ids = self.storage.get_scope_tag_ids_sync(conversation_id).await?;
+        Ok(agent::ChatToolSession::new(
+            self.storage.clone(),
+            conversation_id.to_string(),
+            tag_ids,
+            settings,
+            Some(scope),
+            page_context,
+            canvas_context,
+            Some(self.canvas_cache()),
+            Arc::new(on_event),
+        ))
+    }
+
     /// Update a conversation (title, archive status)
     pub async fn update_conversation(
         &self,
