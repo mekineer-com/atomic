@@ -823,6 +823,20 @@ async fn test_memu_session_satisfies_provider_verify() {
 }
 
 #[actix_web::test]
+async fn test_standalone_provider_verify_still_reads_database_settings() {
+    let ctx = TestCtx::new().await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let request = actix_test::TestRequest::get()
+        .uri("/api/provider/verify")
+        .insert_header(ctx.auth_header())
+        .to_request();
+    let response = actix_test::call_service(&app, request).await;
+    assert_eq!(response.status(), 200);
+    let body: Value = actix_test::read_body_json(response).await;
+    assert_eq!(body["configured"], false);
+}
+
+#[actix_web::test]
 async fn test_memu_read_routes_proxy() {
     let (memu_url, memu_handle) = start_memu_memory_stub();
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;

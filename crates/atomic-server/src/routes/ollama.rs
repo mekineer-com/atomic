@@ -1,7 +1,7 @@
 //! Ollama and provider routes
 
 use crate::{db_extractor::Db, state::AppState};
-use actix_web::{web, HttpResponse};
+use actix_web::{FromRequest, HttpRequest, HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -55,11 +55,18 @@ pub async fn get_ollama_llm_models(query: web::Query<OllamaHostQuery>) -> HttpRe
 }
 
 #[utoipa::path(get, path = "/api/provider/verify", responses((status = 200, description = "Whether an AI provider is configured")), tag = "providers")]
-pub async fn verify_provider_configured(state: web::Data<AppState>, db: Db) -> HttpResponse {
+pub async fn verify_provider_configured(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+) -> HttpResponse {
     if state.memu_session.is_some() {
         return HttpResponse::Ok().json(serde_json::json!({"configured": true}));
     }
 
+    let db = match Db::extract(&request).await {
+        Ok(db) => db,
+        Err(error) => return HttpResponse::from_error(error),
+    };
     let settings = match db.0.get_settings().await {
         Ok(s) => s,
         Err(e) => return crate::error::error_response(e),
