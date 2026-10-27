@@ -5,7 +5,12 @@ use crate::error::{ApiErrorResponse, ok_or_error};
 use crate::event_bridge::chat_event_callback;
 use crate::routes::memu_proxy::{self, MemuScope, memu_error_text};
 use crate::state::AppState;
-use actix_web::{HttpRequest, HttpResponse, web};
+use actix_web::{
+    HttpRequest, HttpResponse,
+    body::MessageBody,
+    http::{StatusCode, header::HeaderMap},
+    web,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -18,6 +23,64 @@ type ConversationKey = (String, String);
 static CONVERSATION_WORK: LazyLock<
     tokio::sync::Mutex<HashMap<ConversationKey, Arc<tokio::sync::Mutex<()>>>>,
 > = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+fn spawn_chat_work<F, T>(future: F) -> tokio::sync::oneshot::Receiver<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (finished, result) = tokio::sync::oneshot::channel();
+    atomic_core::executor::spawn(async move {
+        let outcome = future.await;
+        let _ = finished.send(outcome); // Delivery loss does not cancel admitted work.
+    });
+    result
+}
+
+// Actix responses are thread-local; only their buffered wire data crosses runtimes.
+struct BufferedChatResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: web::Bytes,
+}
+
+impl BufferedChatResponse {
+    fn capture(response: HttpResponse) -> Self {
+        Self {
+            status: response.status(),
+            headers: response.headers().clone(),
+            body: response
+                .into_body()
+                .try_into_bytes()
+                .expect("chat responses are buffered JSON"),
+        }
+    }
+
+    fn into_response(self) -> HttpResponse {
+        let mut response = HttpResponse::build(self.status);
+        for (name, value) in self.headers.iter() {
+            response.append_header((name.clone(), value.clone()));
+        }
+        response.body(self.body)
+    }
+}
+
+fn lost_chat_worker() -> HttpResponse {
+    HttpResponse::InternalServerError().json(ApiErrorResponse {
+        error:
+            "Chat worker stopped before returning a result. Reload saved history before retrying."
+                .to_string(),
+    })
+}
+
+fn end_work_response(conversation_id: &str, response: HttpResponse) -> BufferedChatResponse {
+    let response = BufferedChatResponse::capture(response);
+    if !response.status.is_success() {
+        tracing::error!(conversation_id, status = %response.status,
+            error = %String::from_utf8_lossy(&response.body), "Atomic End Session failed");
+    }
+    response
+}
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct CreateConversationBody {
@@ -124,8 +187,9 @@ async fn fetch_atomic_snapshot(
 async fn fetch_atomic_chat_profile(
     config: &MemuScope,
 ) -> Result<HashMap<String, String>, HttpResponse> {
+    let client = memu_proxy::client()?;
     let value = memu_proxy::memu_json(
-        memu_proxy::client()?
+        client
             .get(format!(
                 "{}/integration/atomic/chat_profile",
                 config.base_url
@@ -649,16 +713,28 @@ pub async fn send_chat_message(
             user_id: memu_session.user_id,
             soul_id: memu_session.soul_id,
         };
-        db.0.send_chat_message_with_external_settings(
-            &conversation_id,
-            &body.content,
-            on_event,
-            settings,
-            Some(memu_tools),
-            body.canvas_context,
-            body.page_context,
-        )
-        .await
+        let result = spawn_chat_work(async move {
+            let _work = _work;
+            let result =
+                db.0.send_chat_message_with_external_settings(
+                    &conversation_id,
+                    &body.content,
+                    on_event,
+                    settings,
+                    Some(memu_tools),
+                    body.canvas_context,
+                    body.page_context,
+                )
+                .await;
+            if let Err(error) = &result {
+                tracing::error!(conversation_id, error = %error, "Atomic chat reply failed");
+            }
+            result
+        });
+        match result.await {
+            Ok(result) => result,
+            Err(_) => return lost_chat_worker(),
+        }
     } else if body.canvas_context.is_some() || body.page_context.is_some() {
         db.0.send_chat_message_with_canvas(
             &conversation_id,
@@ -695,11 +771,30 @@ pub async fn end_memu_session(
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"error": "conversation_id is required"}));
     }
-    let _work = match lock_conversation(&db, conversation_id, Some(&memu_session)).await {
-        Ok(guard) => guard,
-        Err(response) => return response,
-    };
+    let conversation_id = conversation_id.to_string();
+    let result = spawn_chat_work(async move {
+        // End intent survives browser loss even while an admitted reply holds the lock.
+        let _work = match lock_conversation(&db, &conversation_id, Some(&memu_session)).await {
+            Ok(guard) => guard,
+            Err(response) => return end_work_response(&conversation_id, response),
+        };
+        end_work_response(
+            &conversation_id,
+            finish_memu_session(state, db, memu_session, &conversation_id).await,
+        )
+    });
+    match result.await {
+        Ok(response) => response.into_response(),
+        Err(_) => lost_chat_worker(),
+    }
+}
 
+async fn finish_memu_session(
+    state: web::Data<AppState>,
+    db: Db,
+    memu_session: MemuScope,
+    conversation_id: &str,
+) -> HttpResponse {
     let mut conv = match db.0.get_conversation(conversation_id).await {
         Ok(Some(conv)) => conv,
         Ok(None) => {
@@ -759,5 +854,68 @@ pub async fn end_memu_session(
     match post_atomic_session_end(&memu_session, conversation_id, recap, rows).await {
         Ok(body) => HttpResponse::Ok().json(body),
         Err(response) => response,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owned_lock_wait_survives_delivery_loss_and_participates_in_drain() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let held = Arc::clone(&lock).lock_owned().await;
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (finished, complete) = tokio::sync::oneshot::channel();
+        let delivery = spawn_chat_work(async move {
+            let _ = started.send(());
+            let _work = lock.lock_owned().await;
+            let _ = finished.send(());
+        });
+        waiting.await.unwrap();
+        drop(delivery);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                atomic_core::executor::wait_idle()
+            )
+            .await
+            .is_err()
+        );
+        drop(held);
+        complete.await.unwrap();
+        atomic_core::executor::wait_idle().await;
+    }
+
+    #[actix_web::test]
+    async fn buffered_chat_response_preserves_error_status_headers_and_body() {
+        let body = serde_json::json!({"error": {"code": "soul_paused", "message": "Retry later"}});
+        let original = HttpResponse::Conflict()
+            .append_header(("X-Test-Error", "paused"))
+            .json(&body);
+        let logs = crate::log_buffer::LogBuffer::new(4);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(logs.make_writer())
+            .finish();
+        let response = tracing::subscriber::with_default(subscriber, || {
+            end_work_response("test-conversation", original)
+        })
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers().get("X-Test-Error").unwrap(), "paused");
+        assert_eq!(
+            response.headers().get("Content-Type").unwrap(),
+            "application/json"
+        );
+        let bytes = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            body
+        );
+        assert!(logs.dump().contains("Atomic End Session failed"));
+        assert!(logs.dump().contains("soul_paused"));
     }
 }

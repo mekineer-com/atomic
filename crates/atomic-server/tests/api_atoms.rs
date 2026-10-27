@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -195,6 +195,9 @@ struct ToolModelState {
     request_count: AtomicUsize,
     tool_call_on: usize,
     tool_calls: Value,
+    pause_on: Option<usize>,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 async fn fake_tool_completion(
@@ -202,6 +205,10 @@ async fn fake_tool_completion(
     _body: web::Json<Value>,
 ) -> HttpResponse {
     let request_number = state.request_count.fetch_add(1, Ordering::SeqCst);
+    if state.pause_on == Some(request_number) {
+        state.started.notify_one();
+        state.release.notified().await;
+    }
     let delta = if request_number == state.tool_call_on {
         json!({"tool_calls": state.tool_calls})
     } else {
@@ -218,6 +225,7 @@ async fn fake_tool_completion(
 fn start_tool_model(
     tool_call_on: usize,
     tool_calls: Value,
+    pause_on: Option<usize>,
 ) -> (
     String,
     actix_web::dev::ServerHandle,
@@ -227,6 +235,9 @@ fn start_tool_model(
         request_count: AtomicUsize::new(0),
         tool_call_on,
         tool_calls,
+        pause_on,
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
     });
     let server = HttpServer::new({
         let state = state.clone();
@@ -250,7 +261,19 @@ struct MemuCreateState {
     creations: Mutex<Vec<Value>>,
 }
 
-async fn memu_session_end() -> HttpResponse {
+struct MemuEndState {
+    hold: AtomicBool,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    published: Mutex<Vec<Value>>,
+}
+
+async fn memu_session_end(state: web::Data<MemuEndState>, body: web::Json<Value>) -> HttpResponse {
+    state.started.notify_one();
+    if state.hold.load(Ordering::SeqCst) {
+        state.release.notified().await;
+    }
+    state.published.lock().unwrap().push(body.into_inner());
     HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 
@@ -302,10 +325,24 @@ fn start_memu_create_stub() -> (
     (format!("http://{}", addr), handle, state)
 }
 
-fn start_memu_stub_with_model(model_url: String) -> (String, actix_web::dev::ServerHandle) {
+fn start_memu_stub_with_model(
+    model_url: String,
+) -> (
+    String,
+    actix_web::dev::ServerHandle,
+    web::Data<MemuEndState>,
+) {
+    let end_state = web::Data::new(MemuEndState {
+        hold: AtomicBool::new(false),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        published: Mutex::new(Vec::new()),
+    });
+    let captured_end = end_state.clone();
     let server = HttpServer::new(move || {
         let model_url = model_url.clone();
         App::new()
+            .app_data(captured_end.clone())
             .route("/owner", web::get().to(memu_owner))
             .route("/souls", web::get().to(memu_souls))
             .route(
@@ -340,7 +377,7 @@ fn start_memu_stub_with_model(model_url: String) -> (String, actix_web::dev::Ser
     let server = server.run();
     let handle = server.handle();
     actix_web::rt::spawn(server);
-    (format!("http://{}", addr), handle)
+    (format!("http://{}", addr), handle, end_state)
 }
 
 async fn memu_atoms(req: HttpRequest) -> HttpResponse {
@@ -1105,7 +1142,7 @@ async fn test_paused_chat_preserves_structured_error_without_saving_message() {
 #[actix_web::test]
 async fn test_send_message_uses_memu_chat_profile() {
     let (model_url, model_handle) = start_fake_model();
-    let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);
+    let (memu_url, memu_handle, _) = start_memu_stub_with_model(model_url);
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
 
@@ -1153,7 +1190,7 @@ async fn test_send_message_uses_memu_chat_profile() {
 #[actix_web::test]
 async fn test_memu_backed_chat_offers_edit_but_not_create() {
     let (model_url, model_handle) = start_fake_model_with_memu_write_tools();
-    let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);
+    let (memu_url, memu_handle, _) = start_memu_stub_with_model(model_url);
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
 
@@ -1193,6 +1230,121 @@ async fn test_memu_backed_chat_offers_edit_but_not_create() {
 }
 
 #[actix_web::test]
+async fn test_integrated_chat_and_end_finish_after_waiting_handlers_are_dropped() {
+    for drop_end_while_waiting in [false, true] {
+        let (model_url, model_handle, model) = start_tool_model(
+            0,
+            json!([{
+                "index": 0, "id": "page-call", "type": "function",
+                "function": {"name": "get_current_page_context", "arguments": "{}"}
+            }]),
+            Some(1),
+        );
+        let (memu_url, memu_handle, end) = start_memu_stub_with_model(model_url);
+        end.hold.store(true, Ordering::SeqCst);
+        let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+        let app = actix_test::init_service(test_app(&ctx)).await;
+        let core = ctx.state.manager.active_core().await.unwrap();
+        let conversation = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let id = &conversation.conversation.id;
+        core.save_message(id, "system", "Fictional Soul Presence")
+            .await
+            .unwrap();
+        let req = actix_test::TestRequest::post()
+            .uri(&format!("/api/conversations/{id}/messages"))
+            .insert_header(ctx.auth_header())
+            .insert_header(("X-OpenAlma-User", "TestOwner"))
+            .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+            .set_json(json!({"content": "Inspect this page", "page_context": {"view": "memories"}}))
+            .to_request();
+        {
+            let pending = actix_test::call_service(&app, req);
+            tokio::pin!(pending);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::select! {
+                    _ = model.started.notified() => {},
+                    _ = &mut pending => panic!("reply returned before the gated model result"),
+                }
+            })
+            .await
+            .unwrap();
+        } // Simulate cancellation of the HTTP handler after the tool has completed.
+        let req = actix_test::TestRequest::post()
+            .uri("/api/memu/session/end")
+            .insert_header(ctx.auth_header())
+            .insert_header(("X-OpenAlma-User", "TestOwner"))
+            .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+            .set_json(json!({"conversation_id": id}))
+            .to_request();
+        {
+            let pending = actix_test::call_service(&app, req);
+            tokio::pin!(pending);
+            assert!(
+                // Allow the two scope-validation HTTP reads to finish before cancellation.
+                tokio::time::timeout(Duration::from_millis(250), &mut pending)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                model.request_count.load(Ordering::SeqCst),
+                2,
+                "End must wait for the detached reply's lock"
+            );
+            if !drop_end_while_waiting {
+                model.release.notify_one();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::select! {
+                        _ = end.started.notified() => {},
+                        _ = &mut pending => panic!("End returned before publication finished"),
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        } // Drop End either while queued or during publication.
+        if drop_end_while_waiting {
+            model.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(10), end.started.notified())
+                .await
+                .unwrap();
+        }
+        end.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), atomic_core::executor::wait_idle())
+            .await
+            .unwrap();
+        let saved = core.get_conversation(id).await.unwrap().unwrap();
+        assert_eq!(
+            saved
+                .messages
+                .iter()
+                .map(|m| m.message.role.as_str())
+                .collect::<Vec<_>>(),
+            ["system", "user", "assistant", "user", "assistant"]
+        );
+        assert_eq!(saved.messages[2].tool_calls.len(), 1);
+        assert_eq!(
+            saved.messages[2].tool_calls[0].tool_name,
+            "get_current_page_context"
+        );
+        assert_eq!(saved.messages[2].tool_calls[0].status, "complete");
+        assert!(
+            saved.conversation.atomic_chat_state.is_none(),
+            "lifecycle writes remain gated"
+        );
+        let publications = end.published.lock().unwrap().clone();
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0]["activity_recap"], "fake answer");
+        assert_eq!(publications[0]["transcript"].as_array().unwrap().len(), 2);
+        assert_eq!(model.request_count.load(Ordering::SeqCst), 3);
+        memu_handle.stop(true).await;
+        model_handle.stop(true).await;
+    }
+}
+
+#[actix_web::test]
 async fn test_memu_chat_returns_tool_result_without_executing_unavailable_create() {
     let tool_calls = json!([{
         "index": 0,
@@ -1203,8 +1355,8 @@ async fn test_memu_chat_returns_tool_result_without_executing_unavailable_create
             "arguments": "{\"content\":\"# Must not exist\"}"
         }
     }]);
-    let (model_url, model_handle, _) = start_tool_model(0, tool_calls);
-    let (memu_url, memu_handle) = start_memu_stub_with_model(model_url);
+    let (model_url, model_handle, _) = start_tool_model(0, tool_calls, None);
+    let (memu_url, memu_handle, _) = start_memu_stub_with_model(model_url);
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
 
