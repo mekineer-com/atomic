@@ -465,6 +465,9 @@ struct MemuNode {
     #[serde(default)]
     label: String,
     #[serde(default)]
+    description: String,
+    summaries_revision: Option<i64>,
+    #[serde(default)]
     summary: String,
     #[serde(default)]
     memory_type: Option<String>,
@@ -977,6 +980,17 @@ fn enqueue_agent_pipeline_in_background(
     });
 }
 
+enum EditAtomError {
+    Failed(String),
+    OutcomeUnknown(String),
+}
+
+impl From<String> for EditAtomError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
 async fn execute_edit_atom(
     storage: &StorageBackend,
     tool_args: &serde_json::Value,
@@ -984,16 +998,20 @@ async fn execute_edit_atom(
     canvas_cache: Option<&crate::CanvasCache>,
     on_embedding_event: Arc<dyn Fn(EmbeddingEvent) + Send + Sync + 'static>,
     memu_tool_config: Option<&MemuToolConfig>,
-) -> Result<Option<AtomWithTags>, String> {
+) -> Result<Option<AtomWithTags>, EditAtomError> {
     let atom_id = tool_args["atom_id"].as_str().unwrap_or("");
     if let Some(config) = memu_tool_config {
         if !is_memu_id(atom_id) {
-            return Err("memU-backed sessions can only edit memU atoms".to_string());
+            return Err("memU-backed sessions can only edit memU atoms"
+                .to_string()
+                .into());
         }
         if atom_id.starts_with("entity:") {
-            return Err("memU entity atoms are read-only in this slice".to_string());
+            return Err("memU entity atoms are read-only in this slice"
+                .to_string()
+                .into());
         }
-        let Some(existing) = fetch_memu_node(config, atom_id).await? else {
+        let Some(mut existing) = fetch_memu_node(config, atom_id).await? else {
             return Ok(None);
         };
         let edits: Vec<AtomEditOperation> = serde_json::from_value(
@@ -1005,10 +1023,10 @@ async fn execute_edit_atom(
         .map_err(|e| format!("edits must be valid edit operations: {}", e))?;
         let summary = apply_atom_edits(existing.summary.trim(), &edits)?;
         if summary == existing.summary.trim() {
-            return Err("Edits did not change the atom content".to_string());
+            return Err("Edits did not change the atom content".to_string().into());
         }
         if summary.trim().is_empty() {
-            return Err("Cannot update an atom to empty content".to_string());
+            return Err("Cannot update an atom to empty content".to_string().into());
         }
 
         let endpoint = if atom_id.starts_with("memory:") {
@@ -1020,32 +1038,53 @@ async fn execute_edit_atom(
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| format!("memU client failed: {e}"))?;
+        let mut payload = json!({
+            "summary": summary.trim(),
+            "displayed_summary": existing.summary,
+            "edited_by": "atomic:agent",
+        });
+        if endpoint == "category" {
+            payload["summaries_revision"] = json!(
+                existing
+                    .summaries_revision
+                    .ok_or_else(|| "Category review revision is missing".to_string())?
+            );
+            payload["displayed_title"] = json!(existing.label);
+            payload["displayed_description"] = json!(existing.description);
+        }
         let response = client
             .patch(format!("{}/{}/{}", config.base_url, endpoint, atom_id))
             .query(&[
                 ("user_id", config.user_id.as_str()),
                 ("soul_id", config.soul_id.as_str()),
             ])
-            .json(&json!({
-                "summary": summary.trim(),
-                "edited_by": "atomic:agent",
-            }))
+            .json(&payload)
             .send()
             .await
-            .map_err(|e| format!("memU edit_atom request failed: {e}"))?;
+            .map_err(|e| {
+                let message = format!("memU edit_atom request failed: {e}");
+                if e.is_connect() {
+                    EditAtomError::Failed(message)
+                } else {
+                    EditAtomError::OutcomeUnknown(message)
+                }
+            })?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(format!("memU edit_atom failed ({status}): {body}"));
+            let message = format!("memU edit_atom failed ({status}): {body}");
+            return Err(if status.is_server_error() {
+                EditAtomError::OutcomeUnknown(message)
+            } else {
+                EditAtomError::Failed(message)
+            });
         }
-        return response
-            .json::<MemuNode>()
-            .await
-            .map(|node| Some(memu_node_to_atom(node)))
-            .map_err(|e| format!("memU edit_atom returned invalid JSON: {e}"));
+        // The successful write is authoritative; its optional body is not needed.
+        existing.summary = summary.trim().to_string();
+        return Ok(Some(memu_node_to_atom(existing)));
     }
 
     let Some(existing) = storage
@@ -1065,10 +1104,10 @@ async fn execute_edit_atom(
     .map_err(|e| format!("edits must be valid edit operations: {}", e))?;
     let content = apply_atom_edits(&existing.atom.content, &edits)?;
     if content == existing.atom.content {
-        return Err("Edits did not change the atom content".to_string());
+        return Err("Edits did not change the atom content".to_string().into());
     }
     if content.trim().is_empty() {
-        return Err("Cannot update an atom to empty content".to_string());
+        return Err("Cannot update an atom to empty content".to_string().into());
     }
 
     let request = crate::UpdateAtomRequest {
@@ -1423,7 +1462,6 @@ pub struct ChatToolSession {
     durable_message_id: Option<String>,
     tool_calls_record: Vec<ChatToolCall>,
     restored_call_count: usize,
-    reused_call_ids: HashMap<String, usize>,
     sitting_wide_citations: bool,
 }
 
@@ -1463,7 +1501,6 @@ impl ChatToolSession {
             durable_message_id: None,
             tool_calls_record: Vec::new(),
             restored_call_count: 0,
-            reused_call_ids: HashMap::new(),
             sitting_wide_citations: false,
         }
     }
@@ -1571,12 +1608,15 @@ impl ChatToolSession {
             }
         }
         self.restored_call_count = calls.len();
-        self.reused_call_ids.clear();
         self.tool_calls_record = calls;
         self.citations = citations;
         if interrupted {
             self.checkpoint().await?;
         }
+        self.require_known_outcomes()
+    }
+
+    fn require_known_outcomes(&self) -> Result<(), String> {
         if self.tool_calls_record.iter().any(|call| {
             call.tool_output
                 .as_ref()
@@ -1584,7 +1624,7 @@ impl ChatToolSession {
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
         }) {
-            return Err("A previous tool was interrupted; its outcome is unknown. Do not resume or repeat it. Close out from saved history or start a new sitting.".to_string());
+            return Err("A previous tool's outcome is unknown. Do not resume or repeat it. Close out from saved history or start a new sitting.".to_string());
         }
         Ok(())
     }
@@ -1643,11 +1683,11 @@ impl ChatToolSession {
         tool_name: &str,
         tool_args: serde_json::Value,
     ) -> Result<ChatToolResult, String> {
+        self.require_known_outcomes()?;
         let existing = self
             .tool_calls_record
             .iter()
-            .position(|record| record.id == call_id)
-            .or_else(|| self.reused_call_ids.get(call_id).copied());
+            .position(|record| record.id == call_id);
         if let Some(index) = existing {
             let record = &self.tool_calls_record[index];
             if record.tool_name != tool_name || record.tool_input != tool_args {
@@ -1664,9 +1704,6 @@ impl ChatToolSession {
                 })
             {
                 let content = saved_tool_output(&self.tool_calls_record[index])?;
-                if existing.is_none() {
-                    self.reused_call_ids.insert(call_id.to_string(), index);
-                }
                 return Ok(ChatToolResult {
                     content,
                     is_error: false,
@@ -1731,6 +1768,7 @@ impl ChatToolSession {
         });
 
         // Execute tool
+        let mut outcome_unknown = false;
         let (tool_result, results_count, is_error) = match tool_name {
             _ if !self.tools.iter().any(|tool| tool.name == tool_name) => (
                 format!("Tool unavailable in this session: {tool_name}"),
@@ -1944,7 +1982,15 @@ impl ChatToolSession {
                         )
                     }
                     Ok(None) => ("Atom not found".to_string(), 0, true),
-                    Err(e) => (format!("Error: {}", e), 0, true),
+                    Err(EditAtomError::Failed(error)) => (format!("Error: {error}"), 0, true),
+                    Err(EditAtomError::OutcomeUnknown(error)) => {
+                        outcome_unknown = true;
+                        (
+                            format!("Edit outcome unknown: {error}. Do not repeat this edit."),
+                            0,
+                            true,
+                        )
+                    }
                 }
             }
             "zoom_to_cluster" => {
@@ -1976,7 +2022,11 @@ impl ChatToolSession {
             .tool_calls_record
             .get_mut(record_index)
             .expect("running tool record");
-        record.tool_output = Some(serde_json::Value::String(tool_result.clone()));
+        record.tool_output = Some(if outcome_unknown {
+            json!({"error": tool_result, "outcome_unknown": true})
+        } else {
+            serde_json::Value::String(tool_result.clone())
+        });
         record.status = if is_error { "failed" } else { "complete" }.to_string();
         record.completed_at = Some(Utc::now().to_rfc3339());
         let checkpoint = self.checkpoint().await;
@@ -1989,6 +2039,7 @@ impl ChatToolSession {
             is_error,
         });
         checkpoint.map_err(|e| format!("Tool finished, but saving its outcome failed: {e}"))?;
+        self.require_known_outcomes()?;
 
         Ok(ChatToolResult {
             content: tool_result,
@@ -2255,16 +2306,6 @@ where
                         && turn.status == crate::AtomicChatTurnStatus::Running
                 })
                 .ok_or("Saved API execution requires the matching running ordinary turn")?;
-            if state.phase == crate::AtomicChatPhase::Closed
-                || conversation
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|row| matches!(row.message.role.as_str(), "user" | "assistant"))
-                    .is_none_or(|row| row.message.id != id || row.message.role != "user")
-            {
-                return Err("Saved API execution requires the latest unanswered turn in an unfinished sitting".to_string());
-            }
             (
                 id.to_string(),
                 Some(id.to_string()),
@@ -2488,12 +2529,10 @@ mod tests {
         Mock::given(method("PATCH"))
             .and(path("/memory/memory:fictional"))
             .and(body_json(
-                json!({"summary":"Base text\naddition","edited_by":"atomic:agent"}),
+                json!({"summary":"Base text\naddition","displayed_summary":"Base text","edited_by":"atomic:agent"}),
             ))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    json!({"id":"memory:fictional","summary":"Base text\naddition"}),
-                ),
+                ResponseTemplate::new(200).set_body_string("Unusable optional response body"),
             )
             .expect(2)
             .mount(&server)
@@ -2531,52 +2570,6 @@ mod tests {
         assert_eq!(turn.tool_calls.len(), 1);
         assert_eq!(turn.tool_calls[0].status, "complete");
         let output = saved_tool_output(&turn.tool_calls[0]).unwrap();
-        let mut replay_tools = ChatToolSession::new(
-            core.storage.clone(),
-            cid.to_string(),
-            vec![],
-            settings.clone(),
-            Some(scope.clone()),
-            None,
-            None,
-            None,
-            Arc::new(|_| {}),
-        );
-        replay_tools
-            .bind_user_turn(
-                &user.id,
-                None,
-                vec![],
-                turn.tool_calls.clone(),
-                turn.citations.clone(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            replay_tools
-                .execute(
-                    "reused-alias",
-                    "edit_atom",
-                    turn.tool_calls[0].tool_input.clone()
-                )
-                .await
-                .unwrap()
-                .content,
-            output
-        );
-        assert!(
-            replay_tools
-                .execute(
-                    "reused-alias",
-                    "get_atom",
-                    json!({"atom_id":"memory:fictional"})
-                )
-                .await
-                .err()
-                .unwrap()
-                .contains("different request")
-        );
-        drop(replay_tools);
         core.fail_chat_turn(cid, &user.id, "Fictional model failure", false)
             .await
             .unwrap();
@@ -2665,6 +2658,113 @@ mod tests {
             assert_eq!(pair[1]["role"], "tool");
             assert_eq!(pair[1]["tool_call_id"], pair[0]["tool_calls"][0]["id"]);
         }
+    }
+
+    #[tokio::test]
+    async fn unknown_memu_write_is_checkpointed_and_cannot_repeat() {
+        use crate::{AtomicChatBackend as Backend, AtomicChatRequest as Request};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("unknown-write.db")).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conv.conversation.id;
+        let user = core
+            .admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &new_chat_request("Append to a fictional dossier"),
+                200_000,
+            )
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+        let summary = Arc::new(Mutex::new("Base text".to_string()));
+        let read_summary = Arc::clone(&summary);
+        Mock::given(method("GET")).and(path("/memory/category:fictional"))
+            .respond_with(move |_: &wiremock::Request| ResponseTemplate::new(200).set_body_json(json!({
+                "id":"category:fictional", "label":"Fictional dossier", "description":"A fictional description",
+                "summary":read_summary.lock().unwrap().clone(), "summaries_revision":7
+            }))).expect(1).mount(&server).await;
+        let written_summary = Arc::clone(&summary);
+        Mock::given(method("PATCH")).and(path("/category/category:fictional"))
+            .and(body_json(json!({"summary":"Base text\naddition", "displayed_summary":"Base text",
+                "displayed_title":"Fictional dossier", "displayed_description":"A fictional description",
+                "summaries_revision":7, "edited_by":"atomic:agent"})))
+            .respond_with(move |request: &wiremock::Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                *written_summary.lock().unwrap() = body["summary"].as_str().unwrap().to_string();
+                ResponseTemplate::new(500).set_body_string("Fictional error after commit")
+            }).expect(1).mount(&server).await;
+        let mut tools = ChatToolSession::new(
+            core.storage.clone(),
+            cid.to_string(),
+            vec![],
+            HashMap::new(),
+            Some(MemuToolConfig {
+                base_url: server.uri(),
+                user_id: "TestOwner".into(),
+                soul_id: "TestSoul".into(),
+            }),
+            None,
+            None,
+            None,
+            Arc::new(|_| {}),
+        );
+        tools
+            .bind_user_turn(&user.id, None, vec![], vec![], vec![])
+            .await
+            .unwrap();
+        let args = json!({"atom_id":"category:fictional", "edits":[{"operation":"append", "text":"\naddition"}]});
+        assert!(
+            tools
+                .execute("edit-first", "edit_atom", args.clone())
+                .await
+                .err()
+                .unwrap()
+                .contains("unknown")
+        );
+        assert!(
+            tools
+                .execute("edit-again", "edit_atom", args)
+                .await
+                .err()
+                .unwrap()
+                .contains("unknown")
+        );
+        assert_eq!(*summary.lock().unwrap(), "Base text\naddition");
+        let saved = core.get_conversation(cid).await.unwrap().unwrap();
+        let call = &saved.messages.last().unwrap().tool_calls[0];
+        assert_eq!(call.status, "failed");
+        assert_eq!(call.tool_output.as_ref().unwrap()["outcome_unknown"], true);
+        // Prove the saved tool flag blocks Retry even if the caller misses uncertainty.
+        core.fail_chat_turn(cid, &user.id, "Unknown edit outcome", false)
+            .await
+            .unwrap();
+        assert!(
+            core.admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &Request::Retry {
+                    user_message_id: user.id
+                },
+                200_000
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unknown")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -4944,6 +5044,8 @@ mod tests {
             id: "memory:m1".to_string(),
             kind: "memory".to_string(),
             label: "Memory".to_string(),
+            description: String::new(),
+            summaries_revision: None,
             summary: "Summary".to_string(),
             memory_type: Some("episode".to_string()),
             happened_at: None,
