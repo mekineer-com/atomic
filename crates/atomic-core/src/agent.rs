@@ -2278,11 +2278,11 @@ mod tests {
             .unwrap();
         let cid = &conv.conversation.id;
         let backend = AtomicChatBackend::ClaudeCode;
-        assert!(
+        assert!(matches!(
             core.admit_chat_turn(cid, "WrongOwner", "TestSoul", &backend, "No admission")
-                .await
-                .is_err()
-        );
+                .await,
+            Err(crate::AtomicCoreError::Validation(_))
+        ));
         core.database()
             .unwrap()
             .conn
@@ -2548,6 +2548,29 @@ mod tests {
                     .await
                     .is_err()
             );
+            for phase in [
+                crate::models::AtomicChatPhase::Closing,
+                crate::models::AtomicChatPhase::Closed,
+            ] {
+                reopened
+                    .set_chat_phase(
+                        cid,
+                        "TestOwner",
+                        "TestSoul",
+                        &AtomicChatBackend::Api,
+                        &phase,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let closed = reopened.get_conversation(cid).await.unwrap().unwrap();
+            let state = closed.conversation.atomic_chat_state.unwrap();
+            assert_eq!(state.phase, crate::models::AtomicChatPhase::Closed);
+            assert_eq!(
+                state.active.unwrap(),
+                active,
+                "closure must preserve terminal failure/uncertainty"
+            );
         }
         let legacy = core
             .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
@@ -2589,6 +2612,29 @@ mod tests {
                 .len(),
             3
         );
+        let unanswered = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        core.save_message(
+            &unanswered.conversation.id,
+            "user",
+            "Unanswered legacy turn",
+        )
+        .await
+        .unwrap();
+        let error = core
+            .admit_chat_turn(
+                &unanswered.conversation.id,
+                "TestOwner",
+                "TestSoul",
+                &AtomicChatBackend::Api,
+                "No duplicate",
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unanswered user turn"));
         for has_history in [false, true] {
             let conv = core
                 .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))

@@ -22,6 +22,31 @@ async fn locked_chat_state(
     Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
 }
 
+async fn owned_chat_state(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    conversation_id: &str,
+    user_id: &str,
+    soul_id: &str,
+) -> StorageResult<Option<AtomicChatState>> {
+    let raw: Option<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT atomic_chat_state FROM conversations WHERE id=$1 AND db_id=$2 AND user_id=$3 AND soul_id=$4 FOR UPDATE"
+    ).bind(conversation_id).bind(db_id).bind(user_id).bind(soul_id).fetch_optional(conn).await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?
+        .ok_or_else(|| AtomicCoreError::Validation("Chat owner/Soul does not match".to_string()))?;
+    Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
+}
+
+async fn last_chat_role(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    conversation_id: &str,
+) -> StorageResult<Option<String>> {
+    sqlx::query_scalar("SELECT role FROM chat_messages WHERE conversation_id=$1 AND db_id=$2 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1")
+        .bind(conversation_id).bind(db_id).fetch_optional(conn).await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
+}
+
 async fn write_chat_state(
     conn: &mut sqlx::PgConnection,
     db_id: &str,
@@ -29,19 +54,13 @@ async fn write_chat_state(
     state: Option<&AtomicChatState>,
 ) -> StorageResult<()> {
     let raw = state.map(serde_json::to_string).transpose()?;
-    let result =
-        sqlx::query("UPDATE conversations SET atomic_chat_state=$1 WHERE id=$2 AND db_id=$3")
-            .bind(raw)
-            .bind(conversation_id)
-            .bind(db_id)
-            .execute(conn)
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-    if result.rows_affected() != 1 {
-        return Err(AtomicCoreError::NotFound(
-            "Conversation not found".to_string(),
-        ));
-    }
+    sqlx::query("UPDATE conversations SET atomic_chat_state=$1 WHERE id=$2 AND db_id=$3")
+        .bind(raw)
+        .bind(conversation_id)
+        .bind(db_id)
+        .execute(conn)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
     Ok(())
 }
 
@@ -440,18 +459,9 @@ impl ChatStore for PostgresStorage {
             .begin()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        let current = locked_chat_state(&mut tx, &self.db_id, conversation_id).await?;
-        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=$1 AND db_id=$2 AND user_id=$3 AND soul_id=$4)")
-            .bind(conversation_id).bind(&self.db_id).bind(user_id).bind(soul_id).fetch_one(&mut *tx).await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        if !owned {
-            return Err(AtomicCoreError::Validation(
-                "Chat owner/Soul does not match".to_string(),
-            ));
-        }
-        let last_role: Option<String> = sqlx::query_scalar("SELECT role FROM chat_messages WHERE conversation_id=$1 AND db_id=$2 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1")
-            .bind(conversation_id).bind(&self.db_id).fetch_optional(&mut *tx).await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let current =
+            owned_chat_state(&mut tx, &self.db_id, conversation_id, user_id, soul_id).await?;
+        let last_role = last_chat_role(&mut tx, &self.db_id, conversation_id).await?;
         let mut state = crate::chat::admitted_chat_state(current, backend, last_role.as_deref())?;
         let message = write_message(&mut tx, &self.db_id, conversation_id, "user", content).await?;
         state.active = Some(AtomicChatTurn {
@@ -507,18 +517,9 @@ impl ChatStore for PostgresStorage {
             .begin()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        let current = locked_chat_state(&mut tx, &self.db_id, conversation_id).await?;
-        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=$1 AND db_id=$2 AND user_id=$3 AND soul_id=$4)")
-            .bind(conversation_id).bind(&self.db_id).bind(user_id).bind(soul_id).fetch_one(&mut *tx).await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        if !owned {
-            return Err(AtomicCoreError::Validation(
-                "Chat owner/Soul does not match".to_string(),
-            ));
-        }
-        let last_role: Option<String> = sqlx::query_scalar("SELECT role FROM chat_messages WHERE conversation_id=$1 AND db_id=$2 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1")
-            .bind(conversation_id).bind(&self.db_id).fetch_optional(&mut *tx).await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let current =
+            owned_chat_state(&mut tx, &self.db_id, conversation_id, user_id, soul_id).await?;
+        let last_role = last_chat_role(&mut tx, &self.db_id, conversation_id).await?;
         let state = crate::chat::bound_chat_state(current, backend, last_role.as_deref())?;
         let state = crate::chat::changed_chat_phase(state, phase)?;
         write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
