@@ -5,9 +5,9 @@
 
 use crate::error::AtomicCoreError;
 use crate::models::{
-    AtomicChatBackend, AtomicChatPhase, AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus,
-    ChatCitation, ChatMessage, ChatMessageWithContext, ChatToolCall, Conversation,
-    ConversationWithMessages, ConversationWithTags, Tag,
+    AtomicChatBackend, AtomicChatPhase, AtomicChatRecap, AtomicChatRequest, AtomicChatState,
+    AtomicChatTurn, AtomicChatTurnStatus, ChatCitation, ChatMessage, ChatMessageWithContext,
+    ChatToolCall, Conversation, ConversationWithMessages, ConversationWithTags, Tag,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -413,6 +413,8 @@ pub(crate) fn bound_chat_state(
             backend: *backend,
             phase: AtomicChatPhase::Open,
             active: None,
+            recap: None,
+            context_window_tokens: None,
         },
     };
     if state.backend != *backend {
@@ -464,29 +466,44 @@ pub(crate) fn matching_chat_turn<'a>(
     state: &'a mut AtomicChatState,
     expected_user_message_id: &str,
 ) -> Result<&'a mut AtomicChatTurn, AtomicCoreError> {
-    state
-        .active
+    let recap = state
+        .recap
         .as_mut()
-        .filter(|active| {
-            active.user_message_id == expected_user_message_id
-                && active.status == AtomicChatTurnStatus::Running
-        })
-        .ok_or_else(|| {
-            AtomicCoreError::Conflict(
-                "The active chat turn no longer matches this result".to_string(),
-            )
-        })
+        .filter(|recap| recap.turn.user_message_id == expected_user_message_id);
+    let turn = match recap {
+        Some(recap) if state.phase == AtomicChatPhase::Closing => Some(&mut recap.turn),
+        Some(_) => None,
+        None => state.active.as_mut(),
+    };
+    turn.filter(|active| {
+        active.user_message_id == expected_user_message_id
+            && active.status == AtomicChatTurnStatus::Running
+    })
+    .ok_or_else(|| {
+        AtomicCoreError::Conflict("The active chat turn no longer matches this result".to_string())
+    })
 }
 
 pub(crate) fn completed_chat_state(
     state: Option<AtomicChatState>,
     expected_user_message_id: Option<&str>,
+    reply_message_id: &str,
 ) -> Result<Option<AtomicChatState>, AtomicCoreError> {
     match (state, expected_user_message_id) {
         (None, None) => Ok(None), // Existing API/standalone path, not lifecycle-managed yet.
         (Some(mut state), Some(expected)) => {
             matching_chat_turn(&mut state, expected)?;
-            state.active = None;
+            if let Some(recap) = state
+                .recap
+                .as_mut()
+                .filter(|recap| recap.turn.user_message_id == expected)
+            {
+                recap.turn.status = AtomicChatTurnStatus::Complete;
+                recap.turn.error = None;
+                recap.reply_message_id = Some(reply_message_id.to_string());
+            } else {
+                state.active = None;
+            }
             Ok(Some(state)) // Preserve Closing: publication must not reopen the sitting.
         }
         _ => Err(AtomicCoreError::Conflict(
@@ -508,7 +525,11 @@ pub(crate) fn changed_chat_phase(
             if !state
                 .active
                 .as_ref()
-                .is_some_and(|turn| turn.status == AtomicChatTurnStatus::Running) => {}
+                .is_some_and(|turn| turn.status == AtomicChatTurnStatus::Running)
+                && state.recap.as_ref().is_none_or(|recap| {
+                    recap.turn.status == AtomicChatTurnStatus::Complete
+                        && recap.reply_message_id.is_some()
+                }) => {}
         _ => {
             return Err(AtomicCoreError::Conflict(
                 "Chat cannot become closed while a turn is running, or reopen after close-out"
@@ -518,6 +539,163 @@ pub(crate) fn changed_chat_phase(
     }
     state.phase = *phase;
     Ok(state)
+}
+
+/// Only legacy, unidentified controls use wording; managed controls use saved IDs.
+pub fn is_atomic_recap_prompt(first_line: &str, recap_instruction: &str) -> bool {
+    (!recap_instruction.is_empty() && first_line == recap_instruction)
+        || first_line.starts_with("This Atomic session is ending. Write a recap of your activity")
+}
+
+pub(crate) fn prepared_chat_state(
+    current: Option<AtomicChatState>,
+    backend: &AtomicChatBackend,
+    last: Option<&ChatMessage>,
+    request: &AtomicChatRequest,
+    context_window_tokens: usize,
+    outcome_unknown: bool,
+) -> Result<AtomicChatState, AtomicCoreError> {
+    if context_window_tokens <= 20_000 {
+        return Err(AtomicCoreError::Validation(
+            "Usable chat context must exceed the 20,000-token reserve".to_string(),
+        ));
+    }
+    let role = last.map(|message| message.role.as_str());
+    let mut state = bound_chat_state(current, backend, role)?;
+    let conflict = |message: &str| AtomicCoreError::Conflict(message.to_string());
+    match request {
+        AtomicChatRequest::New { .. } => {
+            state = admitted_chat_state(Some(state), backend, role)?;
+        }
+        AtomicChatRequest::Retry { user_message_id } => {
+            let last = last
+                .filter(|last| last.role == "user" && last.id == *user_message_id)
+                .ok_or_else(|| conflict("Retry must match the latest unanswered user turn"))?;
+            if state.phase != AtomicChatPhase::Open {
+                return Err(conflict(
+                    "This sitting is closing or closed. Retry close-out instead.",
+                ));
+            }
+            if let Some(active) = &state.active {
+                if active.user_message_id != *user_message_id
+                    || active.status != AtomicChatTurnStatus::Failed
+                {
+                    return Err(conflict(
+                        "Retry requires the matching failed turn after writer-idle reconciliation",
+                    ));
+                }
+            } else if is_atomic_recap_prompt(last.content.trim().lines().next().unwrap_or(""), "") {
+                return Err(conflict(
+                    "This is a legacy recap. Retry tool-free close-out, not ordinary chat.",
+                ));
+            }
+            if outcome_unknown {
+                return Err(conflict(
+                    "A tool outcome is unknown. Close out from saved history; do not replay it.",
+                ));
+            }
+        }
+        AtomicChatRequest::Recap { .. } => {
+            if state.phase != AtomicChatPhase::Closing
+                || state
+                    .active
+                    .as_ref()
+                    .is_some_and(|turn| turn.status == AtomicChatTurnStatus::Running)
+            {
+                return Err(conflict(
+                    "Recap requires Closing with no running ordinary turn",
+                ));
+            }
+            if let Some(recap) = &state.recap {
+                if recap.reply_message_id.is_some() {
+                    return Err(conflict(
+                        "Recap already saved. Reuse its reply for publication.",
+                    ));
+                }
+                if recap.turn.status != AtomicChatTurnStatus::Failed
+                    || last.is_none_or(|last| last.id != recap.turn.user_message_id)
+                {
+                    return Err(conflict(
+                        "Recap Retry requires its matching failed control after writer-idle reconciliation",
+                    ));
+                }
+            }
+        }
+    }
+    if *backend == AtomicChatBackend::Api {
+        state.context_window_tokens = Some(context_window_tokens);
+    }
+    Ok(state)
+}
+
+pub(crate) fn admitted_chat_message(
+    state: &mut AtomicChatState,
+    request: &AtomicChatRequest,
+    message_id: &str,
+) {
+    match request {
+        AtomicChatRequest::New {
+            page_context,
+            canvas_context,
+            ..
+        } => {
+            state.active = Some(AtomicChatTurn {
+                user_message_id: message_id.to_string(),
+                status: AtomicChatTurnStatus::Running,
+                error: None,
+                page_context: page_context.clone(),
+                canvas_context: canvas_context.clone(),
+            });
+        }
+        AtomicChatRequest::Retry { .. } => {
+            let turn = state.active.get_or_insert(AtomicChatTurn {
+                user_message_id: message_id.to_string(),
+                status: AtomicChatTurnStatus::Failed,
+                error: None,
+                page_context: None,
+                canvas_context: None,
+            });
+            turn.status = AtomicChatTurnStatus::Running;
+            turn.error = None;
+        }
+        AtomicChatRequest::Recap { .. } => {
+            state.recap = Some(AtomicChatRecap {
+                turn: AtomicChatTurn {
+                    user_message_id: message_id.to_string(),
+                    status: AtomicChatTurnStatus::Running,
+                    error: None,
+                    page_context: None,
+                    canvas_context: None,
+                },
+                reply_message_id: None,
+            });
+        }
+    }
+}
+
+pub(crate) fn chat_admission_input<'a>(
+    state: &AtomicChatState,
+    last: Option<&ChatMessage>,
+    request: &'a AtomicChatRequest,
+) -> (Option<ChatMessage>, &'a str) {
+    match request {
+        AtomicChatRequest::New { content, .. } => (None, content),
+        AtomicChatRequest::Retry { .. } => (last.cloned(), ""),
+        AtomicChatRequest::Recap { instruction } => {
+            let legacy = state.active.is_none()
+                && last.is_some_and(|last| {
+                    last.role == "user"
+                        && is_atomic_recap_prompt(
+                            last.content.trim().lines().next().unwrap_or(""),
+                            "",
+                        )
+                });
+            (
+                last.filter(|_| state.recap.is_some() || legacy).cloned(),
+                instruction,
+            )
+        }
+    }
 }
 
 fn stored_chat_state(
@@ -559,13 +737,16 @@ fn owned_chat_state(
     .ok_or_else(|| AtomicCoreError::Validation("Chat owner/Soul does not match".to_string()))
 }
 
-fn last_chat_role(
+fn last_chat_message(
     conn: &Connection,
     conversation_id: &str,
-) -> Result<Option<String>, AtomicCoreError> {
+) -> Result<Option<ChatMessage>, AtomicCoreError> {
     Ok(conn.query_row(
-        "SELECT role FROM chat_messages WHERE conversation_id=?1 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1",
-        [conversation_id], |row| row.get(0),
+        "SELECT id, conversation_id, role, content, created_at, message_index FROM chat_messages WHERE conversation_id=?1 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1",
+        [conversation_id], |row| Ok(ChatMessage {
+            id: row.get(0)?, conversation_id: row.get(1)?, role: row.get(2)?,
+            content: row.get(3)?, created_at: row.get(4)?, message_index: row.get(5)?,
+        }),
     ).optional()?)
 }
 
@@ -575,18 +756,34 @@ pub fn admit_chat_turn(
     user_id: &str,
     soul_id: &str,
     backend: &AtomicChatBackend,
-    content: &str,
+    request: &AtomicChatRequest,
+    context_window_tokens: usize,
 ) -> Result<ChatMessage, AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
     let current = owned_chat_state(&tx, conversation_id, user_id, soul_id)?;
-    let last_role = last_chat_role(&tx, conversation_id)?;
-    let mut state = admitted_chat_state(current, backend, last_role.as_deref())?;
-    let message = save_message(&tx, conversation_id, "user", content)?;
-    state.active = Some(AtomicChatTurn {
-        user_message_id: message.id.clone(),
-        status: AtomicChatTurnStatus::Running,
-        error: None,
-    });
+    let last = last_chat_message(&tx, conversation_id)?;
+    let outcome_unknown = if let AtomicChatRequest::Retry { user_message_id } = request {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_tool_calls WHERE message_id=?1 AND (status='running' OR json_extract(tool_output,'$.outcome_unknown')=1))",
+            [user_message_id], |row| row.get(0),
+        )?
+    } else {
+        false
+    };
+    let mut state = prepared_chat_state(
+        current,
+        backend,
+        last.as_ref(),
+        request,
+        context_window_tokens,
+        outcome_unknown,
+    )?;
+    let (saved, content) = chat_admission_input(&state, last.as_ref(), request);
+    let message = match saved {
+        Some(message) => message,
+        None => save_message(&tx, conversation_id, "user", content)?,
+    };
+    admitted_chat_message(&mut state, request, &message.id);
     write_chat_state(&tx, conversation_id, Some(&state))?;
     tx.commit()?;
     Ok(message)
@@ -624,8 +821,12 @@ pub fn set_chat_phase(
 ) -> Result<(), AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
     let current = owned_chat_state(&tx, conversation_id, user_id, soul_id)?;
-    let last_role = last_chat_role(&tx, conversation_id)?;
-    let state = bound_chat_state(current, backend, last_role.as_deref())?;
+    let last = last_chat_message(&tx, conversation_id)?;
+    let state = bound_chat_state(
+        current,
+        backend,
+        last.as_ref().map(|last| last.role.as_str()),
+    )?;
     let state = changed_chat_phase(state, phase)?;
     write_chat_state(&tx, conversation_id, Some(&state))?;
     tx.commit()?;
@@ -1218,11 +1419,12 @@ pub fn save_chat_reply(
     citation_index: i32,
 ) -> Result<ChatMessage, AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
+    let message = save_message(&tx, conversation_id, "assistant", content)?;
     let state = completed_chat_state(
         stored_chat_state(&tx, conversation_id)?,
         expected_user_message_id,
+        &message.id,
     )?;
-    let message = save_message(&tx, conversation_id, "assistant", content)?;
     write_chat_tool_state(
         &tx,
         conversation_id,

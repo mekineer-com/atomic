@@ -628,7 +628,8 @@ pub trait ChatStore: Send + Sync {
         user_id: &str,
         soul_id: &str,
         backend: &AtomicChatBackend,
-        content: &str,
+        request: &AtomicChatRequest,
+        context_window_tokens: usize,
     ) -> StorageResult<ChatMessage>;
     async fn fail_chat_turn(
         &self,

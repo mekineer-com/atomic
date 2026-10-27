@@ -8,6 +8,7 @@ use crate::event_bridge::chat_event_callback;
 use crate::routes::memu_proxy::{self, MemuScope, memu_error_text};
 use crate::state::AppState;
 use actix_web::{HttpRequest, HttpResponse, http::StatusCode, web};
+use atomic_core::chat::is_atomic_recap_prompt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -294,11 +295,6 @@ fn rows_for_saved_history(
         cleaned.push(row.clone());
     }
     cleaned
-}
-
-fn is_atomic_recap_prompt(first_line: &str, recap_instruction: &str) -> bool {
-    first_line == recap_instruction
-        || first_line.starts_with("This Atomic session is ending. Write a recap of your activity")
 }
 
 fn existing_recap(

@@ -2665,10 +2665,18 @@ impl AtomicCore {
         user_id: &str,
         soul_id: &str,
         backend: &AtomicChatBackend,
-        content: &str,
+        request: &AtomicChatRequest,
+        context_window_tokens: usize,
     ) -> Result<ChatMessage, AtomicCoreError> {
         self.storage
-            .admit_chat_turn_sync(conversation_id, user_id, soul_id, backend, content)
+            .admit_chat_turn_sync(
+                conversation_id,
+                user_id,
+                soul_id,
+                backend,
+                request,
+                context_window_tokens,
+            )
             .await
     }
     pub async fn fail_chat_turn(

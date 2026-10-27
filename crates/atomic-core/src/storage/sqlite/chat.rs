@@ -12,14 +12,23 @@ impl SqliteStorage {
         user_id: &str,
         soul_id: &str,
         backend: &AtomicChatBackend,
-        content: &str,
+        request: &AtomicChatRequest,
+        context_window_tokens: usize,
     ) -> StorageResult<ChatMessage> {
         let conn = self
             .db
             .conn
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        crate::chat::admit_chat_turn(&conn, conversation_id, user_id, soul_id, backend, content)
+        crate::chat::admit_chat_turn(
+            &conn,
+            conversation_id,
+            user_id,
+            soul_id,
+            backend,
+            request,
+            context_window_tokens,
+        )
     }
     pub(crate) fn fail_chat_turn_sync(
         &self,
@@ -250,18 +259,26 @@ impl ChatStore for SqliteStorage {
         user_id: &str,
         soul_id: &str,
         backend: &AtomicChatBackend,
-        content: &str,
+        request: &AtomicChatRequest,
+        context_window_tokens: usize,
     ) -> StorageResult<ChatMessage> {
-        let (storage, conversation_id, user_id, soul_id, backend, content) = (
+        let (storage, conversation_id, user_id, soul_id, backend, request) = (
             self.clone(),
             conversation_id.to_string(),
             user_id.to_string(),
             soul_id.to_string(),
             *backend,
-            content.to_string(),
+            request.clone(),
         );
         tokio::task::spawn_blocking(move || {
-            storage.admit_chat_turn_sync(&conversation_id, &user_id, &soul_id, &backend, &content)
+            storage.admit_chat_turn_sync(
+                &conversation_id,
+                &user_id,
+                &soul_id,
+                &backend,
+                &request,
+                context_window_tokens,
+            )
         })
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?

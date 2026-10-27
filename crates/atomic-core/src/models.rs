@@ -793,6 +793,22 @@ pub enum AtomicChatTurnStatus {
     Running,
     Failed,
     Uncertain,
+    Complete,
+}
+
+#[derive(Debug, Clone)]
+pub enum AtomicChatRequest {
+    New {
+        content: String,
+        page_context: Option<crate::agent::PageContext>,
+        canvas_context: Option<crate::agent::CanvasContext>,
+    },
+    Retry {
+        user_message_id: String,
+    },
+    Recap {
+        instruction: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -801,6 +817,17 @@ pub struct AtomicChatTurn {
     pub user_message_id: String,
     pub status: AtomicChatTurnStatus,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_context: Option<crate::agent::PageContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_context: Option<crate::agent::CanvasContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AtomicChatRecap {
+    pub turn: AtomicChatTurn,
+    pub reply_message_id: Option<String>,
 }
 
 /// Durable admission, not a process-local claim that a native writer is idle.
@@ -810,6 +837,10 @@ pub struct AtomicChatState {
     pub backend: AtomicChatBackend,
     pub phase: AtomicChatPhase,
     pub active: Option<AtomicChatTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recap: Option<AtomicChatRecap>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<usize>,
 }
 
 /// Chat conversation

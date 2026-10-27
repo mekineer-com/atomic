@@ -37,14 +37,24 @@ async fn owned_chat_state(
     Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
 }
 
-async fn last_chat_role(
+async fn last_chat_message(
     conn: &mut sqlx::PgConnection,
     db_id: &str,
     conversation_id: &str,
-) -> StorageResult<Option<String>> {
-    sqlx::query_scalar("SELECT role FROM chat_messages WHERE conversation_id=$1 AND db_id=$2 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1")
+) -> StorageResult<Option<ChatMessage>> {
+    let row = sqlx::query_as::<_, (String, String, String, String, String, i32)>("SELECT id, conversation_id, role, content, created_at, message_index FROM chat_messages WHERE conversation_id=$1 AND db_id=$2 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1")
         .bind(conversation_id).bind(db_id).fetch_optional(conn).await
-        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+    Ok(row.map(
+        |(id, conversation_id, role, content, created_at, message_index)| ChatMessage {
+            id,
+            conversation_id,
+            role,
+            content,
+            created_at,
+            message_index,
+        },
+    ))
 }
 
 async fn write_chat_state(
@@ -452,7 +462,8 @@ impl ChatStore for PostgresStorage {
         user_id: &str,
         soul_id: &str,
         backend: &AtomicChatBackend,
-        content: &str,
+        request: &AtomicChatRequest,
+        context_window_tokens: usize,
     ) -> StorageResult<ChatMessage> {
         let mut tx = self
             .pool
@@ -461,14 +472,29 @@ impl ChatStore for PostgresStorage {
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         let current =
             owned_chat_state(&mut tx, &self.db_id, conversation_id, user_id, soul_id).await?;
-        let last_role = last_chat_role(&mut tx, &self.db_id, conversation_id).await?;
-        let mut state = crate::chat::admitted_chat_state(current, backend, last_role.as_deref())?;
-        let message = write_message(&mut tx, &self.db_id, conversation_id, "user", content).await?;
-        state.active = Some(AtomicChatTurn {
-            user_message_id: message.id.clone(),
-            status: AtomicChatTurnStatus::Running,
-            error: None,
-        });
+        let last = last_chat_message(&mut tx, &self.db_id, conversation_id).await?;
+        let outcome_unknown = if let AtomicChatRequest::Retry { user_message_id } = request {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM chat_tool_calls WHERE message_id=$1 AND db_id=$2 AND (status='running' OR NULLIF(tool_result,'')::jsonb->>'outcome_unknown'='true'))"
+            ).bind(user_message_id).bind(&self.db_id).fetch_one(&mut *tx).await
+                .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?
+        } else {
+            false
+        };
+        let mut state = crate::chat::prepared_chat_state(
+            current,
+            backend,
+            last.as_ref(),
+            request,
+            context_window_tokens,
+            outcome_unknown,
+        )?;
+        let (saved, content) = crate::chat::chat_admission_input(&state, last.as_ref(), request);
+        let message = match saved {
+            Some(message) => message,
+            None => write_message(&mut tx, &self.db_id, conversation_id, "user", content).await?,
+        };
+        crate::chat::admitted_chat_message(&mut state, request, &message.id);
         write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
         tx.commit()
             .await
@@ -519,8 +545,12 @@ impl ChatStore for PostgresStorage {
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         let current =
             owned_chat_state(&mut tx, &self.db_id, conversation_id, user_id, soul_id).await?;
-        let last_role = last_chat_role(&mut tx, &self.db_id, conversation_id).await?;
-        let state = crate::chat::bound_chat_state(current, backend, last_role.as_deref())?;
+        let last = last_chat_message(&mut tx, &self.db_id, conversation_id).await?;
+        let state = crate::chat::bound_chat_state(
+            current,
+            backend,
+            last.as_ref().map(|last| last.role.as_str()),
+        )?;
         let state = crate::chat::changed_chat_phase(state, phase)?;
         write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
         tx.commit()
@@ -1118,12 +1148,11 @@ impl ChatStore for PostgresStorage {
             .begin()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        let state = crate::chat::completed_chat_state(
-            locked_chat_state(&mut tx, &self.db_id, conversation_id).await?,
-            expected_user_message_id,
-        )?;
+        let current = locked_chat_state(&mut tx, &self.db_id, conversation_id).await?;
         let message =
             write_message(&mut tx, &self.db_id, conversation_id, "assistant", content).await?;
+        let state =
+            crate::chat::completed_chat_state(current, expected_user_message_id, &message.id)?;
         write_chat_tool_state(
             &mut tx,
             &self.db_id,

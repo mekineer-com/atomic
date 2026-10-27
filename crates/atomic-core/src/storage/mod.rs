@@ -301,6 +301,7 @@ macro_rules! impl_reborrow_struct {
 impl_reborrow_struct!(
     AtomicChatBackend,
     AtomicChatPhase,
+    AtomicChatRequest,
     CreateAtomRequest,
     UpdateAtomRequest,
     ListAtomsParams,
@@ -567,7 +568,7 @@ dispatch! {
     fn get_scope_description_sync(&self, tag_ids: &[String]) -> Result<String, AtomicCoreError>
         => sqlite: get_scope_description_sync, pg_trait: ChatStore, pg_method: get_scope_description;
 
-    fn admit_chat_turn_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, backend: &AtomicChatBackend, content: &str) -> Result<ChatMessage, AtomicCoreError>
+    fn admit_chat_turn_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, backend: &AtomicChatBackend, request: &AtomicChatRequest, context_window_tokens: usize) -> Result<ChatMessage, AtomicCoreError>
         => sqlite: admit_chat_turn_sync, pg_trait: ChatStore, pg_method: admit_chat_turn;
     fn fail_chat_turn_sync(&self, conversation_id: &str, user_message_id: &str, error: &str, uncertain: bool) -> Result<(), AtomicCoreError>
         => sqlite: fail_chat_turn_sync, pg_trait: ChatStore, pg_method: fail_chat_turn;
