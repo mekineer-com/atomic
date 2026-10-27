@@ -695,20 +695,6 @@ pub trait ChatStore: Send + Sync {
         citation_index: i32,
     ) -> StorageResult<ChatMessage>;
 
-    /// Save tool calls associated with a message.
-    async fn save_tool_calls(
-        &self,
-        message_id: &str,
-        tool_calls: &[ChatToolCall],
-    ) -> StorageResult<()>;
-
-    /// Save citations for a message.
-    async fn save_citations(
-        &self,
-        message_id: &str,
-        citations: &[ChatCitation],
-    ) -> StorageResult<()>;
-
     /// Highest citation number issued, including mappings removed by cleanup.
     async fn get_chat_citation_index(&self, conversation_id: &str) -> StorageResult<i32>;
 

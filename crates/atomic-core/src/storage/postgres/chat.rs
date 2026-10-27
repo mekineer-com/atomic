@@ -59,6 +59,31 @@ async fn write_message(
     })
 }
 
+async fn write_chat_tool_state(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    conversation_id: &str,
+    message_id: &str,
+    tool_calls: &[ChatToolCall],
+    citations: &[ChatCitation],
+    citation_index: i32,
+) -> StorageResult<()> {
+    let belongs: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id=$1 AND conversation_id=$2 AND db_id=$3)")
+            .bind(message_id).bind(conversation_id).bind(db_id).fetch_one(&mut *conn).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+    if !belongs {
+        return Err(AtomicCoreError::Validation(
+            "Tool state target is outside this conversation".to_string(),
+        ));
+    }
+    write_tool_calls(conn, db_id, message_id, tool_calls).await?;
+    write_citations(conn, db_id, message_id, citations).await?;
+    sqlx::query("UPDATE conversations SET atomic_citation_index=GREATEST(atomic_citation_index,$1) WHERE id=$2 AND db_id=$3")
+            .bind(citation_index).bind(conversation_id).bind(db_id).execute(&mut *conn).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+    Ok(())
+}
+
 async fn write_tool_calls(
     conn: &mut sqlx::PgConnection,
     db_id: &str,
@@ -913,41 +938,20 @@ impl ChatStore for PostgresStorage {
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         let message =
             write_message(&mut tx, &self.db_id, conversation_id, "assistant", content).await?;
-        write_tool_calls(&mut tx, &self.db_id, &message.id, tool_calls).await?;
-        write_citations(&mut tx, &self.db_id, &message.id, citations).await?;
-        sqlx::query("UPDATE conversations SET atomic_citation_index=GREATEST(atomic_citation_index,$1) WHERE id=$2 AND db_id=$3")
-            .bind(citation_index).bind(conversation_id).bind(&self.db_id).execute(&mut *tx).await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        write_chat_tool_state(
+            &mut tx,
+            &self.db_id,
+            conversation_id,
+            &message.id,
+            tool_calls,
+            citations,
+            citation_index,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         Ok(message)
-    }
-
-    async fn save_tool_calls(
-        &self,
-        message_id: &str,
-        tool_calls: &[ChatToolCall],
-    ) -> StorageResult<()> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        write_tool_calls(&mut conn, &self.db_id, message_id, tool_calls).await
-    }
-
-    async fn save_citations(
-        &self,
-        message_id: &str,
-        citations: &[ChatCitation],
-    ) -> StorageResult<()> {
-        let mut conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        write_citations(&mut conn, &self.db_id, message_id, citations).await
     }
 
     async fn get_chat_citation_index(&self, conversation_id: &str) -> StorageResult<i32> {
@@ -974,19 +978,16 @@ impl ChatStore for PostgresStorage {
             .begin()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        let belongs: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id=$1 AND conversation_id=$2 AND db_id=$3)")
-            .bind(message_id).bind(conversation_id).bind(&self.db_id).fetch_one(&mut *tx).await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        if !belongs {
-            return Err(AtomicCoreError::Validation(
-                "Tool state target is outside this conversation".to_string(),
-            ));
-        }
-        write_tool_calls(&mut tx, &self.db_id, message_id, tool_calls).await?;
-        write_citations(&mut tx, &self.db_id, message_id, citations).await?;
-        sqlx::query("UPDATE conversations SET atomic_citation_index=GREATEST(atomic_citation_index,$1) WHERE id=$2 AND db_id=$3")
-            .bind(citation_index).bind(conversation_id).bind(&self.db_id).execute(&mut *tx).await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        write_chat_tool_state(
+            &mut tx,
+            &self.db_id,
+            conversation_id,
+            message_id,
+            tool_calls,
+            citations,
+            citation_index,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))

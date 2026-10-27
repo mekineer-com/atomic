@@ -2229,19 +2229,13 @@ where
 
     // Publish text, records and citation numbering together before emitting completion.
     {
-        let citation_index = result
-            .citations
-            .iter()
-            .map(|citation| citation.citation_index)
-            .max()
-            .unwrap_or(0);
         let saved_msg = storage
             .save_chat_reply_sync(
                 conversation_id,
                 &result.message.content,
                 &result.tool_calls,
                 &result.citations,
-                citation_index,
+                0, // API citations are per reply, not a native sitting high-water mark.
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -3023,22 +3017,21 @@ mod tests {
             .unwrap();
         let cid = &conversation.conversation.id;
         for source in ["one", "two"] {
-            let message = core
-                .save_message(cid, "assistant", "API reply [1]")
-                .await
-                .unwrap();
             core.storage
-                .save_citations_sync(
-                    &message.id,
+                .save_chat_reply_sync(
+                    cid,
+                    "API reply [1]",
+                    &[],
                     &[ChatCitation {
                         id: Uuid::new_v4().to_string(),
-                        message_id: message.id.clone(),
+                        message_id: String::new(),
                         citation_index: 1,
                         atom_id: format!("memory:{source}"),
                         chunk_index: None,
                         excerpt: source.to_string(),
                         relevance_score: None,
                     }],
+                    0,
                 )
                 .await
                 .unwrap();

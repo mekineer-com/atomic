@@ -116,23 +116,7 @@ impl SqliteStorage {
             .conn
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        let (message_id, message_index) =
-            crate::chat::save_message(&conn, conversation_id, role, content)?;
-        if role != "system" {
-            conn.execute(
-                "INSERT INTO chat_messages_fts(id, conversation_id, content) VALUES (?1, ?2, ?3)",
-                rusqlite::params![&message_id, conversation_id, content],
-            )?;
-        }
-        // Reconstruct ChatMessage from the returned id and index
-        Ok(ChatMessage {
-            id: message_id,
-            conversation_id: conversation_id.to_string(),
-            role: role.to_string(),
-            content: content.to_string(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            message_index,
-        })
+        crate::chat::save_message(&conn, conversation_id, role, content)
     }
 
     pub(crate) fn save_chat_reply_sync(
@@ -156,32 +140,6 @@ impl SqliteStorage {
             citations,
             citation_index,
         )
-    }
-
-    pub(crate) fn save_tool_calls_sync(
-        &self,
-        message_id: &str,
-        tool_calls: &[ChatToolCall],
-    ) -> StorageResult<()> {
-        let conn = self
-            .db
-            .conn
-            .lock()
-            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        crate::chat::save_tool_calls(&conn, message_id, tool_calls)
-    }
-
-    pub(crate) fn save_citations_sync(
-        &self,
-        message_id: &str,
-        citations: &[ChatCitation],
-    ) -> StorageResult<()> {
-        let conn = self
-            .db
-            .conn
-            .lock()
-            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        crate::chat::save_citations(&conn, message_id, citations)
     }
 
     pub(crate) fn get_scope_tag_ids_sync(
@@ -441,32 +399,6 @@ impl ChatStore for SqliteStorage {
         })
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
-    }
-
-    async fn save_tool_calls(
-        &self,
-        message_id: &str,
-        tool_calls: &[ChatToolCall],
-    ) -> StorageResult<()> {
-        let storage = self.clone();
-        let message_id = message_id.to_string();
-        let tool_calls = tool_calls.to_vec();
-        tokio::task::spawn_blocking(move || storage.save_tool_calls_sync(&message_id, &tool_calls))
-            .await
-            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
-    }
-
-    async fn save_citations(
-        &self,
-        message_id: &str,
-        citations: &[ChatCitation],
-    ) -> StorageResult<()> {
-        let storage = self.clone();
-        let message_id = message_id.to_string();
-        let citations = citations.to_vec();
-        tokio::task::spawn_blocking(move || storage.save_citations_sync(&message_id, &citations))
-            .await
-            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
     }
 
     async fn get_scope_tag_ids(&self, conversation_id: &str) -> StorageResult<Vec<String>> {

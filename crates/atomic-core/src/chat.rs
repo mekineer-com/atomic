@@ -779,7 +779,7 @@ pub fn save_message(
     conversation_id: &str,
     role: &str,
     content: &str,
-) -> Result<(String, i32), AtomicCoreError> {
+) -> Result<ChatMessage, AtomicCoreError> {
     let message_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -807,11 +807,25 @@ pub fn save_message(
         rusqlite::params![&now, conversation_id],
     )?;
 
-    Ok((message_id, message_index))
+    if role != "system" {
+        conn.execute(
+            "INSERT INTO chat_messages_fts(id, conversation_id, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![message_id, conversation_id, content],
+        )?;
+    }
+
+    Ok(ChatMessage {
+        id: message_id,
+        conversation_id: conversation_id.to_string(),
+        role: role.to_string(),
+        content: content.to_string(),
+        created_at: now,
+        message_index,
+    })
 }
 
 /// Save tool calls for a message
-pub fn save_tool_calls(
+fn save_tool_calls(
     conn: &Connection,
     message_id: &str,
     tool_calls: &[ChatToolCall],
@@ -848,7 +862,7 @@ pub fn save_tool_calls(
 }
 
 /// Save citations for a message
-pub fn save_citations(
+fn save_citations(
     conn: &Connection,
     message_id: &str,
     citations: &[ChatCitation],
@@ -891,7 +905,27 @@ pub fn save_chat_tool_state(
     citation_index: i32,
 ) -> Result<(), AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
-    let belongs: bool = tx.query_row(
+    write_chat_tool_state(
+        &tx,
+        conversation_id,
+        message_id,
+        tool_calls,
+        citations,
+        citation_index,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn write_chat_tool_state(
+    conn: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    tool_calls: &[ChatToolCall],
+    citations: &[ChatCitation],
+    citation_index: i32,
+) -> Result<(), AtomicCoreError> {
+    let belongs: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id=?1 AND conversation_id=?2)",
         rusqlite::params![message_id, conversation_id],
         |row| row.get(0),
@@ -901,13 +935,12 @@ pub fn save_chat_tool_state(
             "Tool state target is outside this conversation".to_string(),
         ));
     }
-    save_tool_calls(&tx, message_id, tool_calls)?;
-    save_citations(&tx, message_id, citations)?;
-    tx.execute(
+    save_tool_calls(conn, message_id, tool_calls)?;
+    save_citations(conn, message_id, citations)?;
+    conn.execute(
         "UPDATE conversations SET atomic_citation_index=MAX(atomic_citation_index, ?1) WHERE id=?2",
         rusqlite::params![citation_index, conversation_id],
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -921,30 +954,14 @@ pub fn save_chat_reply(
     citation_index: i32,
 ) -> Result<ChatMessage, AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
-    let (message_id, message_index) = save_message(&tx, conversation_id, "assistant", content)?;
-    tx.execute(
-        "INSERT INTO chat_messages_fts(id, conversation_id, content) VALUES (?1, ?2, ?3)",
-        rusqlite::params![message_id, conversation_id, content],
-    )?;
-    save_tool_calls(&tx, &message_id, tool_calls)?;
-    save_citations(&tx, &message_id, citations)?;
-    tx.execute(
-        "UPDATE conversations SET atomic_citation_index=MAX(atomic_citation_index, ?1) WHERE id=?2",
-        rusqlite::params![citation_index, conversation_id],
-    )?;
-    let message = tx.query_row(
-        "SELECT created_at FROM chat_messages WHERE id=?1",
-        [&message_id],
-        |row| {
-            Ok(ChatMessage {
-                id: message_id.clone(),
-                conversation_id: conversation_id.to_string(),
-                role: "assistant".to_string(),
-                content: content.to_string(),
-                created_at: row.get(0)?,
-                message_index,
-            })
-        },
+    let message = save_message(&tx, conversation_id, "assistant", content)?;
+    write_chat_tool_state(
+        &tx,
+        conversation_id,
+        &message.id,
+        tool_calls,
+        citations,
+        citation_index,
     )?;
     tx.commit()?;
     Ok(message)
@@ -1365,13 +1382,32 @@ mod tests {
         let conv =
             create_conversation(&conn, &[], None, Some(("Fictional User", "Fictional Soul")))
                 .unwrap();
-        let (msg_id, msg_idx) =
-            save_message(&conn, &conv.conversation.id, "user", "Hello").unwrap();
+        let first = save_message(&conn, &conv.conversation.id, "user", "Hello").unwrap();
 
-        assert!(!msg_id.is_empty());
-        assert_eq!(msg_idx, 0);
+        assert!(!first.id.is_empty());
+        assert_eq!(first.message_index, 0);
+        let saved_time: String = conn
+            .query_row(
+                "SELECT created_at FROM chat_messages WHERE id=?1",
+                [&first.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first.created_at, saved_time);
 
-        let (_, msg_idx2) = save_message(&conn, &conv.conversation.id, "assistant", "Hi!").unwrap();
-        assert_eq!(msg_idx2, 1);
+        let second = save_message(&conn, &conv.conversation.id, "assistant", "Hi!").unwrap();
+        assert_eq!(second.message_index, 1);
+        save_message(&conn, &conv.conversation.id, "system", "Hidden Presence").unwrap();
+        let indexed: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages_fts WHERE conversation_id=?1",
+                [&conv.conversation.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            indexed, 2,
+            "the message writer indexes dialogue, not system snapshots"
+        );
     }
 }
