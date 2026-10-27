@@ -517,13 +517,7 @@ impl ChatStore for PostgresStorage {
         let mut state = locked_chat_state(&mut tx, &self.db_id, conversation_id)
             .await?
             .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
-        let active = crate::chat::matching_chat_turn(&mut state, user_message_id)?;
-        active.status = if uncertain {
-            AtomicChatTurnStatus::Uncertain
-        } else {
-            AtomicChatTurnStatus::Failed
-        };
-        active.error = Some(error.to_string());
+        crate::chat::failed_chat_state(&mut state, user_message_id, error, uncertain)?;
         write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
         tx.commit()
             .await

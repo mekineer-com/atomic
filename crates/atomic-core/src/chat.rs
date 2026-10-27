@@ -5,9 +5,10 @@
 
 use crate::error::AtomicCoreError;
 use crate::models::{
-    AtomicChatBackend, AtomicChatPhase, AtomicChatRecap, AtomicChatRequest, AtomicChatState,
-    AtomicChatTurn, AtomicChatTurnStatus, ChatCitation, ChatMessage, ChatMessageWithContext,
-    ChatToolCall, Conversation, ConversationWithMessages, ConversationWithTags, Tag,
+    AtomicChatBackend, AtomicChatPhase, AtomicChatRecap, AtomicChatRecapOutcome, AtomicChatRequest,
+    AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus, ChatCitation, ChatMessage,
+    ChatMessageWithContext, ChatToolCall, Conversation, ConversationWithMessages,
+    ConversationWithTags, Tag,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -462,26 +463,57 @@ pub(crate) fn admitted_chat_state(
     Ok(state)
 }
 
-pub(crate) fn matching_chat_turn<'a>(
-    state: &'a mut AtomicChatState,
+pub(crate) fn matching_chat_turn(
+    state: &AtomicChatState,
     expected_user_message_id: &str,
-) -> Result<&'a mut AtomicChatTurn, AtomicCoreError> {
-    let recap = state
+) -> Result<(), AtomicCoreError> {
+    let running = if let Some(recap) = state
         .recap
-        .as_mut()
-        .filter(|recap| recap.turn.user_message_id == expected_user_message_id);
-    let turn = match recap {
-        Some(recap) if state.phase == AtomicChatPhase::Closing => Some(&mut recap.turn),
-        Some(_) => None,
-        None => state.active.as_mut(),
+        .as_ref()
+        .filter(|recap| recap.request_message_id == expected_user_message_id)
+    {
+        matches!(recap.outcome, AtomicChatRecapOutcome::Running)
+    } else {
+        state.active.as_ref().is_some_and(|turn| {
+            turn.user_message_id == expected_user_message_id
+                && turn.status == AtomicChatTurnStatus::Running
+        })
     };
-    turn.filter(|active| {
-        active.user_message_id == expected_user_message_id
-            && active.status == AtomicChatTurnStatus::Running
-    })
-    .ok_or_else(|| {
+    running.then_some(()).ok_or_else(|| {
         AtomicCoreError::Conflict("The active chat turn no longer matches this result".to_string())
     })
+}
+
+pub(crate) fn failed_chat_state(
+    state: &mut AtomicChatState,
+    message_id: &str,
+    error: &str,
+    uncertain: bool,
+) -> Result<(), AtomicCoreError> {
+    matching_chat_turn(state, message_id)?;
+    if let Some(recap) = state
+        .recap
+        .as_mut()
+        .filter(|recap| recap.request_message_id == message_id)
+    {
+        recap.outcome = if uncertain {
+            AtomicChatRecapOutcome::Uncertain {
+                error: error.to_string(),
+            }
+        } else {
+            AtomicChatRecapOutcome::Failed {
+                error: error.to_string(),
+            }
+        };
+    } else if let Some(turn) = &mut state.active {
+        turn.status = if uncertain {
+            AtomicChatTurnStatus::Uncertain
+        } else {
+            AtomicChatTurnStatus::Failed
+        };
+        turn.error = Some(error.to_string());
+    }
+    Ok(())
 }
 
 pub(crate) fn completed_chat_state(
@@ -492,15 +524,15 @@ pub(crate) fn completed_chat_state(
     match (state, expected_user_message_id) {
         (None, None) => Ok(None), // Existing API/standalone path, not lifecycle-managed yet.
         (Some(mut state), Some(expected)) => {
-            matching_chat_turn(&mut state, expected)?;
+            matching_chat_turn(&state, expected)?;
             if let Some(recap) = state
                 .recap
                 .as_mut()
-                .filter(|recap| recap.turn.user_message_id == expected)
+                .filter(|recap| recap.request_message_id == expected)
             {
-                recap.turn.status = AtomicChatTurnStatus::Complete;
-                recap.turn.error = None;
-                recap.reply_message_id = Some(reply_message_id.to_string());
+                recap.outcome = AtomicChatRecapOutcome::Complete {
+                    reply_message_id: reply_message_id.to_string(),
+                };
             } else {
                 state.active = None;
             }
@@ -527,12 +559,11 @@ pub(crate) fn changed_chat_phase(
                 .as_ref()
                 .is_some_and(|turn| turn.status == AtomicChatTurnStatus::Running)
                 && state.recap.as_ref().is_none_or(|recap| {
-                    recap.turn.status == AtomicChatTurnStatus::Complete
-                        && recap.reply_message_id.is_some()
+                    matches!(recap.outcome, AtomicChatRecapOutcome::Complete { .. })
                 }) => {}
         _ => {
             return Err(AtomicCoreError::Conflict(
-                "Chat cannot become closed while a turn is running, or reopen after close-out"
+                "Chat cannot close with running work or an unfinished recap, or reopen after close-out"
                     .to_string(),
             ));
         }
@@ -542,9 +573,13 @@ pub(crate) fn changed_chat_phase(
 }
 
 /// Only legacy, unidentified controls use wording; managed controls use saved IDs.
-pub fn is_atomic_recap_prompt(first_line: &str, recap_instruction: &str) -> bool {
-    (!recap_instruction.is_empty() && first_line == recap_instruction)
-        || first_line.starts_with("This Atomic session is ending. Write a recap of your activity")
+pub fn is_atomic_recap_prompt(content: &str) -> bool {
+    content
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .starts_with("This Atomic session is ending. Write a recap of your activity")
 }
 
 pub(crate) fn prepared_chat_state(
@@ -577,6 +612,11 @@ pub(crate) fn prepared_chat_state(
                 ));
             }
             if let Some(active) = &state.active {
+                if active.status == AtomicChatTurnStatus::Uncertain {
+                    return Err(conflict(
+                        "The previous outcome is unknown. Close out from saved history; do not replay it.",
+                    ));
+                }
                 if active.user_message_id != *user_message_id
                     || active.status != AtomicChatTurnStatus::Failed
                 {
@@ -584,7 +624,7 @@ pub(crate) fn prepared_chat_state(
                         "Retry requires the matching failed turn after writer-idle reconciliation",
                     ));
                 }
-            } else if is_atomic_recap_prompt(last.content.trim().lines().next().unwrap_or(""), "") {
+            } else if is_atomic_recap_prompt(&last.content) {
                 return Err(conflict(
                     "This is a legacy recap. Retry tool-free close-out, not ordinary chat.",
                 ));
@@ -607,14 +647,16 @@ pub(crate) fn prepared_chat_state(
                 ));
             }
             if let Some(recap) = &state.recap {
-                if recap.reply_message_id.is_some() {
+                if matches!(recap.outcome, AtomicChatRecapOutcome::Complete { .. }) {
                     return Err(conflict(
                         "Recap already saved. Reuse its reply for publication.",
                     ));
                 }
-                if recap.turn.status != AtomicChatTurnStatus::Failed
-                    || last.is_none_or(|last| last.id != recap.turn.user_message_id)
-                {
+                // The lock proves an API worker idle, not a separate native writer.
+                let retryable = matches!(recap.outcome, AtomicChatRecapOutcome::Failed { .. })
+                    || (*backend == AtomicChatBackend::Api
+                        && matches!(recap.outcome, AtomicChatRecapOutcome::Uncertain { .. }));
+                if !retryable || last.is_none_or(|last| last.id != recap.request_message_id) {
                     return Err(conflict(
                         "Recap Retry requires its matching failed control after writer-idle reconciliation",
                     ));
@@ -622,9 +664,7 @@ pub(crate) fn prepared_chat_state(
             }
         }
     }
-    if *backend == AtomicChatBackend::Api {
-        state.context_window_tokens = Some(context_window_tokens);
-    }
+    state.context_window_tokens = Some(context_window_tokens);
     Ok(state)
 }
 
@@ -650,7 +690,7 @@ pub(crate) fn admitted_chat_message(
         AtomicChatRequest::Retry { .. } => {
             let turn = state.active.get_or_insert(AtomicChatTurn {
                 user_message_id: message_id.to_string(),
-                status: AtomicChatTurnStatus::Failed,
+                status: AtomicChatTurnStatus::Running,
                 error: None,
                 page_context: None,
                 canvas_context: None,
@@ -660,14 +700,8 @@ pub(crate) fn admitted_chat_message(
         }
         AtomicChatRequest::Recap { .. } => {
             state.recap = Some(AtomicChatRecap {
-                turn: AtomicChatTurn {
-                    user_message_id: message_id.to_string(),
-                    status: AtomicChatTurnStatus::Running,
-                    error: None,
-                    page_context: None,
-                    canvas_context: None,
-                },
-                reply_message_id: None,
+                request_message_id: message_id.to_string(),
+                outcome: AtomicChatRecapOutcome::Running,
             });
         }
     }
@@ -684,11 +718,7 @@ pub(crate) fn chat_admission_input<'a>(
         AtomicChatRequest::Recap { instruction } => {
             let legacy = state.active.is_none()
                 && last.is_some_and(|last| {
-                    last.role == "user"
-                        && is_atomic_recap_prompt(
-                            last.content.trim().lines().next().unwrap_or(""),
-                            "",
-                        )
+                    last.role == "user" && is_atomic_recap_prompt(&last.content)
                 });
             (
                 last.filter(|_| state.recap.is_some() || legacy).cloned(),
@@ -799,13 +829,7 @@ pub fn fail_chat_turn(
     let tx = conn.unchecked_transaction()?;
     let mut state = stored_chat_state(&tx, conversation_id)?
         .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
-    let active = matching_chat_turn(&mut state, user_message_id)?;
-    active.status = if uncertain {
-        AtomicChatTurnStatus::Uncertain
-    } else {
-        AtomicChatTurnStatus::Failed
-    };
-    active.error = Some(error.to_string());
+    failed_chat_state(&mut state, user_message_id, error, uncertain)?;
     write_chat_state(&tx, conversation_id, Some(&state))?;
     tx.commit()?;
     Ok(())

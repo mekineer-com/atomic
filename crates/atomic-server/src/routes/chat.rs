@@ -268,10 +268,7 @@ fn has_user_assistant_interchange(rows: &[AtomicTranscriptRow]) -> bool {
     rows.iter().any(|m| m.role == "user") && rows.iter().any(|m| m.role == "assistant")
 }
 
-fn rows_for_saved_history(
-    rows: &[AtomicTranscriptRow],
-    recap_instruction: &str,
-) -> Vec<AtomicTranscriptRow> {
+fn rows_for_saved_history(rows: &[AtomicTranscriptRow]) -> Vec<AtomicTranscriptRow> {
     let mut cleaned = Vec::new();
     let mut skip_next_assistant = false;
     for row in rows {
@@ -283,12 +280,7 @@ fn rows_for_saved_history(
             continue;
         }
         skip_next_assistant = false;
-        if row.role == "user"
-            && is_atomic_recap_prompt(
-                row.content.trim().lines().next().unwrap_or(""),
-                recap_instruction,
-            )
-        {
+        if row.role == "user" && is_atomic_recap_prompt(&row.content) {
             skip_next_assistant = true;
             continue;
         }
@@ -297,14 +289,10 @@ fn rows_for_saved_history(
     cleaned
 }
 
-fn existing_recap(
-    conv: &atomic_core::ConversationWithMessages,
-    recap_instruction: &str,
-) -> Option<String> {
+fn existing_recap(conv: &atomic_core::ConversationWithMessages) -> Option<String> {
     let messages = &conv.messages;
     for (idx, message) in messages.iter().enumerate().rev() {
-        let first_line = message.message.content.trim().lines().next().unwrap_or("");
-        if message.message.role == "user" && is_atomic_recap_prompt(first_line, recap_instruction) {
+        if message.message.role == "user" && is_atomic_recap_prompt(&message.message.content) {
             let assistant_idx = messages
                 .iter()
                 .enumerate()
@@ -745,8 +733,7 @@ async fn finish_memu_session(
         Err(e) => return Err(core_json_error(e)),
     };
     let mut rows = transcript_rows(&conv);
-    let recap_instruction = atomic_recap_instruction(&memu_session.user_id);
-    let mut recap = existing_recap(&conv, &recap_instruction);
+    let mut recap = existing_recap(&conv);
 
     if recap.is_none() && has_user_assistant_interchange(&rows) {
         let transcript_before_recap = std::mem::take(&mut rows);
@@ -786,10 +773,10 @@ async fn finish_memu_session(
             }
             Err(e) => return Err(core_json_error(e)),
         };
-        recap = existing_recap(&conv, &recap_instruction);
+        recap = existing_recap(&conv);
         rows = transcript_before_recap;
     }
-    rows = rows_for_saved_history(&rows, &recap_instruction);
+    rows = rows_for_saved_history(&rows);
 
     post_atomic_session_end(&memu_session, conversation_id, recap, rows).await
 }

@@ -2371,8 +2371,8 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_recap_retries_and_publishes_without_erasing_failed_turn() {
         use crate::{
-            AtomicChatBackend as Backend, AtomicChatPhase as Phase, AtomicChatRequest as Request,
-            AtomicChatTurnStatus as Status,
+            AtomicChatBackend as Backend, AtomicChatPhase as Phase,
+            AtomicChatRecapOutcome as Outcome, AtomicChatRequest as Request,
         };
         let dir = TempDir::new().unwrap();
         let core = AtomicCore::open_or_create(dir.path().join("recap.db")).unwrap();
@@ -2415,6 +2415,20 @@ mod tests {
         core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closing)
             .await
             .unwrap();
+        assert!(
+            core.admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &Request::Retry {
+                    user_message_id: user.id.clone()
+                },
+                200_000
+            )
+            .await
+            .is_err()
+        );
         let control = core
             .admit_chat_turn(cid, "TestOwner", "TestSoul", &Backend::Api, &recap, 200_000)
             .await
@@ -2424,7 +2438,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        core.fail_chat_turn(cid, &control.id, "Fictional recap failure", false)
+        core.fail_chat_turn(cid, &control.id, "Fictional recap failure", true)
             .await
             .unwrap();
         assert!(
@@ -2465,9 +2479,8 @@ mod tests {
                 .unwrap()
                 .recap
                 .unwrap()
-                .turn
-                .status,
-            Status::Running
+                .outcome,
+            Outcome::Running
         );
         core.database()
             .unwrap()
@@ -2484,10 +2497,11 @@ mod tests {
         let state = saved.conversation.atomic_chat_state.unwrap();
         assert_eq!(state.phase, Phase::Closing);
         assert_eq!(state.active, ordinary);
-        assert_eq!(state.recap.as_ref().unwrap().turn.status, Status::Complete);
         assert_eq!(
-            state.recap.unwrap().reply_message_id.as_deref(),
-            Some(reply.id.as_str())
+            state.recap.unwrap().outcome,
+            Outcome::Complete {
+                reply_message_id: reply.id.clone()
+            }
         );
         assert!(
             core.admit_chat_turn(cid, "TestOwner", "TestSoul", &Backend::Api, &recap, 200_000)
@@ -2520,18 +2534,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_unknown_native_recap_stays_blocked_after_api_recovery() {
+        use crate::{
+            AtomicChatBackend as Backend, AtomicChatPhase as Phase,
+            AtomicChatRecapOutcome as Outcome, AtomicChatRequest as Request,
+        };
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("recap-unknown.db")).unwrap();
+        for backend in [Backend::Api, Backend::ClaudeCode] {
+            let conv = core
+                .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+                .await
+                .unwrap();
+            let cid = &conv.conversation.id;
+            core.set_chat_phase(cid, "TestOwner", "TestSoul", &backend, &Phase::Closing)
+                .await
+                .unwrap();
+            let request = Request::Recap {
+                instruction: "Fictional tool-free recap".into(),
+            };
+            let control = core
+                .admit_chat_turn(cid, "TestOwner", "TestSoul", &backend, &request, 200_000)
+                .await
+                .unwrap();
+            core.fail_chat_turn(cid, &control.id, "Fictional lost result", true)
+                .await
+                .unwrap();
+            let before = core
+                .get_conversation(cid)
+                .await
+                .unwrap()
+                .unwrap()
+                .conversation
+                .atomic_chat_state
+                .unwrap();
+            assert_eq!(before.context_window_tokens, Some(200_000));
+            assert!(matches!(
+                before.recap.as_ref().unwrap().outcome,
+                Outcome::Uncertain { .. }
+            ));
+            let retry = core
+                .admit_chat_turn(cid, "TestOwner", "TestSoul", &backend, &request, 128_000)
+                .await;
+            if backend == Backend::Api {
+                assert_eq!(retry.unwrap().id, control.id);
+            } else {
+                assert!(retry.is_err());
+                assert_eq!(
+                    core.get_conversation(cid)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .conversation
+                        .atomic_chat_state
+                        .unwrap(),
+                    before
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn lifecycle_legacy_retry_distinguishes_recap_and_unknown_effects() {
         use crate::{
             AtomicChatBackend as Backend, AtomicChatPhase as Phase, AtomicChatRequest as Request,
         };
         let dir = TempDir::new().unwrap();
         let core = AtomicCore::open_or_create(dir.path().join("legacy.db")).unwrap();
-        for (content, unknown) in [
-            ("Fictional legacy request", false),
-            ("Fictional interrupted request", true),
+        for (content, tool_status) in [
+            ("Fictional legacy request", None),
+            ("Fictional interrupted request", Some("failed")),
+            ("Fictional running tool", Some("running")),
             (
                 "This Atomic session is ending. Write a recap of your activity with TestOwner",
-                false,
+                None,
             ),
         ] {
             let conv = core
@@ -2540,14 +2616,14 @@ mod tests {
                 .unwrap();
             let cid = &conv.conversation.id;
             let user = core.save_message(cid, "user", content).await.unwrap();
-            if unknown {
+            if let Some(status) = tool_status {
                 let call = ChatToolCall {
                     id: Uuid::new_v4().to_string(),
                     message_id: user.id.clone(),
                     tool_name: "edit_atom".into(),
                     tool_input: json!({}),
-                    tool_output: Some(json!({"outcome_unknown":true})),
-                    status: "failed".into(),
+                    tool_output: (status != "running").then(|| json!({"outcome_unknown":true})),
+                    status: status.into(),
                     created_at: user.created_at.clone(),
                     completed_at: None,
                 };
@@ -2568,7 +2644,7 @@ mod tests {
                     200_000,
                 )
                 .await;
-            if unknown {
+            if tool_status.is_some() {
                 assert!(result.unwrap_err().to_string().contains("unknown"));
             } else if content.starts_with("This Atomic") {
                 assert!(result.unwrap_err().to_string().contains("legacy recap"));
@@ -2924,6 +3000,22 @@ mod tests {
                 }
             );
             assert_eq!(active.error.as_deref(), Some("Fictional failure"));
+            if uncertain {
+                let error = reopened
+                    .admit_chat_turn(
+                        cid,
+                        "TestOwner",
+                        "TestSoul",
+                        &AtomicChatBackend::Api,
+                        &crate::AtomicChatRequest::Retry {
+                            user_message_id: user.id.clone(),
+                        },
+                        200_000,
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("Close out"));
+            }
             assert!(
                 reopened
                     .admit_chat_turn(
