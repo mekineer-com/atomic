@@ -1367,10 +1367,10 @@ fn truncate_messages_to_context(
 
 /// Convert ChatMessage models from storage into provider Message format for the API.
 fn chat_messages_to_provider_messages(
-    messages: Vec<crate::models::ChatMessageWithContext>,
+    messages: &[crate::models::ChatMessageWithContext],
 ) -> Vec<Message> {
     messages
-        .into_iter()
+        .iter()
         .map(|m| {
             let role = match m.message.role.as_str() {
                 "system" => MessageRole::System,
@@ -1380,7 +1380,7 @@ fn chat_messages_to_provider_messages(
             };
             Message {
                 role,
-                content: Some(m.message.content),
+                content: Some(m.message.content.clone()),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -1523,7 +1523,9 @@ fn recap_messages(
             && matches!(row.message.role.as_str(), "system" | "user" | "assistant")
             && !row.message.content.trim().is_empty()
         {
-            messages.extend(chat_messages_to_provider_messages(vec![row.clone()]));
+            messages.extend(chat_messages_to_provider_messages(std::slice::from_ref(
+                row,
+            )));
         }
     }
     messages.push(Message::user(format!(
@@ -1531,6 +1533,174 @@ fn recap_messages(
         serde_json::to_string(&actions).expect("serializable action digest")
     )));
     messages
+}
+
+// Pure request assembly: admission/checkpointing stays with the executing caller.
+fn api_request_messages(
+    conversation: &crate::ConversationWithMessages,
+    tools: &ChatToolSession,
+    scope_description: &str,
+    recap: Option<(&str, &str)>,
+    new_content: Option<&str>,
+) -> Result<Vec<Message>, String> {
+    let system_prompt = if recap.is_some() {
+        let (intro, _) = chat_identity(tools.memu_tool_config.as_ref());
+        let base = format!(
+            "{intro}\n\n{scope_description}\n\nReflect on this sitting using only the supplied dialogue and recorded actions. No tools are available. Distinguish completed actions, failures and unknown outcomes; do not invent missing results."
+        );
+        match tools
+            .external_settings
+            .get("chat_prompt")
+            .filter(|s| !s.is_empty())
+        {
+            Some(prefix) => format!("{prefix}\n\n{base}"),
+            None => base,
+        }
+    } else {
+        chat_system_prompt(
+            &tools.external_settings,
+            scope_description,
+            tools.memu_tool_config.as_ref(),
+            tools.page_context.as_ref(),
+            tools.canvas_context.as_ref(),
+        )
+    };
+    let mut messages = vec![Message::system(system_prompt)];
+    if let Some((control_id, instruction)) = recap {
+        messages.extend(recap_messages(conversation, control_id, instruction));
+    } else {
+        messages.extend(chat_messages_to_provider_messages(&conversation.messages));
+        if let Some(content) = new_content {
+            messages.push(Message::user(content));
+        }
+    }
+    for call in &tools.tool_calls_record {
+        messages.push(Message::assistant_with_tool_calls(vec![ToolCall {
+            id: call.id.clone(),
+            call_type: Some("function".to_string()),
+            function: None,
+            name: Some(call.tool_name.clone()),
+            arguments: Some(call.tool_input.to_string()),
+        }]));
+        messages.push(Message::tool_result(&call.id, saved_tool_output(call)?));
+    }
+    Ok(messages)
+}
+
+/// Project the untrimmed API request without saving input or checkpointing tools.
+pub(crate) async fn estimate_chat_request_tokens(
+    storage: StorageBackend,
+    conversation_id: &str,
+    request: &crate::AtomicChatRequest,
+    settings: HashMap<String, String>,
+    scope: MemuToolConfig,
+) -> Result<usize, String> {
+    let conversation = storage
+        .get_conversation_sync(conversation_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Conversation not found")?;
+    if conversation.conversation.user_id.as_deref() != Some(scope.user_id.as_str())
+        || conversation.conversation.soul_id.as_deref() != Some(scope.soul_id.as_str())
+    {
+        return Err("Chat owner/Soul does not match".to_string());
+    }
+    if conversation
+        .conversation
+        .atomic_chat_state
+        .as_ref()
+        .is_some_and(|state| state.backend != crate::AtomicChatBackend::Api)
+    {
+        return Err("API sizing cannot be used for a Claude Code sitting".to_string());
+    }
+    let (page, canvas) = match request {
+        crate::AtomicChatRequest::New {
+            page_context,
+            canvas_context,
+            ..
+        } => (page_context.clone(), canvas_context.clone()),
+        crate::AtomicChatRequest::Retry { user_message_id } => {
+            let active = conversation
+                .conversation
+                .atomic_chat_state
+                .as_ref()
+                .and_then(|state| state.active.as_ref());
+            if active.is_some_and(|turn| turn.user_message_id != *user_message_id) {
+                return Err("Retry sizing requires the matching saved turn".to_string());
+            }
+            active
+                .map(|turn| (turn.page_context.clone(), turn.canvas_context.clone()))
+                .unwrap_or_default()
+        }
+        crate::AtomicChatRequest::Recap { .. } => (None, None),
+    };
+    let tags = storage
+        .get_scope_tag_ids_sync(conversation_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let description = storage
+        .get_scope_description_sync(&tags)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut tools = ChatToolSession::new(
+        storage,
+        conversation_id.into(),
+        tags,
+        settings,
+        Some(scope),
+        page,
+        canvas,
+        None,
+        Arc::new(|_| {}),
+    );
+    let mut recap = None;
+    let mut content = None;
+    match request {
+        crate::AtomicChatRequest::New { content: input, .. } => content = Some(input.as_str()),
+        crate::AtomicChatRequest::Retry { user_message_id } => {
+            let user = conversation
+                .messages
+                .iter()
+                .find(|row| row.message.id == *user_message_id && row.message.role == "user")
+                .ok_or("Saved user turn not found")?;
+            // Do not bind: binding can reconcile/checkpoint interrupted work.
+            tools.tool_calls_record = user.tool_calls.clone();
+            tools.require_known_outcomes()?;
+        }
+        crate::AtomicChatRequest::Recap { instruction } => {
+            tools.tools.clear();
+            let control_id = conversation
+                .conversation
+                .atomic_chat_state
+                .as_ref()
+                .and_then(|state| state.recap.as_ref())
+                .map(|recap| recap.request_message_id.as_str())
+                .or_else(|| {
+                    conversation
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|row| matches!(row.message.role.as_str(), "user" | "assistant"))
+                        .filter(|row| {
+                            row.message.role == "user"
+                                && crate::chat::is_atomic_recap_prompt(&row.message.content)
+                        })
+                        .map(|row| row.message.id.as_str())
+                })
+                .unwrap_or("");
+            recap = Some((control_id, instruction.as_str()));
+        }
+    }
+    let messages = api_request_messages(&conversation, &tools, &description, recap, content)?;
+    let messages = tools.with_response_guidance(messages);
+    let schemas = serde_json::to_string(tools.tools()).map_err(|e| e.to_string())?;
+    // Framing overhead is conservative, not provider-reported token usage.
+    Ok(messages
+        .iter()
+        .map(|message| estimate_message_tokens(message) + 8)
+        .sum::<usize>()
+        + count_tokens(&schemas)
+        + tools.tools().len() * 16)
 }
 
 /// Input for MCP's existing Atomic Claude request. Resume never resends Presence.
@@ -1562,6 +1732,14 @@ pub struct ChatToolSession {
 }
 
 impl ChatToolSession {
+    fn with_response_guidance(&self, messages: Vec<Message>) -> Vec<Message> {
+        if self.memu_tool_config.is_some() {
+            if let Some(limit) = memu_response_sentence_limit(&self.external_settings) {
+                return append_memu_response_limit(messages, limit);
+            }
+        }
+        messages
+    }
     pub(crate) fn new(
         storage: StorageBackend,
         conversation_id: String,
@@ -2190,11 +2368,7 @@ async fn run_agent_loop(
                 provider_config.context_length_for_model(&model),
             )
         };
-        if ctx.tools.memu_tool_config.is_some() {
-            if let Some(limit) = memu_response_sentence_limit(&ctx.tools.external_settings) {
-                call_messages = append_memu_response_limit(call_messages, limit);
-            }
-        }
+        call_messages = ctx.tools.with_response_guidance(call_messages);
         let should_forward_prompt_log = memu_prompt_logging_enabled(&ctx.tools.external_settings);
         if should_forward_prompt_log {
             if let Some(config) = ctx.tools.memu_tool_config.as_ref() {
@@ -2454,25 +2628,6 @@ where
         .await
         .map_err(|e| e.to_string())?;
 
-    // Build message history for API, with canvas context appended to system prompt
-    let system_prompt = if recap_instruction.is_some() {
-        let (intro, _) = chat_identity(memu_tool_config.as_ref());
-        let base = format!(
-            "{intro}\n\n{scope_description}\n\nReflect on this sitting using only the supplied dialogue and recorded actions. No tools are available. Distinguish completed actions, failures and unknown outcomes; do not invent missing results."
-        );
-        match settings_map.get("chat_prompt").filter(|s| !s.is_empty()) {
-            Some(prefix) => format!("{prefix}\n\n{base}"),
-            None => base,
-        }
-    } else {
-        chat_system_prompt(
-            &settings_map,
-            &scope_description,
-            memu_tool_config.as_ref(),
-            page_context.as_ref(),
-            canvas_context.as_ref(),
-        )
-    };
     let mut tools = ChatToolSession::new(
         storage.clone(),
         conversation_id.to_string(),
@@ -2502,22 +2657,13 @@ where
             )
             .await?;
     }
-    let mut api_messages = vec![Message::system(system_prompt)];
-    if let Some(instruction) = recap_instruction {
-        api_messages.extend(recap_messages(&conversation, &user_message_id, instruction));
-    } else {
-        api_messages.extend(chat_messages_to_provider_messages(conversation.messages));
-    }
-    for call in &tools.tool_calls_record {
-        api_messages.push(Message::assistant_with_tool_calls(vec![ToolCall {
-            id: call.id.clone(),
-            call_type: Some("function".to_string()),
-            function: None,
-            name: Some(call.tool_name.clone()),
-            arguments: Some(call.tool_input.to_string()),
-        }]));
-        api_messages.push(Message::tool_result(&call.id, saved_tool_output(call)?));
-    }
+    let api_messages = api_request_messages(
+        &conversation,
+        &tools,
+        &scope_description,
+        recap_instruction.map(|instruction| (user_message_id.as_str(), instruction)),
+        None,
+    )?;
 
     // Truncate to fit context window for providers with limited context
     let api_messages = if recap_instruction.is_some() {
@@ -2605,6 +2751,244 @@ mod tests {
                 "data: {}\n\ndata: [DONE]\n\n",
                 json!({"choices":[{"delta":delta,"finish_reason":null}]})
             ))
+    }
+
+    #[tokio::test]
+    async fn request_projection_is_read_only_and_matches_captured_retry_context() {
+        use crate::{AtomicChatBackend as Backend, AtomicChatRequest as Request};
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("projection.db")).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conv.conversation.id;
+        core.save_message(cid, "system", "Fictional original Presence")
+            .await
+            .unwrap();
+        let older_user = core
+            .save_message(cid, "user", "Older fictional question")
+            .await
+            .unwrap();
+        let older_reply = core
+            .save_message(cid, "assistant", "Older fictional answer")
+            .await
+            .unwrap();
+        let scope = MemuToolConfig {
+            base_url: "http://127.0.0.1:9".into(),
+            user_id: "TestOwner".into(),
+            soul_id: "TestSoul".into(),
+        };
+        let settings = api_test_settings("http://127.0.0.1:9");
+        let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
+        let plain = core
+            .estimate_chat_request_tokens(
+                cid,
+                &new_chat_request("Fictional input"),
+                settings.clone(),
+                scope.clone(),
+            )
+            .await
+            .unwrap();
+        let request = Request::New {
+            content: "Fictional input".into(),
+            page_context: Some(
+                serde_json::from_value(json!({"view":"atom_reader", "atom_id":"memory:fictional"}))
+                    .unwrap(),
+            ),
+            canvas_context: None,
+        };
+        let captured = core
+            .estimate_chat_request_tokens(cid, &request, settings.clone(), scope.clone())
+            .await
+            .unwrap();
+        assert!(captured > plain);
+        let mut guided = settings.clone();
+        guided.insert(MEMU_RESPONSE_SENTENCES_SETTING.into(), "7".into());
+        assert!(
+            core.estimate_chat_request_tokens(cid, &request, guided, scope.clone())
+                .await
+                .unwrap()
+                > captured
+        );
+        let large = new_chat_request(&"Fictional evidence ".repeat(20_000));
+        let mut small_window = settings.clone();
+        small_window.insert("openai_compat_context_length".into(), "128".into());
+        assert!(
+            core.estimate_chat_request_tokens(cid, &large, small_window, scope.clone())
+                .await
+                .unwrap()
+                > plain + 10_000
+        );
+        assert_eq!(
+            serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
+            before
+        );
+        let wrong_scope = MemuToolConfig {
+            soul_id: "OtherSoul".into(),
+            ..scope.clone()
+        };
+        assert!(
+            core.estimate_chat_request_tokens(cid, &request, settings.clone(), wrong_scope)
+                .await
+                .is_err()
+        );
+        let user = core
+            .admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &request,
+                200_000,
+            )
+            .await
+            .unwrap();
+        core.fail_chat_turn(cid, &user.id, "Fictional failure before model use", false)
+            .await
+            .unwrap();
+        let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
+        let retry = Request::Retry {
+            user_message_id: user.id.clone(),
+        };
+        assert_eq!(
+            core.estimate_chat_request_tokens(cid, &retry, settings.clone(), scope.clone())
+                .await
+                .unwrap(),
+            captured
+        );
+        assert_eq!(
+            serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
+            before
+        );
+        assert!(
+            core.estimate_chat_request_tokens(
+                cid,
+                &Request::Retry {
+                    user_message_id: older_user.id
+                },
+                settings.clone(),
+                scope.clone()
+            )
+            .await
+            .is_err()
+        );
+        let mut records = ChatToolRecords {
+            tool_calls: vec![ChatToolCall {
+                id: "older-read".into(),
+                message_id: older_reply.id.clone(),
+                tool_name: "get_atom".into(),
+                tool_input: json!({"atom_id":"memory:older"}),
+                tool_output: Some(json!("Omitted older tool output ".repeat(5_000))),
+                status: "complete".into(),
+                created_at: Utc::now().to_rfc3339(),
+                completed_at: None,
+            }],
+            citations: vec![],
+            prior_citations: vec![],
+            citation_index: 0,
+        };
+        core.save_chat_tool_records(cid, &older_reply.id, &records)
+            .await
+            .unwrap();
+        assert_eq!(
+            core.estimate_chat_request_tokens(cid, &retry, settings.clone(), scope.clone())
+                .await
+                .unwrap(),
+            captured
+        );
+        let call = &mut records.tool_calls[0];
+        call.id = "current-known-failure".into();
+        call.message_id = user.id.clone();
+        call.status = "failed".into();
+        call.tool_output = Some(json!("Error: fictional known failure ".repeat(100)));
+        core.save_chat_tool_records(cid, &user.id, &records)
+            .await
+            .unwrap();
+        let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
+        assert!(
+            core.estimate_chat_request_tokens(cid, &retry, settings, scope)
+                .await
+                .unwrap()
+                > captured
+        );
+        assert_eq!(
+            serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn projection_does_not_checkpoint_interrupted_tools_and_sizes_recap_digest() {
+        use crate::AtomicChatRequest as Request;
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("projection-tools.db")).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conv.conversation.id;
+        let user = core
+            .save_message(cid, "user", "Fictional interrupted request")
+            .await
+            .unwrap();
+        let scope = MemuToolConfig {
+            base_url: "http://127.0.0.1:9".into(),
+            user_id: "TestOwner".into(),
+            soul_id: "TestSoul".into(),
+        };
+        let settings = api_test_settings("http://127.0.0.1:9");
+        let recap = Request::Recap {
+            instruction: "Fictional recap instruction".into(),
+        };
+        let without_tools = core
+            .estimate_chat_request_tokens(cid, &recap, settings.clone(), scope.clone())
+            .await
+            .unwrap();
+        core.save_chat_tool_records(
+            cid,
+            &user.id,
+            &ChatToolRecords {
+                tool_calls: vec![ChatToolCall {
+                    id: "unfinished-read".into(),
+                    message_id: user.id.clone(),
+                    tool_name: "get_atom".into(),
+                    tool_input: json!({"atom_id":"memory:fictional"}),
+                    tool_output: None,
+                    status: "running".into(),
+                    created_at: Utc::now().to_rfc3339(),
+                    completed_at: None,
+                }],
+                citations: vec![],
+                prior_citations: vec![],
+                citation_index: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
+        assert!(
+            core.estimate_chat_request_tokens(
+                cid,
+                &Request::Retry {
+                    user_message_id: user.id
+                },
+                settings.clone(),
+                scope.clone()
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            core.estimate_chat_request_tokens(cid, &recap, settings, scope)
+                .await
+                .unwrap()
+                > without_tools
+        );
+        assert_eq!(
+            serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
+            before
+        );
     }
 
     #[tokio::test]

@@ -2846,6 +2846,27 @@ impl AtomicCore {
         .map_err(|e| AtomicCoreError::DatabaseOperation(e))
     }
 
+    /// Project a scoped API request without writing input, state or tool records.
+    /// Caller holds the sitting lock across projection and admission.
+    pub async fn estimate_chat_request_tokens(
+        &self,
+        conversation_id: &str,
+        request: &AtomicChatRequest,
+        external_settings: HashMap<String, String>,
+        scope: agent::MemuToolConfig,
+    ) -> Result<usize, AtomicCoreError> {
+        let settings = self.settings_with_overrides(external_settings).await?;
+        agent::estimate_chat_request_tokens(
+            self.storage.clone(),
+            conversation_id,
+            request,
+            settings,
+            scope,
+        )
+        .await
+        .map_err(AtomicCoreError::DatabaseOperation)
+    }
+
     /// Execute an admitted API turn without inserting another user message.
     /// Caller owns the sitting lock through completion and has drained the prior writer.
     pub async fn execute_saved_chat_turn<F>(
