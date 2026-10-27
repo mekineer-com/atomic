@@ -2875,6 +2875,40 @@ impl AtomicCore {
         .map_err(AtomicCoreError::DatabaseOperation)
     }
 
+    /// Execute an admitted, tool-free API recap. The instruction comes from the
+    /// server, never from a reused legacy control's transcript-bearing text.
+    /// Caller holds the sitting lock and records failures, as for ordinary turns.
+    pub async fn execute_saved_chat_recap<F>(
+        &self,
+        conversation_id: &str,
+        control_message_id: &str,
+        instruction: &str,
+        on_event: F,
+        external_settings: HashMap<String, String>,
+        scope: agent::MemuToolConfig,
+    ) -> Result<ChatMessageWithContext, AtomicCoreError>
+    where
+        F: Fn(ChatEvent) + Send + Sync + 'static,
+    {
+        let settings = self.settings_with_overrides(external_settings).await?;
+        agent::send_chat_message_with_canvas(
+            self.storage.clone(),
+            conversation_id,
+            agent::ApiChatInput::Recap {
+                id: control_message_id,
+                instruction,
+            },
+            on_event,
+            Some(settings),
+            Some(scope),
+            None,
+            None,
+            Some(self.canvas_cache.clone()),
+        )
+        .await
+        .map_err(AtomicCoreError::DatabaseOperation)
+    }
+
     // ==================== Canvas Operations ====================
 
     /// Get all stored atom positions

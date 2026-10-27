@@ -1139,8 +1139,8 @@ async fn execute_edit_atom(
 
 // ==================== System Prompt ====================
 
-fn get_system_prompt(scope_description: &str, memu_tool_config: Option<&MemuToolConfig>) -> String {
-    let (intro, guidelines) = match memu_tool_config {
+fn chat_identity(memu_tool_config: Option<&MemuToolConfig>) -> (String, &'static str) {
+    match memu_tool_config {
         Some(config) => (
             format!(
                 "You are with {} in the app Atomic, where you can work on shaping your memories together. All of memory items and summaries are represented as individual atoms. In Atomic, {} is the user.",
@@ -1152,7 +1152,11 @@ fn get_system_prompt(scope_description: &str, memu_tool_config: Option<&MemuTool
             "You are a helpful AI assistant with access to the user's personal knowledge base. Your role is to answer questions by searching through and referencing the user's stored information.".to_string(),
             "Guidelines",
         ),
-    };
+    }
+}
+
+fn get_system_prompt(scope_description: &str, memu_tool_config: Option<&MemuToolConfig>) -> String {
+    let (intro, guidelines) = chat_identity(memu_tool_config);
     format!(
         r#"{intro}
 
@@ -1435,6 +1439,76 @@ fn saved_tool_output(call: &ChatToolCall) -> Result<String, String> {
 pub enum ApiChatInput<'a> {
     New(&'a str),
     Saved(&'a str),
+    Recap { id: &'a str, instruction: &'a str },
+}
+
+fn recap_messages(
+    conversation: &crate::ConversationWithMessages,
+    control_id: &str,
+    instruction: &str,
+) -> Vec<Message> {
+    let mut messages = Vec::new();
+    let mut actions = Vec::new();
+    let mut skip_reply = false;
+    for row in &conversation.messages {
+        if row.message.id == control_id
+            || (row.message.role == "user"
+                && crate::chat::is_atomic_recap_prompt(&row.message.content))
+        {
+            skip_reply = true;
+            continue;
+        }
+        if skip_reply && row.message.role == "assistant" {
+            skip_reply = false;
+            continue;
+        }
+        skip_reply = false;
+        for call in &row.tool_calls {
+            let mut input = serde_json::Map::new();
+            for key in ["atom_id", "query", "title", "cluster_label"] {
+                if let Some(value) = call.tool_input.get(key).and_then(|v| v.as_str()) {
+                    input.insert(
+                        key.into(),
+                        json!(value.chars().take(160).collect::<String>()),
+                    );
+                }
+            }
+            if let Some(edits) = call.tool_input.get("edits").and_then(|v| v.as_array()) {
+                input.insert(
+                    "operations".into(),
+                    json!(
+                        edits
+                            .iter()
+                            .filter_map(|edit| edit.get("operation").and_then(|v| v.as_str()))
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
+            let unknown = call
+                .tool_output
+                .as_ref()
+                .and_then(|v| v.get("outcome_unknown"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+                || matches!(call.status.as_str(), "pending" | "running");
+            actions.push(json!({
+                "tool": call.tool_name,
+                "input": input,
+                "status": call.status,
+                "outcome_unknown": unknown,
+            }));
+        }
+        if matches!(row.message.role.as_str(), "system" | "user" | "assistant")
+            && !row.message.content.trim().is_empty()
+        {
+            messages.extend(chat_messages_to_provider_messages(vec![row.clone()]));
+        }
+    }
+    messages.push(Message::user(format!(
+        "{instruction}\n\nRecorded actions (status is authoritative; unknown outcomes are not successes):\n{}",
+        serde_json::to_string(&actions).expect("serializable action digest")
+    )));
+    messages
 }
 
 /// Input for MCP's existing Atomic Claude request. Resume never resends Presence.
@@ -2053,6 +2127,7 @@ impl ChatToolSession {
 struct AgentContext {
     messages: Vec<Message>,
     tools: ChatToolSession,
+    recap: bool,
 }
 
 async fn run_agent_loop(
@@ -2085,10 +2160,14 @@ async fn run_agent_loop(
         });
 
         // Truncate messages if they've grown beyond context window (from tool results)
-        let mut call_messages = truncate_messages_to_context(
-            ctx.messages.clone(),
-            provider_config.context_length_for_model(&model),
-        );
+        let mut call_messages = if ctx.recap {
+            ctx.messages.clone()
+        } else {
+            truncate_messages_to_context(
+                ctx.messages.clone(),
+                provider_config.context_length_for_model(&model),
+            )
+        };
         if ctx.tools.memu_tool_config.is_some() {
             if let Some(limit) = memu_response_sentence_limit(&ctx.tools.external_settings) {
                 call_messages = append_memu_response_limit(call_messages, limit);
@@ -2123,7 +2202,14 @@ async fn run_agent_loop(
         }
 
         // Check if there are tool calls
-        if let Some(tool_calls) = &response.tool_calls {
+        if let Some(tool_calls) = response
+            .tool_calls
+            .as_ref()
+            .filter(|calls| !calls.is_empty())
+        {
+            if ctx.recap {
+                return Err("Recap returned tool calls despite having no tools".to_string());
+            }
             // Add assistant message with tool calls to history
             if response.content.is_empty() {
                 ctx.messages
@@ -2267,6 +2353,10 @@ where
             return Err("Chat owner/Soul does not match".to_string());
         }
     }
+    let recap_instruction = match &input {
+        ApiChatInput::Recap { instruction, .. } => Some(*instruction),
+        _ => None,
+    };
     let (user_message_id, expected_user_message_id, page_context, canvas_context) = match input {
         ApiChatInput::New(content) => {
             if conversation.conversation.atomic_chat_state.is_some() {
@@ -2313,6 +2403,23 @@ where
                 active.canvas_context.clone(),
             )
         }
+        ApiChatInput::Recap { id, .. } => {
+            let state = conversation
+                .conversation
+                .atomic_chat_state
+                .as_ref()
+                .ok_or("Recap requires managed admission")?;
+            if memu_tool_config.is_none()
+                || state.backend != crate::AtomicChatBackend::Api
+                || !state.recap.as_ref().is_some_and(|recap| {
+                    recap.request_message_id == id
+                        && matches!(recap.outcome, crate::AtomicChatRecapOutcome::Running)
+                })
+            {
+                return Err("Recap requires the matching scoped running API control".to_string());
+            }
+            (id.to_string(), Some(id.to_string()), None, None)
+        }
     };
 
     // Get conversation context
@@ -2326,13 +2433,24 @@ where
         .map_err(|e| e.to_string())?;
 
     // Build message history for API, with canvas context appended to system prompt
-    let system_prompt = chat_system_prompt(
-        &settings_map,
-        &scope_description,
-        memu_tool_config.as_ref(),
-        page_context.as_ref(),
-        canvas_context.as_ref(),
-    );
+    let system_prompt = if recap_instruction.is_some() {
+        let (intro, _) = chat_identity(memu_tool_config.as_ref());
+        let base = format!(
+            "{intro}\n\n{scope_description}\n\nReflect on this sitting using only the supplied dialogue and recorded actions. No tools are available. Distinguish completed actions, failures and unknown outcomes; do not invent missing results."
+        );
+        match settings_map.get("chat_prompt").filter(|s| !s.is_empty()) {
+            Some(prefix) => format!("{prefix}\n\n{base}"),
+            None => base,
+        }
+    } else {
+        chat_system_prompt(
+            &settings_map,
+            &scope_description,
+            memu_tool_config.as_ref(),
+            page_context.as_ref(),
+            canvas_context.as_ref(),
+        )
+    };
     let mut tools = ChatToolSession::new(
         storage.clone(),
         conversation_id.to_string(),
@@ -2344,7 +2462,9 @@ where
         canvas_cache,
         Arc::clone(&on_event),
     );
-    if tools.memu_tool_config.is_some() {
+    if recap_instruction.is_some() {
+        tools.tools.clear();
+    } else if tools.memu_tool_config.is_some() {
         let turn = conversation
             .messages
             .iter()
@@ -2361,7 +2481,11 @@ where
             .await?;
     }
     let mut api_messages = vec![Message::system(system_prompt)];
-    api_messages.extend(chat_messages_to_provider_messages(conversation.messages));
+    if let Some(instruction) = recap_instruction {
+        api_messages.extend(recap_messages(&conversation, &user_message_id, instruction));
+    } else {
+        api_messages.extend(chat_messages_to_provider_messages(conversation.messages));
+    }
     for call in &tools.tool_calls_record {
         api_messages.push(Message::assistant_with_tool_calls(vec![ToolCall {
             id: call.id.clone(),
@@ -2374,15 +2498,20 @@ where
     }
 
     // Truncate to fit context window for providers with limited context
-    let api_messages = truncate_messages_to_context(
-        api_messages,
-        provider_config.context_length_for_model(&model),
-    );
+    let api_messages = if recap_instruction.is_some() {
+        api_messages
+    } else {
+        truncate_messages_to_context(
+            api_messages,
+            provider_config.context_length_for_model(&model),
+        )
+    };
 
     // Create agent context
     let ctx = AgentContext {
         messages: api_messages,
         tools,
+        recap: recap_instruction.is_some(),
     };
 
     // Run agent loop with canvas context
@@ -2454,6 +2583,174 @@ mod tests {
                 "data: {}\n\ndata: [DONE]\n\n",
                 json!({"choices":[{"delta":delta,"finish_reason":null}]})
             ))
+    }
+
+    #[tokio::test]
+    async fn saved_recap_is_tool_free_and_retries_without_nested_transcript() {
+        use crate::{
+            AtomicChatBackend as Backend, AtomicChatPhase as Phase, AtomicChatRequest as Request,
+        };
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("saved-recap.db")).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conv.conversation.id;
+        core.save_message(cid, "system", "Fictional original Presence")
+            .await
+            .unwrap();
+        let user = core
+            .save_message(cid, "user", "Please change the fictional note")
+            .await
+            .unwrap();
+        core.save_chat_tool_records(cid, &user.id, &ChatToolRecords {
+            tool_calls: vec![ChatToolCall {
+                id: "fictional-edit".into(), message_id: user.id.clone(),
+                tool_name: "edit_atom".into(),
+                tool_input: json!({"atom_id":"memory:fictional", "edits":[{"operation":"append", "text":"SECRET_EDIT_BODY"}]}),
+                tool_output: Some(json!({"error":"SECRET_RESPONSE", "outcome_unknown":true})),
+                status: "failed".into(), created_at: Utc::now().to_rfc3339(), completed_at: None,
+            }],
+            citations: vec![], prior_citations: vec![], citation_index: 0,
+        }).await.unwrap();
+        core.save_message(cid, "assistant", "The edit outcome was unclear")
+            .await
+            .unwrap();
+        let legacy = core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity\nFull Atomic transcript: SECRET_NESTED_HISTORY").await.unwrap();
+        core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closing)
+            .await
+            .unwrap();
+        let request = Request::Recap {
+            instruction: "Clean server recap instruction".into(),
+        };
+        let control = core
+            .admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &request,
+                200_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(control.id, legacy.id);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let scope = MemuToolConfig {
+            base_url: server.uri(),
+            user_id: "TestOwner".into(),
+            soul_id: "TestSoul".into(),
+        };
+        let settings = api_test_settings(&server.uri());
+        assert!(
+            core.execute_saved_chat_recap(
+                cid,
+                &control.id,
+                "Clean server recap instruction",
+                |_| {},
+                settings.clone(),
+                scope.clone()
+            )
+            .await
+            .is_err()
+        );
+        core.fail_chat_turn(cid, &control.id, "Fictional provider failure", false)
+            .await
+            .unwrap();
+        let retried = core
+            .admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &request,
+                200_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried.id, control.id);
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(api_test_response(
+                json!({"content":"Saved fictional recap"}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = core
+            .execute_saved_chat_recap(
+                cid,
+                &control.id,
+                "Clean server recap instruction",
+                |_| {},
+                settings.clone(),
+                scope.clone(),
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body.get("tools")
+                .is_none_or(|tools| tools.as_array().is_some_and(|tools| tools.is_empty()))
+        );
+        let serialized = body.to_string();
+        for absent in [
+            "SECRET_EDIT_BODY",
+            "SECRET_RESPONSE",
+            "SECRET_NESTED_HISTORY",
+            "tool_call_id",
+            "Use search_atoms",
+        ] {
+            assert!(!serialized.contains(absent), "unexpected {absent}");
+        }
+        for once in [
+            "Fictional original Presence",
+            "Please change the fictional note",
+            "Clean server recap instruction",
+        ] {
+            assert_eq!(serialized.matches(once).count(), 1);
+        }
+        assert!(serialized.contains("outcome_unknown") && serialized.contains("failed"));
+        let saved = core.get_conversation(cid).await.unwrap().unwrap();
+        assert_eq!(saved.messages.last().unwrap().message.id, result.message.id);
+        assert!(
+            core.admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &request,
+                200_000
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            core.execute_saved_chat_recap(
+                cid,
+                &control.id,
+                "Clean server recap instruction",
+                |_| {},
+                settings,
+                scope
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
