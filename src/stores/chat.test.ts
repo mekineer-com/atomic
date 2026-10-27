@@ -97,6 +97,16 @@ it('keeps a newly bound legacy sitting visible after successful End', async () =
   expect(invoke.mock.calls.map(([command]) => command)).toEqual(['end_memu_session', 'get_conversation']);
 });
 
+it('does not infer stateless End navigation from an unavailable refresh', async () => {
+  const current = { ...useChatStore.getState().currentConversation!, user_id: 'TestOwner', soul_id: 'TestSoul' };
+  useChatStore.setState({ currentConversation: current });
+  invoke.mockResolvedValueOnce({}).mockRejectedValueOnce('History read unavailable');
+  await useChatStore.getState().endMemuSession();
+  expect(useChatStore.getState().currentConversation?.id).toBe(current.id);
+  expect(useChatStore.getState().error).toBe('History read unavailable');
+  expect(invoke.mock.calls.map(([command]) => command)).toEqual(['end_memu_session', 'get_conversation']);
+});
+
 it('keeps the carried draft consumed and handles a failed new-sitting creation', async () => {
   const current = useChatStore.getState().currentConversation!;
   useChatStore.getState().setDraft(current.id, 'Carry once');

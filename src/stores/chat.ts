@@ -205,7 +205,7 @@ interface ChatStore {
   // Actions - Messaging (placeholder for now)
   sendMessage: (content: string) => Promise<'sent' | 'refused' | 'failed'>;
   setDraft: (conversationId: string, content: string) => void;
-  refreshConversation: () => Promise<void>;
+  refreshConversation: () => Promise<boolean>;
   retryMessage: (userMessageId: string) => Promise<void>;
   startNewSitting: () => Promise<void>;
   endMemuSession: () => Promise<void>;
@@ -446,17 +446,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   refreshConversation: async () => {
     const current = get().currentConversation;
-    if (!current) return;
+    if (!current) return false;
     const version = ++refreshVersion;
     try {
       const saved = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', { conversationId: current.id });
-      if (!saved || version !== refreshVersion || get().currentConversation !== current) return;
+      if (!saved || version !== refreshVersion || get().currentConversation !== current) return false;
       set({ currentConversation: conversationSummary(saved), messages: saved.messages,
         ...(saved.atomic_chat_state && !chatIsRunning(saved.atomic_chat_state) ? { isStreaming: false, streamingContent: '', streamingToolCalls: [] } : {}),
         ...(saved.atomic_chat_state?.phase === 'closed' ? { error: null } : {}),
       });
+      return true;
     } catch (error) {
       if (version === refreshVersion && get().currentConversation === current) set({ error: String(error) });
+      return false;
     }
   },
 
@@ -587,7 +589,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       await getTransport().invoke('end_memu_session', {
         conversationId: currentConversation.id,
       });
-      if (integrated && get().currentConversation?.id === currentConversation.id) await get().refreshConversation();
+      if (get().currentConversation?.id !== currentConversation.id
+        || (integrated && !await get().refreshConversation())) {
+        set({ isEndingSession: false });
+        return;
+      }
       if (currentConversation.atomic_chat_state
         || (get().currentConversation?.id === currentConversation.id && get().currentConversation?.atomic_chat_state)) {
         set({ isEndingSession: false });
