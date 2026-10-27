@@ -2642,17 +2642,56 @@ impl AtomicCore {
     pub async fn save_chat_reply(
         &self,
         conversation_id: &str,
+        expected_user_message_id: Option<&str>,
         content: &str,
         records: &agent::ChatToolRecords,
     ) -> Result<ChatMessage, AtomicCoreError> {
         self.storage
             .save_chat_reply_sync(
                 conversation_id,
+                expected_user_message_id,
                 content,
                 &records.tool_calls,
                 &records.citations,
                 records.citation_index,
             )
+            .await
+    }
+
+    /// Lifecycle-managed admission. Caller holds the scoped sitting lock.
+    pub async fn admit_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        content: &str,
+    ) -> Result<ChatMessage, AtomicCoreError> {
+        self.storage
+            .admit_chat_turn_sync(conversation_id, user_id, soul_id, backend, content)
+            .await
+    }
+    pub async fn fail_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_message_id: &str,
+        error: &str,
+        uncertain: bool,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage
+            .fail_chat_turn_sync(conversation_id, user_message_id, error, uncertain)
+            .await
+    }
+    pub async fn set_chat_phase(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        phase: &AtomicChatPhase,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage
+            .set_chat_phase_sync(conversation_id, user_id, soul_id, backend, phase)
             .await
     }
 

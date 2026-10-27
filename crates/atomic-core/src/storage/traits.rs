@@ -622,6 +622,30 @@ pub trait SearchStore: Send + Sync {
 /// Storage operations for chat conversations and messages.
 #[async_trait]
 pub trait ChatStore: Send + Sync {
+    async fn admit_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        content: &str,
+    ) -> StorageResult<ChatMessage>;
+    async fn fail_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_message_id: &str,
+        error: &str,
+        uncertain: bool,
+    ) -> StorageResult<()>;
+    async fn set_chat_phase(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        phase: &AtomicChatPhase,
+    ) -> StorageResult<()>;
+
     /// Create a new conversation with optional tag scope.
     async fn create_conversation(
         &self,
@@ -689,6 +713,7 @@ pub trait ChatStore: Send + Sync {
     async fn save_chat_reply(
         &self,
         conversation_id: &str,
+        expected_user_message_id: Option<&str>,
         content: &str,
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],

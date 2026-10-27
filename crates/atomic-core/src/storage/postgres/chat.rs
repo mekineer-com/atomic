@@ -6,6 +6,45 @@ use crate::storage::traits::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+async fn locked_chat_state(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    conversation_id: &str,
+) -> StorageResult<Option<AtomicChatState>> {
+    let raw: Option<String> = sqlx::query_scalar(
+        "SELECT atomic_chat_state FROM conversations WHERE id=$1 AND db_id=$2 FOR UPDATE",
+    )
+    .bind(conversation_id)
+    .bind(db_id)
+    .fetch_one(conn)
+    .await
+    .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+    Ok(raw.map(|raw| serde_json::from_str(&raw)).transpose()?)
+}
+
+async fn write_chat_state(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    conversation_id: &str,
+    state: Option<&AtomicChatState>,
+) -> StorageResult<()> {
+    let raw = state.map(serde_json::to_string).transpose()?;
+    let result =
+        sqlx::query("UPDATE conversations SET atomic_chat_state=$1 WHERE id=$2 AND db_id=$3")
+            .bind(raw)
+            .bind(conversation_id)
+            .bind(db_id)
+            .execute(conn)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+    if result.rows_affected() != 1 {
+        return Err(AtomicCoreError::NotFound(
+            "Conversation not found".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn write_message(
     conn: &mut sqlx::PgConnection,
     db_id: &str,
@@ -253,9 +292,10 @@ async fn load_conversation_with_tags(
             String,
             String,
             i32,
+            Option<String>,
         ),
     >(
-        "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+        "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
          FROM conversations WHERE id = $1 AND db_id = $2",
     )
     .bind(conversation_id)
@@ -275,6 +315,7 @@ async fn load_conversation_with_tags(
         created_at: row.4,
         updated_at: row.5,
         is_archived: row.6 != 0,
+        atomic_chat_state: row.7.map(|raw| serde_json::from_str(&raw)).transpose()?,
     };
 
     let tags = fetch_conversation_tags(pool, conversation_id, db_id).await?;
@@ -386,6 +427,106 @@ async fn batch_fetch_conversation_summaries(
 
 #[async_trait]
 impl ChatStore for PostgresStorage {
+    async fn admit_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        content: &str,
+    ) -> StorageResult<ChatMessage> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let current = locked_chat_state(&mut tx, &self.db_id, conversation_id).await?;
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=$1 AND db_id=$2 AND user_id=$3 AND soul_id=$4)")
+            .bind(conversation_id).bind(&self.db_id).bind(user_id).bind(soul_id).fetch_one(&mut *tx).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        if !owned {
+            return Err(AtomicCoreError::Validation(
+                "Chat owner/Soul does not match".to_string(),
+            ));
+        }
+        let last_role: Option<String> = sqlx::query_scalar("SELECT role FROM chat_messages WHERE conversation_id=$1 AND db_id=$2 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1")
+            .bind(conversation_id).bind(&self.db_id).fetch_optional(&mut *tx).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let mut state = crate::chat::admitted_chat_state(current, backend, last_role.as_deref())?;
+        let message = write_message(&mut tx, &self.db_id, conversation_id, "user", content).await?;
+        state.active = Some(AtomicChatTurn {
+            user_message_id: message.id.clone(),
+            status: AtomicChatTurnStatus::Running,
+            error: None,
+        });
+        write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
+        tx.commit()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(message)
+    }
+
+    async fn fail_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_message_id: &str,
+        error: &str,
+        uncertain: bool,
+    ) -> StorageResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let mut state = locked_chat_state(&mut tx, &self.db_id, conversation_id)
+            .await?
+            .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
+        let active = crate::chat::matching_chat_turn(&mut state, user_message_id)?;
+        active.status = if uncertain {
+            AtomicChatTurnStatus::Uncertain
+        } else {
+            AtomicChatTurnStatus::Failed
+        };
+        active.error = Some(error.to_string());
+        write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
+        tx.commit()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
+    }
+
+    async fn set_chat_phase(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        phase: &AtomicChatPhase,
+    ) -> StorageResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let current = locked_chat_state(&mut tx, &self.db_id, conversation_id).await?;
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM conversations WHERE id=$1 AND db_id=$2 AND user_id=$3 AND soul_id=$4)")
+            .bind(conversation_id).bind(&self.db_id).bind(user_id).bind(soul_id).fetch_one(&mut *tx).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        if !owned {
+            return Err(AtomicCoreError::Validation(
+                "Chat owner/Soul does not match".to_string(),
+            ));
+        }
+        let last_role: Option<String> = sqlx::query_scalar("SELECT role FROM chat_messages WHERE conversation_id=$1 AND db_id=$2 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1")
+            .bind(conversation_id).bind(&self.db_id).fetch_optional(&mut *tx).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let state = crate::chat::bound_chat_state(current, backend, last_role.as_deref())?;
+        let state = crate::chat::changed_chat_phase(state, phase)?;
+        write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
+        tx.commit()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
+    }
+
     async fn create_conversation(
         &self,
         tag_ids: &[String],
@@ -433,6 +574,7 @@ impl ChatStore for PostgresStorage {
                 created_at: now.clone(),
                 updated_at: now,
                 is_archived: false,
+                atomic_chat_state: None,
             },
             tags,
             message_count: 0,
@@ -450,8 +592,8 @@ impl ChatStore for PostgresStorage {
         let user_id = owner.map(|(user_id, _)| user_id);
         let soul_id = owner.map(|(_, soul_id)| soul_id);
         let conversations: Vec<Conversation> = if let Some(tag_id) = filter_tag_id {
-            let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, String, String, i32)>(
-                "SELECT DISTINCT c.id, c.title, c.user_id, c.soul_id, c.created_at, c.updated_at, c.is_archived
+            let rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>, String, String, i32, Option<String>)>(
+                "SELECT DISTINCT c.id, c.title, c.user_id, c.soul_id, c.created_at, c.updated_at, c.is_archived, c.atomic_chat_state
                  FROM conversations c
                  JOIN conversation_tags ct ON ct.conversation_id = c.id
                  WHERE ct.tag_id = $1
@@ -472,8 +614,17 @@ impl ChatStore for PostgresStorage {
 
             rows.into_iter()
                 .map(
-                    |(id, title, user_id, soul_id, created_at, updated_at, is_archived)| {
-                        Conversation {
+                    |(
+                        id,
+                        title,
+                        user_id,
+                        soul_id,
+                        created_at,
+                        updated_at,
+                        is_archived,
+                        atomic_chat_state,
+                    )| {
+                        Ok(Conversation {
                             id,
                             title,
                             user_id,
@@ -481,10 +632,13 @@ impl ChatStore for PostgresStorage {
                             created_at,
                             updated_at,
                             is_archived: is_archived != 0,
-                        }
+                            atomic_chat_state: atomic_chat_state
+                                .map(|raw| serde_json::from_str(&raw))
+                                .transpose()?,
+                        })
                     },
                 )
-                .collect()
+                .collect::<StorageResult<Vec<_>>>()?
         } else {
             let rows = sqlx::query_as::<
                 _,
@@ -496,9 +650,10 @@ impl ChatStore for PostgresStorage {
                     String,
                     String,
                     i32,
+                    Option<String>,
                 ),
             >(
-                "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+                "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
                  FROM conversations
                  WHERE ($1 IS NULL OR (user_id = $1 AND soul_id = $2))
                    AND is_archived = 0 AND db_id = $5
@@ -516,8 +671,17 @@ impl ChatStore for PostgresStorage {
 
             rows.into_iter()
                 .map(
-                    |(id, title, user_id, soul_id, created_at, updated_at, is_archived)| {
-                        Conversation {
+                    |(
+                        id,
+                        title,
+                        user_id,
+                        soul_id,
+                        created_at,
+                        updated_at,
+                        is_archived,
+                        atomic_chat_state,
+                    )| {
+                        Ok(Conversation {
                             id,
                             title,
                             user_id,
@@ -525,10 +689,13 @@ impl ChatStore for PostgresStorage {
                             created_at,
                             updated_at,
                             is_archived: is_archived != 0,
-                        }
+                            atomic_chat_state: atomic_chat_state
+                                .map(|raw| serde_json::from_str(&raw))
+                                .transpose()?,
+                        })
                     },
                 )
-                .collect()
+                .collect::<StorageResult<Vec<_>>>()?
         };
 
         if conversations.is_empty() {
@@ -574,9 +741,10 @@ impl ChatStore for PostgresStorage {
                 String,
                 String,
                 i32,
+                Option<String>,
             ),
         >(
-            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
              FROM conversations WHERE id = $1 AND db_id = $2",
         )
         .bind(conversation_id)
@@ -586,17 +754,27 @@ impl ChatStore for PostgresStorage {
         .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
         let conv = match row {
-            Some((id, title, user_id, soul_id, created_at, updated_at, is_archived)) => {
-                Conversation {
-                    id,
-                    title,
-                    user_id,
-                    soul_id,
-                    created_at,
-                    updated_at,
-                    is_archived: is_archived != 0,
-                }
-            }
+            Some((
+                id,
+                title,
+                user_id,
+                soul_id,
+                created_at,
+                updated_at,
+                is_archived,
+                atomic_chat_state,
+            )) => Conversation {
+                id,
+                title,
+                user_id,
+                soul_id,
+                created_at,
+                updated_at,
+                is_archived: is_archived != 0,
+                atomic_chat_state: atomic_chat_state
+                    .map(|raw| serde_json::from_str(&raw))
+                    .transpose()?,
+            },
             None => return Ok(None),
         };
 
@@ -782,9 +960,10 @@ impl ChatStore for PostgresStorage {
                 String,
                 String,
                 i32,
+                Option<String>,
             ),
         >(
-            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
              FROM conversations WHERE id = $1 AND db_id = $2",
         )
         .bind(id)
@@ -802,6 +981,7 @@ impl ChatStore for PostgresStorage {
             created_at: row.4,
             updated_at: row.5,
             is_archived: row.6 != 0,
+            atomic_chat_state: row.7.map(|raw| serde_json::from_str(&raw)).transpose()?,
         })
     }
 
@@ -926,6 +1106,7 @@ impl ChatStore for PostgresStorage {
     async fn save_chat_reply(
         &self,
         conversation_id: &str,
+        expected_user_message_id: Option<&str>,
         content: &str,
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],
@@ -936,6 +1117,10 @@ impl ChatStore for PostgresStorage {
             .begin()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let state = crate::chat::completed_chat_state(
+            locked_chat_state(&mut tx, &self.db_id, conversation_id).await?,
+            expected_user_message_id,
+        )?;
         let message =
             write_message(&mut tx, &self.db_id, conversation_id, "assistant", content).await?;
         write_chat_tool_state(
@@ -948,6 +1133,9 @@ impl ChatStore for PostgresStorage {
             citation_index,
         )
         .await?;
+        if state.is_some() {
+            write_chat_state(&mut tx, &self.db_id, conversation_id, state.as_ref()).await?;
+        }
         tx.commit()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;

@@ -2232,6 +2232,7 @@ where
         let saved_msg = storage
             .save_chat_reply_sync(
                 conversation_id,
+                None,
                 &result.message.content,
                 &result.tool_calls,
                 &result.citations,
@@ -2264,6 +2265,399 @@ mod tests {
     use super::*;
     use crate::{AtomicCore, CreateAtomRequest};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn lifecycle_admission_and_publication_survive_restart_without_reopening() {
+        use crate::models::{AtomicChatBackend, AtomicChatPhase, AtomicChatTurnStatus};
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("atomic.db");
+        let core = AtomicCore::open_or_create(&db_path).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conv.conversation.id;
+        let backend = AtomicChatBackend::ClaudeCode;
+        assert!(
+            core.admit_chat_turn(cid, "WrongOwner", "TestSoul", &backend, "No admission")
+                .await
+                .is_err()
+        );
+        core.database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_admission BEFORE UPDATE OF atomic_chat_state ON conversations
+             BEGIN SELECT RAISE(ABORT, 'fictional admission failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            core.admit_chat_turn(cid, "TestOwner", "TestSoul", &backend, "Rolled back input")
+                .await
+                .is_err()
+        );
+        let unchanged = core.get_conversation(cid).await.unwrap().unwrap();
+        assert!(
+            unchanged.messages.is_empty() && unchanged.conversation.atomic_chat_state.is_none()
+        );
+        core.database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_admission;")
+            .unwrap();
+        let user = core
+            .admit_chat_turn(cid, "TestOwner", "TestSoul", &backend, "A fictional turn")
+            .await
+            .unwrap();
+        let reopened = AtomicCore::open_or_create(&db_path).unwrap();
+        let saved = reopened.get_conversation(cid).await.unwrap().unwrap();
+        let state = saved.conversation.atomic_chat_state.as_ref().unwrap();
+        assert_eq!(state.backend, backend);
+        assert_eq!(state.active.as_ref().unwrap().user_message_id, user.id);
+        assert_eq!(
+            state.active.as_ref().unwrap().status,
+            AtomicChatTurnStatus::Running
+        );
+        assert!(
+            reopened
+                .admit_chat_turn(cid, "TestOwner", "TestSoul", &backend, "Duplicate")
+                .await
+                .is_err()
+        );
+        let mismatch = reopened
+            .admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &AtomicChatBackend::Api,
+                "Wrong backend",
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("original claude_code setting")
+        );
+        let records = ChatToolRecords {
+            tool_calls: Vec::new(),
+            citations: Vec::new(),
+            citation_index: 0,
+            prior_citations: Vec::new(),
+        };
+        assert!(
+            reopened
+                .save_chat_reply(cid, Some("other-turn"), "Wrong result", &records)
+                .await
+                .is_err()
+        );
+        assert!(
+            reopened
+                .save_chat_reply(cid, None, "Unbound result", &records)
+                .await
+                .is_err()
+        );
+        assert!(
+            reopened
+                .fail_chat_turn(cid, "other-turn", "Stale error", true)
+                .await
+                .is_err()
+        );
+        reopened
+            .set_chat_phase(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &backend,
+                &AtomicChatPhase::Closing,
+            )
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .set_chat_phase(
+                    cid,
+                    "TestOwner",
+                    "TestSoul",
+                    &backend,
+                    &AtomicChatPhase::Closed
+                )
+                .await
+                .is_err()
+        );
+        reopened
+            .database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_completion BEFORE UPDATE OF atomic_chat_state ON conversations
+             BEGIN SELECT RAISE(ABORT, 'fictional completion failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            reopened
+                .save_chat_reply(cid, Some(&user.id), "Retained reply", &records)
+                .await
+                .is_err()
+        );
+        let retained = reopened.get_conversation(cid).await.unwrap().unwrap();
+        assert_eq!(retained.messages.len(), 1);
+        assert_eq!(
+            retained
+                .conversation
+                .atomic_chat_state
+                .unwrap()
+                .active
+                .unwrap()
+                .user_message_id,
+            user.id
+        );
+        reopened
+            .database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_completion;")
+            .unwrap();
+        reopened
+            .save_chat_reply(cid, Some(&user.id), "Retained reply", &records)
+            .await
+            .unwrap();
+        let completed = reopened.get_conversation(cid).await.unwrap().unwrap();
+        let state = completed.conversation.atomic_chat_state.unwrap();
+        assert_eq!(state.phase, AtomicChatPhase::Closing);
+        assert!(state.active.is_none());
+        assert!(
+            reopened
+                .save_chat_reply(cid, Some(&user.id), "Duplicate reply", &records)
+                .await
+                .is_err()
+        );
+        reopened
+            .set_chat_phase(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &backend,
+                &AtomicChatPhase::Closed,
+            )
+            .await
+            .unwrap();
+        reopened
+            .set_chat_phase(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &backend,
+                &AtomicChatPhase::Closed,
+            )
+            .await
+            .unwrap();
+        assert!(
+            reopened
+                .set_chat_phase(
+                    cid,
+                    "TestOwner",
+                    "TestSoul",
+                    &backend,
+                    &AtomicChatPhase::Open
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            reopened
+                .admit_chat_turn(cid, "TestOwner", "TestSoul", &backend, "After closure")
+                .await
+                .is_err()
+        );
+        let listed = reopened
+            .get_conversations(None, 20, 0, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed[0]
+                .conversation
+                .atomic_chat_state
+                .as_ref()
+                .unwrap()
+                .phase,
+            AtomicChatPhase::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_failures_and_legacy_api_history_block_blind_replay() {
+        use crate::models::{AtomicChatBackend, AtomicChatTurnStatus};
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("atomic.db");
+        let core = AtomicCore::open_or_create(&db_path).unwrap();
+        for uncertain in [false, true] {
+            let conv = core
+                .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+                .await
+                .unwrap();
+            let cid = &conv.conversation.id;
+            let user = core
+                .admit_chat_turn(
+                    cid,
+                    "TestOwner",
+                    "TestSoul",
+                    &AtomicChatBackend::Api,
+                    "Fictional turn",
+                )
+                .await
+                .unwrap();
+            core.fail_chat_turn(cid, &user.id, "Fictional failure", uncertain)
+                .await
+                .unwrap();
+            let reopened = AtomicCore::open_or_create(&db_path).unwrap();
+            let stored = reopened.get_conversation(cid).await.unwrap().unwrap();
+            let active = stored
+                .conversation
+                .atomic_chat_state
+                .unwrap()
+                .active
+                .unwrap();
+            assert_eq!(
+                active.status,
+                if uncertain {
+                    AtomicChatTurnStatus::Uncertain
+                } else {
+                    AtomicChatTurnStatus::Failed
+                }
+            );
+            assert_eq!(active.error.as_deref(), Some("Fictional failure"));
+            assert!(
+                reopened
+                    .admit_chat_turn(
+                        cid,
+                        "TestOwner",
+                        "TestSoul",
+                        &AtomicChatBackend::Api,
+                        "Do not replay"
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        let legacy = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &legacy.conversation.id;
+        core.save_message(cid, "user", "Existing API turn")
+            .await
+            .unwrap();
+        core.save_message(cid, "assistant", "Existing API reply")
+            .await
+            .unwrap();
+        assert!(
+            core.admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &AtomicChatBackend::ClaudeCode,
+                "No reconstruction"
+            )
+            .await
+            .is_err()
+        );
+        core.admit_chat_turn(
+            cid,
+            "TestOwner",
+            "TestSoul",
+            &AtomicChatBackend::Api,
+            "Continue API",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            core.get_conversation(cid)
+                .await
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            3
+        );
+        for has_history in [false, true] {
+            let conv = core
+                .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+                .await
+                .unwrap();
+            let cid = &conv.conversation.id;
+            let backend = if has_history {
+                AtomicChatBackend::Api
+            } else {
+                AtomicChatBackend::ClaudeCode
+            };
+            if has_history {
+                core.save_message(cid, "user", "Old turn").await.unwrap();
+                core.save_message(cid, "assistant", "Old reply")
+                    .await
+                    .unwrap();
+            }
+            core.set_chat_phase(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &backend,
+                &crate::models::AtomicChatPhase::Closing,
+            )
+            .await
+            .unwrap();
+            let closing = core.get_conversation(cid).await.unwrap().unwrap();
+            assert_eq!(closing.messages.len(), if has_history { 2 } else { 0 });
+            let state = closing.conversation.atomic_chat_state.unwrap();
+            assert!(state.active.is_none());
+            assert_eq!(state.phase, crate::models::AtomicChatPhase::Closing);
+            core.set_chat_phase(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &backend,
+                &crate::models::AtomicChatPhase::Closed,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_lifecycle_state_is_an_error_not_a_missing_conversation() {
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        core.database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE conversations SET atomic_chat_state='invalid-json' WHERE id=?1",
+                [&conv.conversation.id],
+            )
+            .unwrap();
+        assert!(core.get_conversation(&conv.conversation.id).await.is_err());
+        assert!(
+            core.get_conversation("missing-conversation")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn claude_input_separates_presence_from_current_turn_without_replaying_history() {
@@ -2632,7 +3026,7 @@ mod tests {
                 .unwrap();
             assert!(
                 reopened
-                    .save_chat_reply(cid, reply_text, &records)
+                    .save_chat_reply(cid, None, reply_text, &records)
                     .await
                     .is_err()
             );
@@ -2666,7 +3060,7 @@ mod tests {
                 .unwrap();
         }
         let reply = reopened
-            .save_chat_reply(cid, reply_text, &records)
+            .save_chat_reply(cid, None, reply_text, &records)
             .await
             .unwrap();
         let saved = reopened.get_conversation(cid).await.unwrap().unwrap();
@@ -2803,7 +3197,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            core.save_chat_reply(other_id, "Must not publish across sittings", &attempt)
+            core.save_chat_reply(other_id, None, "Must not publish across sittings", &attempt)
                 .await
                 .is_err()
         );
@@ -3020,6 +3414,7 @@ mod tests {
             core.storage
                 .save_chat_reply_sync(
                     cid,
+                    None,
                     "API reply [1]",
                     &[],
                     &[ChatCitation {
@@ -3164,7 +3559,8 @@ mod tests {
         let database = core.database().unwrap();
         let con = database.conn.lock().unwrap();
         con.execute_batch(
-            "ALTER TABLE conversations DROP COLUMN atomic_citation_index; PRAGMA user_version=23;",
+            "ALTER TABLE conversations DROP COLUMN atomic_citation_index;
+             ALTER TABLE conversations DROP COLUMN atomic_chat_state; PRAGMA user_version=23;",
         )
         .unwrap();
         crate::db::Database::run_migrations(&con).unwrap();
@@ -3172,7 +3568,7 @@ mod tests {
         let version: i32 = con
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 24);
+        assert_eq!(version, 25);
         let columns: i32 = con.query_row("SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='atomic_citation_index'", [], |row| row.get(0)).unwrap();
         assert_eq!(columns, 1);
     }

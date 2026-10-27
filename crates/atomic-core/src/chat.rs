@@ -5,12 +5,22 @@
 
 use crate::error::AtomicCoreError;
 use crate::models::{
+    AtomicChatBackend, AtomicChatPhase, AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus,
     ChatCitation, ChatMessage, ChatMessageWithContext, ChatToolCall, Conversation,
     ConversationWithMessages, ConversationWithTags, Tag,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 // ==================== Helper Functions ====================
+
+fn read_chat_state(raw: Option<String>) -> rusqlite::Result<Option<AtomicChatState>> {
+    raw.map(|text| {
+        serde_json::from_str(&text).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+        })
+    })
+    .transpose()
+}
 
 /// Truncate a string to at most `max_chars` characters, appending `...` if truncated.
 ///
@@ -377,6 +387,210 @@ fn batch_fetch_conversation_summaries(
     Ok(map)
 }
 
+pub(crate) fn bound_chat_state(
+    current: Option<AtomicChatState>,
+    backend: &AtomicChatBackend,
+    last_role: Option<&str>,
+) -> Result<AtomicChatState, AtomicCoreError> {
+    // Before native hookup, existing unbound dialogue can only be API history.
+    // Never use that legacy state to initialize a replacement Claude session.
+    let state = match current {
+        Some(state) => state,
+        None if last_role.is_some() && *backend != AtomicChatBackend::Api => {
+            return Err(AtomicCoreError::Conflict(
+                "This sitting has API history. Restore claude_code=false to continue/end it, or start a new sitting.".to_string(),
+            ));
+        }
+        None => AtomicChatState {
+            backend: *backend,
+            phase: AtomicChatPhase::Open,
+            active: None,
+        },
+    };
+    if state.backend != *backend {
+        return Err(AtomicCoreError::Conflict(format!(
+            "This sitting uses {:?}. Restore its original claude_code setting to continue/end it, or start a new sitting.",
+            state.backend,
+        )));
+    }
+    Ok(state)
+}
+
+pub(crate) fn admitted_chat_state(
+    current: Option<AtomicChatState>,
+    backend: &AtomicChatBackend,
+    last_role: Option<&str>,
+) -> Result<AtomicChatState, AtomicCoreError> {
+    let state = bound_chat_state(current, backend, last_role)?;
+    if state.phase != AtomicChatPhase::Open || state.active.is_some() || last_role == Some("user") {
+        return Err(AtomicCoreError::Conflict(
+            "This sitting is closing, closed, or has an unresolved turn. Resolve that turn or close out; do not send it again.".to_string(),
+        ));
+    }
+    Ok(state)
+}
+
+pub(crate) fn matching_chat_turn<'a>(
+    state: &'a mut AtomicChatState,
+    expected_user_message_id: &str,
+) -> Result<&'a mut AtomicChatTurn, AtomicCoreError> {
+    state
+        .active
+        .as_mut()
+        .filter(|active| {
+            active.user_message_id == expected_user_message_id
+                && active.status == AtomicChatTurnStatus::Running
+        })
+        .ok_or_else(|| {
+            AtomicCoreError::Conflict(
+                "The active chat turn no longer matches this result".to_string(),
+            )
+        })
+}
+
+pub(crate) fn completed_chat_state(
+    state: Option<AtomicChatState>,
+    expected_user_message_id: Option<&str>,
+) -> Result<Option<AtomicChatState>, AtomicCoreError> {
+    match (state, expected_user_message_id) {
+        (None, None) => Ok(None), // Existing API/standalone path, not lifecycle-managed yet.
+        (Some(mut state), Some(expected)) => {
+            matching_chat_turn(&mut state, expected)?;
+            state.active = None;
+            Ok(Some(state)) // Preserve Closing: publication must not reopen the sitting.
+        }
+        _ => Err(AtomicCoreError::Conflict(
+            "Reply has no matching admitted chat turn".to_string(),
+        )),
+    }
+}
+
+pub(crate) fn changed_chat_phase(
+    mut state: AtomicChatState,
+    phase: &AtomicChatPhase,
+) -> Result<AtomicChatState, AtomicCoreError> {
+    if state.phase == *phase {
+        return Ok(state);
+    }
+    match (state.phase, *phase) {
+        (AtomicChatPhase::Open, AtomicChatPhase::Closing) => {}
+        (AtomicChatPhase::Closing, AtomicChatPhase::Closed) if state.active.is_none() => {}
+        _ => {
+            return Err(AtomicCoreError::Conflict(
+                "Chat cannot close with unresolved work or reopen after close-out".to_string(),
+            ));
+        }
+    }
+    state.phase = *phase;
+    Ok(state)
+}
+
+fn stored_chat_state(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<Option<AtomicChatState>, AtomicCoreError> {
+    Ok(conn.query_row(
+        "SELECT atomic_chat_state FROM conversations WHERE id=?1",
+        [conversation_id],
+        |row| read_chat_state(row.get(0)?),
+    )?)
+}
+
+fn write_chat_state(
+    conn: &Connection,
+    conversation_id: &str,
+    state: Option<&AtomicChatState>,
+) -> Result<(), AtomicCoreError> {
+    let raw = state.map(serde_json::to_string).transpose()?;
+    if conn.execute(
+        "UPDATE conversations SET atomic_chat_state=?1 WHERE id=?2",
+        rusqlite::params![raw, conversation_id],
+    )? != 1
+    {
+        return Err(AtomicCoreError::NotFound(
+            "Conversation not found".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn admit_chat_turn(
+    conn: &Connection,
+    conversation_id: &str,
+    user_id: &str,
+    soul_id: &str,
+    backend: &AtomicChatBackend,
+    content: &str,
+) -> Result<ChatMessage, AtomicCoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let current = tx.query_row(
+        "SELECT atomic_chat_state FROM conversations WHERE id=?1 AND user_id=?2 AND soul_id=?3",
+        rusqlite::params![conversation_id, user_id, soul_id],
+        |row| read_chat_state(row.get(0)?),
+    )?;
+    let last_role: Option<String> = tx.query_row(
+        "SELECT role FROM chat_messages WHERE conversation_id=?1 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1",
+        [conversation_id], |row| row.get(0),
+    ).optional()?;
+    let mut state = admitted_chat_state(current, backend, last_role.as_deref())?;
+    let message = save_message(&tx, conversation_id, "user", content)?;
+    state.active = Some(AtomicChatTurn {
+        user_message_id: message.id.clone(),
+        status: AtomicChatTurnStatus::Running,
+        error: None,
+    });
+    write_chat_state(&tx, conversation_id, Some(&state))?;
+    tx.commit()?;
+    Ok(message)
+}
+
+pub fn fail_chat_turn(
+    conn: &Connection,
+    conversation_id: &str,
+    user_message_id: &str,
+    error: &str,
+    uncertain: bool,
+) -> Result<(), AtomicCoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let mut state = stored_chat_state(&tx, conversation_id)?
+        .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
+    let active = matching_chat_turn(&mut state, user_message_id)?;
+    active.status = if uncertain {
+        AtomicChatTurnStatus::Uncertain
+    } else {
+        AtomicChatTurnStatus::Failed
+    };
+    active.error = Some(error.to_string());
+    write_chat_state(&tx, conversation_id, Some(&state))?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn set_chat_phase(
+    conn: &Connection,
+    conversation_id: &str,
+    user_id: &str,
+    soul_id: &str,
+    backend: &AtomicChatBackend,
+    phase: &AtomicChatPhase,
+) -> Result<(), AtomicCoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let current = tx.query_row(
+        "SELECT atomic_chat_state FROM conversations WHERE id=?1 AND user_id=?2 AND soul_id=?3",
+        rusqlite::params![conversation_id, user_id, soul_id],
+        |row| read_chat_state(row.get(0)?),
+    )?;
+    let last_role: Option<String> = tx.query_row(
+        "SELECT role FROM chat_messages WHERE conversation_id=?1 AND role IN ('user','assistant') ORDER BY message_index DESC LIMIT 1",
+        [conversation_id], |row| row.get(0),
+    ).optional()?;
+    let state = bound_chat_state(current, backend, last_role.as_deref())?;
+    let state = changed_chat_phase(state, phase)?;
+    write_chat_state(&tx, conversation_id, Some(&state))?;
+    tx.commit()?;
+    Ok(())
+}
+
 // ==================== CRUD Operations ====================
 
 /// Create a new conversation
@@ -420,6 +634,7 @@ pub fn create_conversation(
             created_at: now.clone(),
             updated_at: now,
             is_archived: false,
+            atomic_chat_state: None,
         },
         tags,
         message_count: 0,
@@ -439,7 +654,7 @@ pub fn get_conversations(
     let soul_id = owner.map(|(_, soul_id)| soul_id);
     let conversations: Vec<Conversation> = if let Some(tag_id) = filter_tag_id {
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT c.id, c.title, c.user_id, c.soul_id, c.created_at, c.updated_at, c.is_archived
+            "SELECT DISTINCT c.id, c.title, c.user_id, c.soul_id, c.created_at, c.updated_at, c.is_archived, c.atomic_chat_state
              FROM conversations c
              JOIN conversation_tags ct ON ct.conversation_id = c.id
              WHERE ct.tag_id = ?1
@@ -461,6 +676,7 @@ pub fn get_conversations(
                         created_at: row.get(4)?,
                         updated_at: row.get(5)?,
                         is_archived: row.get::<_, i32>(6)? != 0,
+                        atomic_chat_state: read_chat_state(row.get(7)?)?,
                     })
                 },
             )?
@@ -468,7 +684,7 @@ pub fn get_conversations(
         results
     } else {
         let mut stmt = conn.prepare(
-            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
              FROM conversations
              WHERE (?1 IS NULL OR (user_id = ?1 AND soul_id = ?2)) AND is_archived = 0
              ORDER BY updated_at DESC
@@ -485,6 +701,7 @@ pub fn get_conversations(
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     is_archived: row.get::<_, i32>(6)? != 0,
+                    atomic_chat_state: read_chat_state(row.get(7)?)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -530,7 +747,7 @@ pub fn get_conversation(
 ) -> Result<Option<ConversationWithMessages>, AtomicCoreError> {
     let conversation: Option<Conversation> = conn
         .query_row(
-            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
              FROM conversations
              WHERE id = ?1",
             [conversation_id],
@@ -543,10 +760,11 @@ pub fn get_conversation(
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     is_archived: row.get::<_, i32>(6)? != 0,
+                        atomic_chat_state: read_chat_state(row.get(7)?)?,
                 })
             },
         )
-        .ok();
+        .optional()?;
 
     match conversation {
         Some(conv) => {
@@ -587,7 +805,7 @@ pub fn update_conversation(
     }
 
     conn.query_row(
-        "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+        "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
          FROM conversations
          WHERE id = ?1",
         [id],
@@ -600,6 +818,7 @@ pub fn update_conversation(
                 created_at: row.get(4)?,
                 updated_at: row.get(5)?,
                 is_archived: row.get::<_, i32>(6)? != 0,
+                atomic_chat_state: read_chat_state(row.get(7)?)?,
             })
         },
     )
@@ -641,7 +860,7 @@ pub fn set_conversation_scope(
 
     let conversation = conn
         .query_row(
-            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
              FROM conversations WHERE id = ?1",
             [conversation_id],
             |row| {
@@ -653,6 +872,7 @@ pub fn set_conversation_scope(
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     is_archived: row.get::<_, i32>(6)? != 0,
+                        atomic_chat_state: read_chat_state(row.get(7)?)?,
                 })
             },
         )
@@ -691,7 +911,7 @@ pub fn add_tag_to_scope(
 
     let conversation = conn
         .query_row(
-            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
              FROM conversations WHERE id = ?1",
             [conversation_id],
             |row| {
@@ -703,6 +923,7 @@ pub fn add_tag_to_scope(
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     is_archived: row.get::<_, i32>(6)? != 0,
+                        atomic_chat_state: read_chat_state(row.get(7)?)?,
                 })
             },
         )
@@ -741,7 +962,7 @@ pub fn remove_tag_from_scope(
 
     let conversation = conn
         .query_row(
-            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived
+            "SELECT id, title, user_id, soul_id, created_at, updated_at, is_archived, atomic_chat_state
              FROM conversations WHERE id = ?1",
             [conversation_id],
             |row| {
@@ -753,6 +974,7 @@ pub fn remove_tag_from_scope(
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     is_archived: row.get::<_, i32>(6)? != 0,
+                        atomic_chat_state: read_chat_state(row.get(7)?)?,
                 })
             },
         )
@@ -773,7 +995,7 @@ pub fn remove_tag_from_scope(
 
 // ==================== Message DB Operations ====================
 
-/// Save a message and return (message_id, message_index)
+/// Save a message and return its stored identity, timestamp and index.
 pub fn save_message(
     conn: &Connection,
     conversation_id: &str,
@@ -948,12 +1170,17 @@ fn write_chat_tool_state(
 pub fn save_chat_reply(
     conn: &Connection,
     conversation_id: &str,
+    expected_user_message_id: Option<&str>,
     content: &str,
     tool_calls: &[ChatToolCall],
     citations: &[ChatCitation],
     citation_index: i32,
 ) -> Result<ChatMessage, AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
+    let state = completed_chat_state(
+        stored_chat_state(&tx, conversation_id)?,
+        expected_user_message_id,
+    )?;
     let message = save_message(&tx, conversation_id, "assistant", content)?;
     write_chat_tool_state(
         &tx,
@@ -963,6 +1190,9 @@ pub fn save_chat_reply(
         citations,
         citation_index,
     )?;
+    if state.is_some() {
+        write_chat_state(&tx, conversation_id, state.as_ref())?;
+    }
     tx.commit()?;
     Ok(message)
 }

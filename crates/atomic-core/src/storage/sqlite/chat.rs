@@ -6,6 +6,50 @@ use async_trait::async_trait;
 
 /// Sync helper methods for chat operations.
 impl SqliteStorage {
+    pub(crate) fn admit_chat_turn_sync(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        content: &str,
+    ) -> StorageResult<ChatMessage> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::chat::admit_chat_turn(&conn, conversation_id, user_id, soul_id, backend, content)
+    }
+    pub(crate) fn fail_chat_turn_sync(
+        &self,
+        conversation_id: &str,
+        user_message_id: &str,
+        error: &str,
+        uncertain: bool,
+    ) -> StorageResult<()> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::chat::fail_chat_turn(&conn, conversation_id, user_message_id, error, uncertain)
+    }
+    pub(crate) fn set_chat_phase_sync(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        phase: &AtomicChatPhase,
+    ) -> StorageResult<()> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::chat::set_chat_phase(&conn, conversation_id, user_id, soul_id, backend, phase)
+    }
     pub(crate) fn create_conversation_sync(
         &self,
         tag_ids: &[String],
@@ -122,6 +166,7 @@ impl SqliteStorage {
     pub(crate) fn save_chat_reply_sync(
         &self,
         conversation_id: &str,
+        expected_user_message_id: Option<&str>,
         content: &str,
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],
@@ -135,6 +180,7 @@ impl SqliteStorage {
         crate::chat::save_chat_reply(
             &conn,
             conversation_id,
+            expected_user_message_id,
             content,
             tool_calls,
             citations,
@@ -198,9 +244,73 @@ impl SqliteStorage {
 
 #[async_trait]
 impl ChatStore for SqliteStorage {
+    async fn admit_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        content: &str,
+    ) -> StorageResult<ChatMessage> {
+        let (storage, conversation_id, user_id, soul_id, backend, content) = (
+            self.clone(),
+            conversation_id.to_string(),
+            user_id.to_string(),
+            soul_id.to_string(),
+            *backend,
+            content.to_string(),
+        );
+        tokio::task::spawn_blocking(move || {
+            storage.admit_chat_turn_sync(&conversation_id, &user_id, &soul_id, &backend, &content)
+        })
+        .await
+        .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+    async fn fail_chat_turn(
+        &self,
+        conversation_id: &str,
+        user_message_id: &str,
+        error: &str,
+        uncertain: bool,
+    ) -> StorageResult<()> {
+        let (storage, conversation_id, user_message_id, error) = (
+            self.clone(),
+            conversation_id.to_string(),
+            user_message_id.to_string(),
+            error.to_string(),
+        );
+        tokio::task::spawn_blocking(move || {
+            storage.fail_chat_turn_sync(&conversation_id, &user_message_id, &error, uncertain)
+        })
+        .await
+        .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+    async fn set_chat_phase(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        phase: &AtomicChatPhase,
+    ) -> StorageResult<()> {
+        let (storage, conversation_id, user_id, soul_id, backend, phase) = (
+            self.clone(),
+            conversation_id.to_string(),
+            user_id.to_string(),
+            soul_id.to_string(),
+            *backend,
+            *phase,
+        );
+        tokio::task::spawn_blocking(move || {
+            storage.set_chat_phase_sync(&conversation_id, &user_id, &soul_id, &backend, &phase)
+        })
+        .await
+        .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
     async fn save_chat_reply(
         &self,
         conversation_id: &str,
+        expected_user_message_id: Option<&str>,
         content: &str,
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],
@@ -208,12 +318,14 @@ impl ChatStore for SqliteStorage {
     ) -> StorageResult<ChatMessage> {
         let storage = self.clone();
         let conversation_id = conversation_id.to_string();
+        let expected_user_message_id = expected_user_message_id.map(str::to_string);
         let content = content.to_string();
         let tool_calls = tool_calls.to_vec();
         let citations = citations.to_vec();
         tokio::task::spawn_blocking(move || {
             storage.save_chat_reply_sync(
                 &conversation_id,
+                expected_user_message_id.as_deref(),
                 &content,
                 &tool_calls,
                 &citations,

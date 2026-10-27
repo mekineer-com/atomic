@@ -768,6 +768,50 @@ pub struct CanvasLevel {
 // These are included here for use by the Tauri app's chat functionality,
 // even though chat is not part of atomic-core's scope.
 
+/// Backend identity stays fixed for the sitting, not for the user's configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum AtomicChatBackend {
+    Api,
+    ClaudeCode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum AtomicChatPhase {
+    Open,
+    Closing,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum AtomicChatTurnStatus {
+    Running,
+    Failed,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AtomicChatTurn {
+    pub user_message_id: String,
+    pub status: AtomicChatTurnStatus,
+    pub error: Option<String>,
+}
+
+/// Durable admission, not a process-local claim that a native writer is idle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AtomicChatState {
+    pub backend: AtomicChatBackend,
+    pub phase: AtomicChatPhase,
+    pub active: Option<AtomicChatTurn>,
+}
+
 /// Chat conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -779,6 +823,8 @@ pub struct Conversation {
     pub created_at: String,
     pub updated_at: String,
     pub is_archived: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atomic_chat_state: Option<AtomicChatState>,
 }
 
 /// Conversation with its tag scope and summary info

@@ -1124,6 +1124,17 @@ impl Database {
             conn.execute_batch("PRAGMA user_version = 24;")?;
         }
 
+        if version < 25 {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('conversations') WHERE name = 'atomic_chat_state')",
+                [], |row| row.get(0),
+            )?;
+            if !exists {
+                conn.execute_batch("ALTER TABLE conversations ADD COLUMN atomic_chat_state TEXT;")?;
+            }
+            conn.execute_batch("PRAGMA user_version = 25;")?;
+        }
+
         // --- Triggers (recreated every startup to stay current) ---
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS atom_tags_insert_count;
