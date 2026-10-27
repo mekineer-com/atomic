@@ -1138,6 +1138,27 @@ When citing sources:
     )
 }
 
+fn chat_system_prompt(
+    settings: &HashMap<String, String>,
+    scope_description: &str,
+    memu_tool_config: Option<&MemuToolConfig>,
+    page_context: Option<&PageContext>,
+    canvas_context: Option<&CanvasContext>,
+) -> String {
+    let base = get_system_prompt(scope_description, memu_tool_config);
+    let mut prompt = match settings.get("chat_prompt").filter(|s| !s.is_empty()) {
+        Some(prefix) => format!("{prefix}\n\n{base}"),
+        None => base,
+    };
+    if page_context.is_some() {
+        prompt.push_str(get_page_context_system_prompt());
+    }
+    if let Some(ctx) = canvas_context {
+        prompt.push_str(&get_canvas_system_prompt(ctx));
+    }
+    prompt
+}
+
 const MEMU_RESPONSE_SENTENCES_SETTING: &str = "memu_response_sentences";
 const MEMU_LOG_PROMPTS_SETTING: &str = "memu_log_prompts";
 
@@ -1156,10 +1177,12 @@ fn memu_prompt_logging_enabled(settings: &HashMap<String, String>) -> bool {
 }
 
 fn append_memu_response_limit(mut messages: Vec<Message>, limit: usize) -> Vec<Message> {
-    messages.push(Message::user(format!(
-        "**respond with {limit} sentences or fewer**"
-    )));
+    messages.push(Message::user(memu_response_limit_instruction(limit)));
     messages
+}
+
+fn memu_response_limit_instruction(limit: usize) -> String {
+    format!("**respond with {limit} sentences or fewer**")
 }
 
 // ==================== Context Window Management ====================
@@ -1361,6 +1384,12 @@ pub struct ChatToolResult {
     pub is_error: bool,
 }
 
+/// Input for MCP's existing Atomic Claude request. Resume never resends Presence.
+pub struct ClaudeChatInput {
+    pub system_prompt: Option<String>,
+    pub prompt: String,
+}
+
 /// Owned tool state shared by API chat and the scoped Claude bridge.
 /// Callers serialize execution for the whole call, including citation allocation.
 pub struct ChatToolSession {
@@ -1370,6 +1399,7 @@ pub struct ChatToolSession {
     external_settings: HashMap<String, String>,
     memu_tool_config: Option<MemuToolConfig>,
     page_context: Option<PageContext>,
+    canvas_context: Option<CanvasContext>,
     canvas_cache: Option<crate::CanvasCache>,
     on_event: ChatEventCallback,
     tools: Vec<ToolDefinition>,
@@ -1406,6 +1436,7 @@ impl ChatToolSession {
             external_settings,
             memu_tool_config,
             page_context,
+            canvas_context,
             canvas_cache,
             on_event,
             tools,
@@ -1415,6 +1446,69 @@ impl ChatToolSession {
             durable_message_id: None,
             tool_calls_record: Vec::new(),
         }
+    }
+
+    /// Caller holds the sitting lock; `new_sitting` comes from its native binding,
+    /// not from the number of saved messages. Retry controls belong to C2.
+    pub async fn claude_input(&self, new_sitting: bool) -> Result<ClaudeChatInput, String> {
+        let user_message_id = self
+            .durable_message_id
+            .as_deref()
+            .ok_or_else(|| "Claude input requires a scoped, saved user turn".to_string())?;
+        let conversation = self
+            .storage
+            .get_conversation_sync(&self.conversation_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Conversation not found".to_string())?;
+        let user = conversation
+            .messages
+            .iter()
+            .find(|row| row.message.id == user_message_id && row.message.role == "user")
+            .ok_or_else(|| "Saved user turn not found".to_string())?;
+        let system_prompt = if new_sitting {
+            let presence = conversation
+                .messages
+                .iter()
+                .find(|row| row.message.role == "system")
+                .map(|row| row.message.content.as_str())
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| "This sitting has no saved Soul Presence".to_string())?;
+            Some(format!(
+                "{}\n\n{presence}",
+                chat_system_prompt(
+                    &self.external_settings,
+                    "",
+                    self.memu_tool_config.as_ref(),
+                    None,
+                    None,
+                )
+            ))
+        } else {
+            None
+        };
+        let mut context = self
+            .storage
+            .get_scope_description_sync(&self.scope_tag_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        if self.page_context.is_some() {
+            context.push_str(get_page_context_system_prompt());
+        }
+        if let Some(canvas) = &self.canvas_context {
+            context.push_str(&get_canvas_system_prompt(canvas));
+        }
+        let mut prompt = format!(
+            "<atomic_turn_context>\n{context}\n</atomic_turn_context>\n\n{}",
+            user.message.content
+        );
+        if let Some(limit) = memu_response_sentence_limit(&self.external_settings) {
+            prompt.push_str(&format!("\n\n{}", memu_response_limit_instruction(limit)));
+        }
+        Ok(ClaudeChatInput {
+            system_prompt,
+            prompt,
+        })
     }
 
     pub(crate) async fn bind_user_turn(
@@ -2098,21 +2192,13 @@ where
     };
 
     // Build message history for API, with canvas context appended to system prompt
-    let custom_chat_prefix = settings_map
-        .get("chat_prompt")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let base_system = get_system_prompt(&scope_description, memu_tool_config.as_ref());
-    let mut system_prompt = match custom_chat_prefix {
-        Some(prefix) => format!("{prefix}\n\n{base_system}"),
-        None => base_system,
-    };
-    if page_context.is_some() {
-        system_prompt.push_str(get_page_context_system_prompt());
-    }
-    if let Some(ref ctx) = canvas_context {
-        system_prompt.push_str(&get_canvas_system_prompt(ctx));
-    }
+    let system_prompt = chat_system_prompt(
+        &settings_map,
+        &scope_description,
+        memu_tool_config.as_ref(),
+        page_context.as_ref(),
+        canvas_context.as_ref(),
+    );
     let mut api_messages = vec![Message::system(system_prompt)];
     api_messages.extend(messages);
 
@@ -2182,6 +2268,195 @@ mod tests {
     use super::*;
     use crate::{AtomicCore, CreateAtomRequest};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn claude_input_separates_presence_from_current_turn_without_replaying_history() {
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let conversation = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conversation.conversation.id;
+        let presence = "  Original fictional Soul Presence.\nKeep these bytes.  ";
+        core.save_message(cid, "system", presence).await.unwrap();
+        core.save_message(cid, "user", "Earlier user dialogue")
+            .await
+            .unwrap();
+        core.save_message(cid, "assistant", "Earlier assistant dialogue")
+            .await
+            .unwrap();
+        let user = core
+            .save_message(cid, "user", "Discuss this chart")
+            .await
+            .unwrap();
+        let settings = HashMap::from([
+            (
+                "chat_prompt".to_string(),
+                "Custom Atomic prefix".to_string(),
+            ),
+            (MEMU_RESPONSE_SENTENCES_SETTING.to_string(), "4".to_string()),
+            (
+                "embedding_model".to_string(),
+                "test-embedding-model".to_string(),
+            ),
+        ]);
+        let scope = MemuToolConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            user_id: "TestOwner".to_string(),
+            soul_id: "TestSoul".to_string(),
+        };
+        let session = core
+            .chat_tool_session(
+                cid,
+                &user.id,
+                settings.clone(),
+                scope.clone(),
+                Some(PageContext {
+                    view: Some("atom".to_string()),
+                    atom_id: None,
+                    atom_title: None,
+                    atom_snippet: Some("Hidden page contents".to_string()),
+                    wiki_tag_id: None,
+                    wiki_tag_name: None,
+                    selected_tag_id: None,
+                }),
+                Some(CanvasContext {
+                    clusters: vec![CanvasClusterSummary {
+                        label: "Fictional astronomy".to_string(),
+                        atom_count: 12,
+                    }],
+                }),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let initial = session.claude_input(true).await.unwrap();
+        let system = initial.system_prompt.unwrap();
+        assert!(system.starts_with("Custom Atomic prefix\n\n"));
+        assert!(system.ends_with(presence));
+        assert!(!system.contains("Fictional astronomy"));
+        assert!(!system.contains("get_current_page_context"));
+        assert!(!system.contains("4 sentences"));
+        assert!(initial.prompt.contains("Fictional astronomy"));
+        assert!(initial.prompt.contains("get_current_page_context"));
+        assert!(
+            initial
+                .prompt
+                .ends_with("Discuss this chart\n\n**respond with 4 sentences or fewer**")
+        );
+        for omitted in [
+            presence,
+            "Custom Atomic prefix",
+            "Earlier user dialogue",
+            "Earlier assistant dialogue",
+            "Hidden page contents",
+        ] {
+            assert!(!initial.prompt.contains(omitted));
+        }
+        let resumed = session.claude_input(false).await.unwrap();
+        assert!(resumed.system_prompt.is_none());
+        assert_eq!(resumed.prompt, initial.prompt);
+        assert_eq!(
+            session.external_settings, settings,
+            "input assembly must not replace tool settings"
+        );
+        assert!(
+            !session
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "create_atom")
+        );
+
+        let next = core
+            .save_message(cid, "user", "Next saved turn")
+            .await
+            .unwrap();
+        let next_session = core
+            .chat_tool_session(
+                cid,
+                &next.id,
+                HashMap::from([(MEMU_RESPONSE_SENTENCES_SETTING.to_string(), "2".to_string())]),
+                scope.clone(),
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let next_input = next_session.claude_input(false).await.unwrap();
+        assert!(next_input.system_prompt.is_none());
+        assert!(
+            next_input
+                .prompt
+                .ends_with("Next saved turn\n\n**respond with 2 sentences or fewer**")
+        );
+        assert!(!next_input.prompt.contains("Fictional astronomy"));
+        assert!(!next_input.prompt.contains("get_current_page_context"));
+        assert!(!next_input.prompt.contains("Discuss this chart"));
+
+        let other = core
+            .create_conversation(&[], None, Some(("TestOwner", "OtherSoul")))
+            .await
+            .unwrap();
+        let other_user = core
+            .save_message(&other.conversation.id, "user", "Other turn")
+            .await
+            .unwrap();
+        let other_session = core
+            .chat_tool_session(
+                &other.conversation.id,
+                &other_user.id,
+                HashMap::new(),
+                MemuToolConfig {
+                    soul_id: "OtherSoul".to_string(),
+                    ..scope
+                },
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        assert!(
+            other_session
+                .claude_input(true)
+                .await
+                .err()
+                .unwrap()
+                .contains("no saved Soul Presence")
+        );
+        assert_eq!(
+            core.get_conversation(cid)
+                .await
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn shared_system_prompt_preserves_api_layout() {
+        let settings = HashMap::from([("chat_prompt".to_string(), "Custom prefix".to_string())]);
+        let page: PageContext = serde_json::from_value(json!({"view": "atom"})).unwrap();
+        let canvas = CanvasContext { clusters: vec![] };
+        let scope = "Only the selected scope";
+        assert_eq!(
+            chat_system_prompt(&settings, scope, None, Some(&page), Some(&canvas)),
+            format!(
+                "Custom prefix\n\n{}{}{}",
+                get_system_prompt(scope, None),
+                get_page_context_system_prompt(),
+                get_canvas_system_prompt(&canvas)
+            )
+        );
+        assert_eq!(
+            chat_system_prompt(&HashMap::new(), scope, None, None, None),
+            get_system_prompt(scope, None)
+        );
+    }
 
     #[tokio::test]
     async fn durable_tools_preserve_numbering_retry_and_reply_membership() {
