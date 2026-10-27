@@ -1793,9 +1793,7 @@ impl ChatToolSession {
         record.tool_output = Some(serde_json::Value::String(tool_result.clone()));
         record.status = if is_error { "failed" } else { "complete" }.to_string();
         record.completed_at = Some(Utc::now().to_rfc3339());
-        self.checkpoint()
-            .await
-            .map_err(|e| format!("Tool finished, but saving its outcome failed: {e}"))?;
+        let checkpoint = self.checkpoint().await;
 
         // Emit tool complete event
         (self.on_event)(ChatEvent::ToolComplete {
@@ -1804,6 +1802,7 @@ impl ChatToolSession {
             results_count,
             is_error,
         });
+        checkpoint.map_err(|e| format!("Tool finished, but saving its outcome failed: {e}"))?;
 
         Ok(ChatToolResult {
             content: tool_result,
@@ -2553,6 +2552,13 @@ mod tests {
                 .count(),
             1
         );
+        assert!(events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            ChatEvent::ToolComplete {
+                is_error: false,
+                ..
+            }
+        )));
         let records = session.finish();
         assert_eq!(records.tool_calls[0].status, "complete");
         core.database()
