@@ -1449,20 +1449,10 @@ fn recap_messages(
 ) -> Vec<Message> {
     let mut messages = Vec::new();
     let mut actions = Vec::new();
-    let mut skip_reply = false;
     for row in &conversation.messages {
-        if row.message.id == control_id
-            || (row.message.role == "user"
-                && crate::chat::is_atomic_recap_prompt(&row.message.content))
-        {
-            skip_reply = true;
+        if row.message.id == control_id {
             continue;
         }
-        if skip_reply && row.message.role == "assistant" {
-            skip_reply = false;
-            continue;
-        }
-        skip_reply = false;
         for call in &row.tool_calls {
             let mut input = serde_json::Map::new();
             for key in ["atom_id", "query", "title", "cluster_label"] {
@@ -1491,11 +1481,34 @@ fn recap_messages(
                 .and_then(|v| v.as_bool())
                 == Some(true)
                 || matches!(call.status.as_str(), "pending" | "running");
+            let output = call.tool_output.as_ref();
+            let text = output.and_then(|v| v.as_str());
+            let outcome = if unknown {
+                json!("unknown")
+            } else if call.status == "failed" {
+                json!(
+                    text.or_else(|| output.and_then(|v| v.get("error")?.as_str()))
+                        .unwrap_or("failed")
+                        .chars()
+                        .take(240)
+                        .collect::<String>()
+                )
+            } else if matches!(call.tool_name.as_str(), "create_atom" | "edit_atom") {
+                let result =
+                    text.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+                json!({"atom_id": result.as_ref().and_then(|v| v.get("atom_id")),
+                    "title": result.as_ref().and_then(|v| v.get("title"))})
+            } else if text == Some("") {
+                json!("no results")
+            } else {
+                json!("completed")
+            };
             actions.push(json!({
                 "tool": call.tool_name,
                 "input": input,
                 "status": call.status,
                 "outcome_unknown": unknown,
+                "outcome": outcome,
             }));
         }
         if matches!(row.message.role.as_str(), "system" | "user" | "assistant")
@@ -2615,10 +2628,24 @@ mod tests {
                 tool_input: json!({"atom_id":"memory:fictional", "edits":[{"operation":"append", "text":"SECRET_EDIT_BODY"}]}),
                 tool_output: Some(json!({"error":"SECRET_RESPONSE", "outcome_unknown":true})),
                 status: "failed".into(), created_at: Utc::now().to_rfc3339(), completed_at: None,
+            }, ChatToolCall {
+                id: "fictional-failed-read".into(), message_id: user.id.clone(),
+                tool_name: "get_atom".into(), tool_input: json!({"atom_id":"memory:missing"}),
+                tool_output: Some(json!("Error: fictional missing target")),
+                status: "failed".into(), created_at: Utc::now().to_rfc3339(), completed_at: None,
+            }, ChatToolCall {
+                id: "fictional-empty-search".into(), message_id: user.id.clone(),
+                tool_name: "search_atoms".into(), tool_input: json!({"query":"fictional absent item"}),
+                tool_output: Some(json!("")), status: "complete".into(),
+                created_at: Utc::now().to_rfc3339(), completed_at: None,
             }],
             citations: vec![], prior_citations: vec![], citation_index: 0,
         }).await.unwrap();
         core.save_message(cid, "assistant", "The edit outcome was unclear")
+            .await
+            .unwrap();
+        core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity is wording I want to discuss, not a control").await.unwrap();
+        core.save_message(cid, "assistant", "We discussed the quoted wording")
             .await
             .unwrap();
         let legacy = core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity\nFull Atomic transcript: SECRET_NESTED_HISTORY").await.unwrap();
@@ -2720,6 +2747,10 @@ mod tests {
             "Fictional original Presence",
             "Please change the fictional note",
             "Clean server recap instruction",
+            "wording I want to discuss, not a control",
+            "We discussed the quoted wording",
+            "Error: fictional missing target",
+            "no results",
         ] {
             assert_eq!(serialized.matches(once).count(), 1);
         }
