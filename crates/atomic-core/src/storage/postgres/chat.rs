@@ -6,6 +6,59 @@ use crate::storage::traits::*;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+async fn write_message(
+    conn: &mut sqlx::PgConnection,
+    db_id: &str,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+) -> StorageResult<ChatMessage> {
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let message_index: Option<i32> = sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT COALESCE(MAX(message_index), -1) + 1 FROM chat_messages WHERE conversation_id = $1 AND db_id = $2",
+        )
+        .bind(conversation_id)
+        .bind(db_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+    let message_index = message_index.unwrap_or(0);
+
+    sqlx::query(
+            "INSERT INTO chat_messages (id, conversation_id, role, content, created_at, message_index, db_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&message_id)
+        .bind(conversation_id)
+        .bind(role)
+        .bind(content)
+        .bind(&now)
+        .bind(message_index as i32)
+        .bind(db_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+    sqlx::query("UPDATE conversations SET updated_at = $1 WHERE id = $2 AND db_id = $3")
+        .bind(&now)
+        .bind(conversation_id)
+        .bind(db_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+    Ok(ChatMessage {
+        id: message_id,
+        conversation_id: conversation_id.to_string(),
+        role: role.to_string(),
+        content: content.to_string(),
+        created_at: now,
+        message_index: message_index as i32,
+    })
+}
+
 async fn write_tool_calls(
     conn: &mut sqlx::PgConnection,
     db_id: &str,
@@ -837,50 +890,38 @@ impl ChatStore for PostgresStorage {
         role: &str,
         content: &str,
     ) -> StorageResult<ChatMessage> {
-        let message_id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-
-        let message_index: Option<i32> = sqlx::query_scalar::<_, Option<i32>>(
-            "SELECT COALESCE(MAX(message_index), -1) + 1 FROM chat_messages WHERE conversation_id = $1 AND db_id = $2",
-        )
-        .bind(conversation_id)
-        .bind(&self.db_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        let message_index = message_index.unwrap_or(0);
-
-        sqlx::query(
-            "INSERT INTO chat_messages (id, conversation_id, role, content, created_at, message_index, db_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(&message_id)
-        .bind(conversation_id)
-        .bind(role)
-        .bind(content)
-        .bind(&now)
-        .bind(message_index as i32)
-        .bind(&self.db_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-
-        sqlx::query("UPDATE conversations SET updated_at = $1 WHERE id = $2 AND db_id = $3")
-            .bind(&now)
-            .bind(conversation_id)
-            .bind(&self.db_id)
-            .execute(&self.pool)
+        let mut conn = self
+            .pool
+            .acquire()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        write_message(&mut conn, &self.db_id, conversation_id, role, content).await
+    }
 
-        Ok(ChatMessage {
-            id: message_id,
-            conversation_id: conversation_id.to_string(),
-            role: role.to_string(),
-            content: content.to_string(),
-            created_at: now,
-            message_index: message_index as i32,
-        })
+    async fn save_chat_reply(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<ChatMessage> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let message =
+            write_message(&mut tx, &self.db_id, conversation_id, "assistant", content).await?;
+        write_tool_calls(&mut tx, &self.db_id, &message.id, tool_calls).await?;
+        write_citations(&mut tx, &self.db_id, &message.id, citations).await?;
+        sqlx::query("UPDATE conversations SET atomic_citation_index=GREATEST(atomic_citation_index,$1) WHERE id=$2 AND db_id=$3")
+            .bind(citation_index).bind(conversation_id).bind(&self.db_id).execute(&mut *tx).await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(message)
     }
 
     async fn save_tool_calls(

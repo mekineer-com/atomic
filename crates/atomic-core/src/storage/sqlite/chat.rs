@@ -135,6 +135,29 @@ impl SqliteStorage {
         })
     }
 
+    pub(crate) fn save_chat_reply_sync(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<ChatMessage> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::chat::save_chat_reply(
+            &conn,
+            conversation_id,
+            content,
+            tool_calls,
+            citations,
+            citation_index,
+        )
+    }
+
     pub(crate) fn save_tool_calls_sync(
         &self,
         message_id: &str,
@@ -217,6 +240,32 @@ impl SqliteStorage {
 
 #[async_trait]
 impl ChatStore for SqliteStorage {
+    async fn save_chat_reply(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<ChatMessage> {
+        let storage = self.clone();
+        let conversation_id = conversation_id.to_string();
+        let content = content.to_string();
+        let tool_calls = tool_calls.to_vec();
+        let citations = citations.to_vec();
+        tokio::task::spawn_blocking(move || {
+            storage.save_chat_reply_sync(
+                &conversation_id,
+                &content,
+                &tool_calls,
+                &citations,
+                citation_index,
+            )
+        })
+        .await
+        .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
     async fn get_chat_citation_index(&self, conversation_id: &str) -> StorageResult<i32> {
         let storage = self.clone();
         let conversation_id = conversation_id.to_string();

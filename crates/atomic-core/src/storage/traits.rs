@@ -685,6 +685,16 @@ pub trait ChatStore: Send + Sync {
         content: &str,
     ) -> StorageResult<ChatMessage>;
 
+    /// Commit an assistant reply and its tool/citation records atomically.
+    async fn save_chat_reply(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        tool_calls: &[ChatToolCall],
+        citations: &[ChatCitation],
+        citation_index: i32,
+    ) -> StorageResult<ChatMessage>;
+
     /// Save tool calls associated with a message.
     async fn save_tool_calls(
         &self,

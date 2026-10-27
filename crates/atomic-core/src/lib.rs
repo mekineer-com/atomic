@@ -2637,6 +2637,25 @@ impl AtomicCore {
             .await
     }
 
+    /// Publish already-executed reply records and assistant text in one transaction.
+    /// Caller holds the sitting lock; preparing records and Retry admission are separate.
+    pub async fn save_chat_reply(
+        &self,
+        conversation_id: &str,
+        content: &str,
+        records: &agent::ChatToolRecords,
+    ) -> Result<ChatMessage, AtomicCoreError> {
+        self.storage
+            .save_chat_reply_sync(
+                conversation_id,
+                content,
+                &records.tool_calls,
+                &records.citations,
+                records.citation_index,
+            )
+            .await
+    }
+
     /// Update a conversation (title, archive status)
     pub async fn update_conversation(
         &self,

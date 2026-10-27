@@ -2227,31 +2227,33 @@ where
     // Run agent loop with canvas context
     let mut result = run_agent_loop(provider_config, model, ctx).await?;
 
-    // Save assistant message
+    // Publish text, records and citation numbering together before emitting completion.
     {
+        let citation_index = result
+            .citations
+            .iter()
+            .map(|citation| citation.citation_index)
+            .max()
+            .unwrap_or(0);
         let saved_msg = storage
-            .save_message_sync(conversation_id, "assistant", &result.message.content)
+            .save_chat_reply_sync(
+                conversation_id,
+                &result.message.content,
+                &result.tool_calls,
+                &result.citations,
+                citation_index,
+            )
             .await
             .map_err(|e| e.to_string())?;
 
-        result.message.id = saved_msg.id.clone();
-        result.message.message_index = saved_msg.message_index;
+        result.message = saved_msg;
 
         for tool_call in &mut result.tool_calls {
-            tool_call.message_id = saved_msg.id.clone();
+            tool_call.message_id = result.message.id.clone();
         }
-        storage
-            .save_tool_calls_sync(&saved_msg.id, &result.tool_calls)
-            .await
-            .map_err(|e| e.to_string())?;
-
         for citation in &mut result.citations {
-            citation.message_id = saved_msg.id.clone();
+            citation.message_id = result.message.id.clone();
         }
-        storage
-            .save_citations_sync(&saved_msg.id, &result.citations)
-            .await
-            .map_err(|e| e.to_string())?;
     }
 
     // Emit completion event
@@ -2618,12 +2620,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 8, 9]
         );
+        let before_publication = reopened.get_conversation(cid).await.unwrap().unwrap();
+        for failure in [
+            "BEFORE INSERT ON chat_citations WHEN NEW.citation_index=9",
+            "BEFORE UPDATE OF atomic_citation_index ON conversations",
+        ] {
+            reopened
+                .database()
+                .unwrap()
+                .conn
+                .lock()
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fail_publication {failure}
+                    BEGIN SELECT RAISE(ABORT, 'fictional publication failure'); END;"
+                ))
+                .unwrap();
+            assert!(
+                reopened
+                    .save_chat_reply(cid, reply_text, &records)
+                    .await
+                    .is_err()
+            );
+            let unchanged = reopened.get_conversation(cid).await.unwrap().unwrap();
+            assert_eq!(unchanged.messages.len(), before_publication.messages.len());
+            assert_eq!(
+                unchanged.conversation.updated_at,
+                before_publication.conversation.updated_at
+            );
+            let unanswered = unchanged
+                .messages
+                .iter()
+                .find(|row| row.message.id == user.id)
+                .unwrap();
+            assert_eq!(unanswered.tool_calls.len(), 2);
+            assert_eq!(unanswered.citations.len(), 2);
+            let db = reopened.database().unwrap();
+            let conn = db.conn.lock().unwrap();
+            let indexed: i32 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM chat_messages_fts WHERE content=?1",
+                    [reply_text],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                indexed, 0,
+                "failed publication must not leak a search result"
+            );
+            conn.execute_batch("DROP TRIGGER fail_publication;")
+                .unwrap();
+        }
         let reply = reopened
-            .save_message(cid, "assistant", reply_text)
-            .await
-            .unwrap();
-        reopened
-            .save_chat_tool_records(cid, &reply.id, &records)
+            .save_chat_reply(cid, reply_text, &records)
             .await
             .unwrap();
         let saved = reopened.get_conversation(cid).await.unwrap().unwrap();
@@ -2759,7 +2808,17 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(
+            core.save_chat_reply(other_id, "Must not publish across sittings", &attempt)
+                .await
+                .is_err()
+        );
         let other = core.get_conversation(other_id).await.unwrap().unwrap();
+        assert_eq!(
+            other.messages.len(),
+            1,
+            "conflicting records must roll back the assistant row"
+        );
         assert!(
             other.messages[0].tool_calls.is_empty(),
             "conflict must roll back earlier inserts"

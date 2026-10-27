@@ -554,6 +554,8 @@ dispatch! {
         => sqlite: remove_tag_from_scope_sync, pg_trait: ChatStore, pg_method: remove_tag_from_scope;
     fn save_message_sync(&self, conversation_id: &str, role: &str, content: &str) -> Result<ChatMessage, AtomicCoreError>
         => sqlite: save_message_sync, pg_trait: ChatStore, pg_method: save_message;
+    fn save_chat_reply_sync(&self, conversation_id: &str, content: &str, tool_calls: &[ChatToolCall], citations: &[ChatCitation], citation_index: i32) -> Result<ChatMessage, AtomicCoreError>
+        => sqlite: save_chat_reply_sync, pg_trait: ChatStore, pg_method: save_chat_reply;
     fn save_tool_calls_sync(&self, message_id: &str, tool_calls: &[ChatToolCall]) -> Result<(), AtomicCoreError>
         => sqlite: save_tool_calls_sync, pg_trait: ChatStore, pg_method: save_tool_calls;
     fn save_citations_sync(&self, message_id: &str, citations: &[ChatCitation]) -> Result<(), AtomicCoreError>

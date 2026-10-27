@@ -911,6 +911,45 @@ pub fn save_chat_tool_state(
     Ok(())
 }
 
+/// Publish text and its tool/citation records together, or leave the turn unanswered.
+pub fn save_chat_reply(
+    conn: &Connection,
+    conversation_id: &str,
+    content: &str,
+    tool_calls: &[ChatToolCall],
+    citations: &[ChatCitation],
+    citation_index: i32,
+) -> Result<ChatMessage, AtomicCoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let (message_id, message_index) = save_message(&tx, conversation_id, "assistant", content)?;
+    tx.execute(
+        "INSERT INTO chat_messages_fts(id, conversation_id, content) VALUES (?1, ?2, ?3)",
+        rusqlite::params![message_id, conversation_id, content],
+    )?;
+    save_tool_calls(&tx, &message_id, tool_calls)?;
+    save_citations(&tx, &message_id, citations)?;
+    tx.execute(
+        "UPDATE conversations SET atomic_citation_index=MAX(atomic_citation_index, ?1) WHERE id=?2",
+        rusqlite::params![citation_index, conversation_id],
+    )?;
+    let message = tx.query_row(
+        "SELECT created_at FROM chat_messages WHERE id=?1",
+        [&message_id],
+        |row| {
+            Ok(ChatMessage {
+                id: message_id.clone(),
+                conversation_id: conversation_id.to_string(),
+                role: "assistant".to_string(),
+                content: content.to_string(),
+                created_at: row.get(0)?,
+                message_index,
+            })
+        },
+    )?;
+    tx.commit()?;
+    Ok(message)
+}
+
 /// Get scope tag IDs for a conversation
 pub fn get_scope_tag_ids(
     conn: &Connection,
