@@ -18,6 +18,8 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
   is_archived: boolean;
+  user_id?: string | null;
+  soul_id?: string | null;
   atomic_chat_state?: AtomicChatState | null;
 }
 
@@ -34,13 +36,18 @@ export interface AtomicChatState {
 }
 
 export function chatRetryMessageId(conversation: Conversation, messages: ChatMessageWithContext[]): string | null {
-  const active = conversation.atomic_chat_state?.active;
-  if (conversation.atomic_chat_state?.phase !== 'open' || !active || active.status === 'uncertain') return null;
-  const user = messages.find(message => message.id === active.user_message_id);
+  const state = conversation.atomic_chat_state;
+  if (state ? state.phase !== 'open' : !(conversation.user_id && conversation.soul_id)) return null;
+  const active = state?.active;
+  if (active?.status === 'uncertain') return null;
+  const user = active ? messages.find(message => message.id === active.user_message_id)
+    : [...messages].reverse().find(message => message.role === 'user' || message.role === 'assistant');
+  if (!active && (user?.role !== 'user' || user.id.startsWith('temp-')
+    || user.content.trim().startsWith('This Atomic session is ending. Write a recap of your activity'))) return null;
   if (user?.tool_calls.some(call => call.status === 'running'
     || (typeof call.tool_output === 'object' && call.tool_output !== null
       && 'outcome_unknown' in call.tool_output && call.tool_output.outcome_unknown === true))) return null;
-  return active.user_message_id;
+  return active?.user_message_id ?? user?.id ?? null;
 }
 
 function chatIsRunning(state?: AtomicChatState | null): boolean {
@@ -91,6 +98,11 @@ export interface ChatMessageWithContext extends ChatMessage {
 export interface ConversationWithMessages extends Conversation {
   tags: Tag[];
   messages: ChatMessageWithContext[];
+}
+
+function conversationSummary(saved: ConversationWithMessages): ConversationWithTags {
+  return { ...saved, message_count: saved.messages.length,
+    last_message_preview: saved.messages[saved.messages.length - 1]?.content.slice(0, 100) ?? null };
 }
 
 interface PageContext {
@@ -252,13 +264,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (result) {
         set({
           view: 'conversation',
-          currentConversation: {
-            ...result,
-            message_count: result.messages.length,
-            last_message_preview: result.messages.length > 0
-              ? result.messages[result.messages.length - 1].content.slice(0, 100)
-              : null,
-          },
+          currentConversation: conversationSummary(result),
           messages: result.messages,
           isLoading: false,
           ...(get().currentConversation?.id !== id || (result.atomic_chat_state && !chatIsRunning(result.atomic_chat_state))
@@ -441,23 +447,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   refreshConversation: async () => {
     const current = get().currentConversation;
     if (!current) return;
-    const send = get().lastSend;
     const version = ++refreshVersion;
     try {
       const saved = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', { conversationId: current.id });
-      if (!saved || version !== refreshVersion || get().currentConversation !== current || get().lastSend !== send) return;
-      set({ currentConversation: { ...saved, message_count: saved.messages.length,
-        last_message_preview: saved.messages[saved.messages.length - 1]?.content.slice(0, 100) ?? null }, messages: saved.messages,
+      if (!saved || version !== refreshVersion || get().currentConversation !== current) return;
+      set({ currentConversation: conversationSummary(saved), messages: saved.messages,
         ...(saved.atomic_chat_state && !chatIsRunning(saved.atomic_chat_state) ? { isStreaming: false, streamingContent: '', streamingToolCalls: [] } : {}),
+        ...(saved.atomic_chat_state?.phase === 'closed' ? { error: null } : {}),
       });
     } catch (error) {
-      if (version === refreshVersion && get().currentConversation === current && get().lastSend === send) set({ error: String(error) });
+      if (version === refreshVersion && get().currentConversation === current) set({ error: String(error) });
     }
   },
 
   retryMessage: async (userMessageId) => {
     const current = get().currentConversation;
-    if (!current?.atomic_chat_state) return;
+    if (!current || (!current.atomic_chat_state && !(current.user_id && current.soul_id))) return;
     ++refreshVersion;
     set({ isStreaming: true, streamingContent: '', streamingToolCalls: [], error: null });
     try {
@@ -470,11 +475,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   startNewSitting: async () => {
     const current = get().currentConversation;
-    if (!current) return;
+    if (!current || get().isLoading) return;
     const draft = get().drafts[current.id] ?? '';
-    const next = await get().createConversation(current.tags.map(tag => tag.id));
-    get().setDraft(next.id, draft);
-    useUIStore.getState().setChatSidebarConversationId(next.id);
+    try {
+      const next = await get().createConversation(current.tags.map(tag => tag.id));
+      get().setDraft(next.id, draft);
+      get().setDraft(current.id, '');
+      useUIStore.getState().setChatSidebarConversationId(next.id);
+    } catch {
+      // createConversation already records the error for the visible chat.
+    }
   },
 
   sendMessage: async (content: string) => {
@@ -553,9 +563,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           unsaved = !saved.messages.some(m => m.role === 'user' && m.content === content
             && !messages.some(previous => previous.id === m.id));
           if (get().currentConversation?.id === currentConversation.id && get().lastSend === userMessage) {
-            set({ messages: saved.messages, currentConversation: {
-              ...get().currentConversation!, atomic_chat_state: saved.atomic_chat_state,
-            } });
+            set({ messages: saved.messages, currentConversation: conversationSummary(saved) });
           }
         }
       }
@@ -573,13 +581,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   endMemuSession: async () => {
     const { currentConversation, fetchConversations } = get();
     if (!currentConversation) return;
+    const integrated = Boolean(currentConversation.atomic_chat_state || (currentConversation.user_id && currentConversation.soul_id));
     set({ isEndingSession: true, error: null });
     try {
       await getTransport().invoke('end_memu_session', {
         conversationId: currentConversation.id,
       });
-      if (currentConversation.atomic_chat_state) {
-        if (get().currentConversation?.id === currentConversation.id) await get().refreshConversation();
+      if (integrated && get().currentConversation?.id === currentConversation.id) await get().refreshConversation();
+      if (currentConversation.atomic_chat_state
+        || (get().currentConversation?.id === currentConversation.id && get().currentConversation?.atomic_chat_state)) {
         set({ isEndingSession: false });
         return;
       }
@@ -588,6 +598,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       useUIStore.getState().setChatSidebarConversationId(null);
     } catch (e) {
       set({ error: String(e), isEndingSession: false });
+      if (get().currentConversation?.id === currentConversation.id && integrated) {
+        await get().refreshConversation();
+      }
     }
   },
 

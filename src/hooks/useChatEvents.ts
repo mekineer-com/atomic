@@ -87,7 +87,6 @@ export function useChatEvents(conversationId: string | null) {
         if (useChatStore.getState().currentConversation?.atomic_chat_state?.phase !== 'closing') {
           completeMessage(payload.message);
         }
-        if (useChatStore.getState().currentConversation?.atomic_chat_state) refresh();
       }
     }));
 

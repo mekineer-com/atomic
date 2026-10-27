@@ -39,6 +39,7 @@ export function ChatView() {
   const messages = useChatStore(s => s.messages);
   const isLoading = useChatStore(s => s.isLoading);
   const isStreaming = useChatStore(s => s.isStreaming);
+  const isEndingSession = useChatStore(s => s.isEndingSession);
   const streamingContent = useChatStore(s => s.streamingContent);
   const streamingToolCalls = useChatStore(s => s.streamingToolCalls);
   const error = useChatStore(s => s.error);
@@ -52,6 +53,8 @@ export function ChatView() {
     if (currentConversation) setDraft(currentConversation.id, value);
   };
   const lifecycle = currentConversation?.atomic_chat_state;
+  const retryMessageId = currentConversation ? chatRetryMessageId(currentConversation, messages) : null;
+  const turnError = lifecycle?.phase === 'closed' ? null : lifecycle?.active?.error;
   const displayMessages = useMemo(() => currentConversation ? chatDisplayMessages(currentConversation, messages) : [], [currentConversation, messages]);
 
   const openReader = useUIStore(s => s.openReader);
@@ -62,7 +65,7 @@ export function ChatView() {
   });
 
   const [isSending, setIsSending] = useState(false);
-  const inputBlocked = isStreaming || isSending || Boolean(lifecycle && (lifecycle.phase !== 'open' || lifecycle.active));
+  const inputBlocked = isStreaming || isSending || Boolean(lifecycle && (lifecycle.phase !== 'open' || lifecycle.active || retryMessageId));
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -140,7 +143,7 @@ export function ChatView() {
     try {
       if (await sendMessage(content) === 'refused' && currentConversation) {
         const drafts = useChatStore.getState().drafts;
-        if (Object.prototype.hasOwnProperty.call(drafts, currentConversation.id) && !drafts[currentConversation.id]) {
+        if (drafts[currentConversation.id] === '') {
           setDraft(currentConversation.id, inputValue);
         }
       }
@@ -246,20 +249,29 @@ export function ChatView() {
         {lifecycle?.phase === 'closing' && lifecycle.recap?.outcome.status !== 'complete' && (
           <div role="status" className="text-sm text-[var(--color-text-secondary)]">
             {lifecycle.recap?.outcome.status === 'failed' || lifecycle.recap?.outcome.status === 'uncertain'
-              ? lifecycle.recap.outcome.error : 'Preparing session recap...'}
+              ? `${lifecycle.recap.outcome.error} Use Retry close-out to continue.`
+              : isEndingSession ? 'Preparing session recap...' : 'Close-out is unfinished. Use Retry close-out; any active work will finish first.'}
             {streamingContent && <p className="mt-2 whitespace-pre-wrap">{streamingContent}</p>}
           </div>
         )}
 
-        {currentConversation && chatRetryMessageId(currentConversation, messages) && (
-          <button disabled={isStreaming || isSending} className="text-sm text-[var(--color-accent)] disabled:opacity-50"
-            onClick={() => retryMessage(chatRetryMessageId(currentConversation, messages)!)}>Retry reply</button>
+        {lifecycle?.phase === 'closing' && lifecycle.recap?.outcome.status === 'complete' && !isEndingSession && (
+          <p className="text-sm text-[var(--color-text-secondary)]">Recap saved. Use Retry close-out to finish saving the session.</p>
+        )}
+
+        {lifecycle?.phase === 'open' && lifecycle.active && !retryMessageId && !isStreaming && (
+          <p className="text-sm text-[var(--color-text-secondary)]">This turn's outcome is unknown. Use End Session to close out from saved history.</p>
+        )}
+
+        {lifecycle && retryMessageId && !isStreaming && (
+          <button disabled={isSending} className="text-sm text-[var(--color-accent)] disabled:opacity-50"
+            onClick={() => retryMessage(retryMessageId)}>Retry reply</button>
         )}
 
         {/* Error message */}
-        {(error || lifecycle?.active?.error) && (
+        {(error || turnError) && (
           <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
-            {error ?? lifecycle?.active?.error}
+            {error ?? turnError}
           </div>
         )}
 
@@ -270,7 +282,7 @@ export function ChatView() {
       {lifecycle?.phase === 'closed' ? (
         <div className="p-4 text-sm text-[var(--color-text-secondary)]">
           This sitting is closed and read-only.
-          <button onClick={startNewSitting} className="ml-3 text-[var(--color-accent)]">Start new sitting</button>
+          <button onClick={startNewSitting} disabled={isLoading} className="ml-3 text-[var(--color-accent)] disabled:opacity-50">Start new sitting</button>
         </div>
       ) : <ChatInput
         value={inputValue}

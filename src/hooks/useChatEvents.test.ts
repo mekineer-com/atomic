@@ -41,7 +41,7 @@ it('reloads scoped durable changes, reconnects and missed events without treatin
     handlers.get('server-events-lagged')!({ skipped: 2 });
     window.dispatchEvent(new CustomEvent('atomic:transport-connection', { detail: { connected: true } }));
     handlers.get('chat-complete')!({ conversation_id: 'test-chat', message: { id: 'summary' } });
-    expect(refresh).toHaveBeenCalledTimes(4);
+    expect(refresh).toHaveBeenCalledTimes(3);
     expect(complete).not.toHaveBeenCalled();
   } finally {
     await act(async () => root.unmount());

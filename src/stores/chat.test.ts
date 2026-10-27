@@ -29,11 +29,13 @@ it('retains drafts per conversation and carries the closed sitting draft to a ne
   useChatStore.getState().setDraft(current.id, 'Refused draft');
   invoke.mockResolvedValueOnce([]);
   useChatStore.getState().showList();
+  await Promise.resolve();
   expect(useChatStore.getState().drafts[current.id]).toBe('Refused draft');
   useChatStore.setState({ currentConversation: current });
   invoke.mockResolvedValue({ ...current, id: 'new-chat' });
   await useChatStore.getState().startNewSitting();
   expect(useChatStore.getState().drafts['new-chat']).toBe('Refused draft');
+  expect(useChatStore.getState().drafts[current.id]).toBe('');
   expect(useUIStore.getState().chatSidebarConversationId).toBe('new-chat');
   useChatStore.getState().reset();
   expect(useChatStore.getState().drafts).toEqual({});
@@ -52,15 +54,83 @@ it('offers running/failed recovery but not Retry for unknown tool effects', () =
     }] };
   expect(chatRetryMessageId(current, [user])).toBeNull();
   expect(chatRetryMessageId({ ...current, atomic_chat_state: { ...current.atomic_chat_state, phase: 'closed' } }, [])).toBeNull();
+  expect(chatRetryMessageId({ ...current, atomic_chat_state: { ...current.atomic_chat_state,
+    active: { ...current.atomic_chat_state.active, status: 'uncertain' } } }, [])).toBeNull();
+});
+
+it('recognizes legacy unanswered input without offering standalone or recap Retry', () => {
+  const conversation = { ...useChatStore.getState().currentConversation!, user_id: 'TestOwner', soul_id: 'TestSoul' };
+  const user: ChatMessageWithContext = { id: 'legacy-user', conversation_id: conversation.id, role: 'user',
+    content: 'Unanswered question', created_at: '', message_index: 0, tool_calls: [], citations: [] };
+  expect(chatRetryMessageId(conversation, [user])).toBe(user.id);
+  expect(chatRetryMessageId({ ...conversation, user_id: null, soul_id: null }, [user])).toBeNull();
+  expect(chatRetryMessageId(conversation, [user, { ...user, id: 'answer', role: 'assistant' }])).toBeNull();
+  expect(chatRetryMessageId(conversation, [{ ...user,
+    content: 'This Atomic session is ending. Write a recap of your activity' }])).toBeNull();
+  expect(chatRetryMessageId({ ...conversation, atomic_chat_state: { backend: 'api', phase: 'open', active: null } }, [user])).toBe(user.id);
+});
+
+it.each([true, false])('refreshes Closing state after End fails, initiallyBound=%s', async (initiallyBound) => {
+  const state = {
+    backend: 'api' as const, phase: 'open' as const, active: null,
+  };
+  const current = { ...useChatStore.getState().currentConversation!, user_id: 'TestOwner', soul_id: 'TestSoul',
+    atomic_chat_state: initiallyBound ? state : null };
+  useChatStore.setState({ currentConversation: current });
+  invoke.mockImplementation((command: string) => command === 'end_memu_session'
+    ? Promise.reject('Fictional recap failure')
+    : Promise.resolve({ ...current, atomic_chat_state: { ...state, phase: 'closing' }, messages: [] }));
+  await useChatStore.getState().endMemuSession();
+  expect(useChatStore.getState().currentConversation?.atomic_chat_state?.phase).toBe('closing');
+  expect(useChatStore.getState().error).toBe('Fictional recap failure');
+  expect(invoke.mock.calls.map(([command]) => command)).toEqual(['end_memu_session', 'get_conversation']);
+});
+
+it('keeps a newly bound legacy sitting visible after successful End', async () => {
+  const current = { ...useChatStore.getState().currentConversation!, user_id: 'TestOwner', soul_id: 'TestSoul' };
+  useChatStore.setState({ currentConversation: current });
+  invoke.mockResolvedValueOnce({}).mockResolvedValueOnce({ ...current, messages: [],
+    atomic_chat_state: { backend: 'api', phase: 'closed', active: null } });
+  await useChatStore.getState().endMemuSession();
+  expect(useChatStore.getState().currentConversation?.id).toBe(current.id);
+  expect(useChatStore.getState().currentConversation?.atomic_chat_state?.phase).toBe('closed');
+  expect(invoke.mock.calls.map(([command]) => command)).toEqual(['end_memu_session', 'get_conversation']);
+});
+
+it('keeps the carried draft consumed and handles a failed new-sitting creation', async () => {
+  const current = useChatStore.getState().currentConversation!;
+  useChatStore.getState().setDraft(current.id, 'Carry once');
+  invoke.mockResolvedValueOnce({ ...current, id: 'next-chat' });
+  await useChatStore.getState().startNewSitting();
+  useChatStore.setState({ currentConversation: current });
+  invoke.mockResolvedValueOnce({ ...current, id: 'another-chat' });
+  await useChatStore.getState().startNewSitting();
+  expect(useChatStore.getState().drafts['another-chat']).toBe('');
+  invoke.mockRejectedValueOnce('Fictional create failure');
+  await expect(useChatStore.getState().startNewSitting()).resolves.toBeUndefined();
+  expect(useChatStore.getState().error).toBe('Fictional create failure');
+});
+
+it('does not create two sittings when Start is pressed twice before creation finishes', async () => {
+  const current = useChatStore.getState().currentConversation!;
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const first = useChatStore.getState().startNewSitting();
+  await useChatStore.getState().startNewSitting();
+  expect(invoke).toHaveBeenCalledTimes(1);
+  finish({ ...current, id: 'next-chat' });
+  await first;
 });
 
 it('refreshes durable state without discarding drafts or switching to a late conversation', async () => {
   const current = useChatStore.getState().currentConversation!;
   useChatStore.getState().setDraft(current.id, 'Newer typing');
+  useChatStore.setState({ error: 'Earlier live failure' });
   const saved = { ...current, atomic_chat_state: { backend: 'api', phase: 'closed', active: null }, messages: [] };
   invoke.mockResolvedValue(saved);
   await useChatStore.getState().refreshConversation();
   expect(useChatStore.getState().currentConversation?.atomic_chat_state?.phase).toBe('closed');
+  expect(useChatStore.getState().error).toBeNull();
   expect(useChatStore.getState().drafts[current.id]).toBe('Newer typing');
   let finish!: (value: unknown) => void;
   invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));

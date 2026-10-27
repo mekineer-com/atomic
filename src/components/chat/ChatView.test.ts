@@ -43,7 +43,9 @@ it('renders a reopened saved recap as a summary in a read-only sitting', async (
   useChatStore.setState({ currentConversation: {
     id: 'reopened-chat', title: 'Test', created_at: '', updated_at: '', is_archived: false,
     tags: [], message_count: 2, last_message_preview: 'Saved recap',
-    atomic_chat_state: { backend: 'api', phase: 'closed', active: null,
+    atomic_chat_state: { backend: 'api', phase: 'closed', active: {
+      user_message_id: 'old-user', status: 'failed', error: 'Historical turn failure',
+    },
       recap: { request_message_id: 'control', outcome: { status: 'complete', reply_message_id: 'summary' } } },
   }, isStreaming: false, error: null, messages: [
     { id: 'control', role: 'user', content: 'End Session instruction must stay hidden', conversation_id: 'reopened-chat',
@@ -56,8 +58,24 @@ it('renders a reopened saved recap as a summary in a read-only sitting', async (
     expect(container.textContent).toContain('Session recap');
     expect(container.textContent).toContain('Saved recap text');
     expect(container.textContent).not.toContain('End Session instruction');
+    expect(container.textContent).not.toContain('Historical turn failure');
     expect(container.textContent).toContain('Start new sitting');
     expect(input.props).toBeNull();
+    const current = useChatStore.getState().currentConversation!;
+    await act(async () => useChatStore.setState({ currentConversation: { ...current,
+      atomic_chat_state: { ...current.atomic_chat_state!, phase: 'closing' } }, isEndingSession: false }));
+    expect(container.textContent).toContain('Use Retry close-out to finish saving');
+    await act(async () => useChatStore.setState({ currentConversation: { ...current,
+      atomic_chat_state: { backend: 'api', phase: 'open', active: { user_message_id: 'missing-turn',
+        status: 'uncertain', error: 'Unclear outcome' } } }, messages: [] }));
+    expect(container.textContent).toContain('Use End Session to close out');
+    expect(container.textContent).not.toContain('Retry reply');
+    await act(async () => useChatStore.setState({ currentConversation: { ...current,
+      atomic_chat_state: { backend: 'api', phase: 'open', active: { user_message_id: 'missing-turn',
+        status: 'running', error: null } } }, isStreaming: true }));
+    expect(container.textContent).not.toContain('Retry reply');
+    await act(async () => useChatStore.setState({ isStreaming: false }));
+    expect(container.textContent).toContain('Retry reply');
   } finally {
     await act(async () => root.unmount());
     useChatStore.setState(previous);
