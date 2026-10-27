@@ -1125,13 +1125,13 @@ fn get_system_prompt(scope_description: &str, memu_tool_config: Option<&MemuTool
 - Prefer targeted edit_atom operations. Use replace_all only for intentional full-content replacement
 - When you create a new atom, include [[atom_id]] in the final response so the user can open it
 - If the initial search doesn't find enough, try different search queries
-- When you find relevant information, cite it using [N] notation where N is a sequential number
+- When you find relevant information, cite the exact [N] marker shown in the tool result; never renumber it
 - Be honest if you cannot find information - do not make things up
 - Keep responses concise but informative
 - If the user asks about something not in their knowledge base, say so
 
 When citing sources:
-- Use [1], [2], etc. for each unique source
+- Keep each source's tool-assigned marker, even when the numbers have gaps or start above [1]
 - Place citations immediately after the relevant claim
 - You can cite the same source multiple times if needed"#,
         scope_description
@@ -1417,12 +1417,12 @@ impl ChatToolSession {
         }
     }
 
-    pub(crate) fn bind_user_turn(
+    pub(crate) async fn bind_user_turn(
         &mut self,
         message_id: &str,
         high_water: i32,
         prior: Vec<ChatCitation>,
-        calls: Vec<ChatToolCall>,
+        mut calls: Vec<ChatToolCall>,
         citations: Vec<ChatCitation>,
     ) -> Result<(), String> {
         let mut catalog = BTreeMap::<i32, ChatCitation>::new();
@@ -1431,7 +1431,7 @@ impl ChatToolSession {
                 if existing.atom_id != citation.atom_id
                     || existing.chunk_index != citation.chunk_index
                 {
-                    return Err("This sitting contains conflicting citation numbers".to_string());
+                    return Err("This sitting has conflicting citation numbers and cannot continue safely. Restore its original chat backend or start a new sitting.".to_string());
                 }
             }
             catalog
@@ -1441,8 +1441,32 @@ impl ChatToolSession {
         self.citation_index = high_water.max(catalog.keys().next_back().copied().unwrap_or(0));
         self.prior_citations = catalog.into_values().collect();
         self.durable_message_id = Some(message_id.to_string());
+        let mut interrupted = false;
+        for call in &mut calls {
+            if call.status == "running" {
+                let previous_output = call.tool_output.take();
+                call.status = "failed".to_string();
+                call.tool_output = Some(json!({
+                    "error": "Interrupted; outcome unknown. Do not repeat this tool.",
+                    "outcome_unknown": true, "previous_output": previous_output,
+                }));
+                interrupted = true;
+            }
+        }
         self.tool_calls_record = calls;
         self.citations = citations;
+        if interrupted {
+            self.checkpoint().await?;
+        }
+        if self.tool_calls_record.iter().any(|call| {
+            call.tool_output
+                .as_ref()
+                .and_then(|output| output.get("outcome_unknown"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        }) {
+            return Err("A previous tool was interrupted; its outcome is unknown. Do not resume or repeat it. Close out from saved history or start a new sitting.".to_string());
+        }
         Ok(())
     }
 
@@ -1461,6 +1485,7 @@ impl ChatToolSession {
     }
 
     async fn checkpoint(&self) -> Result<(), String> {
+        // Keep issued snapshots even if local-atom cleanup removed their rows mid-turn.
         if let Some(message_id) = &self.durable_message_id {
             self.storage
                 .save_chat_tool_state_sync(
@@ -1495,30 +1520,42 @@ impl ChatToolSession {
         tool_name: &str,
         tool_args: serde_json::Value,
     ) -> Result<ChatToolResult, String> {
-        if self
+        let record_index = if let Some(index) = self
             .tool_calls_record
             .iter()
-            .any(|record| record.id == call_id)
+            .position(|record| record.id == call_id)
         {
-            return Err(
-                "This tool call is already recorded; reconcile its outcome instead of replaying it"
-                    .to_string(),
-            );
-        }
-        self.tool_calls_record.push(ChatToolCall {
-            id: call_id.to_string(),
-            message_id: self.durable_message_id.clone().unwrap_or_default(),
-            tool_name: tool_name.to_string(),
-            tool_input: tool_args.clone(),
-            tool_output: None,
-            status: "running".to_string(),
-            created_at: Utc::now().to_rfc3339(),
-            completed_at: None,
-        });
+            let record = &mut self.tool_calls_record[index];
+            let not_executed = record
+                .tool_output
+                .as_ref()
+                .and_then(|output| output.get("executed"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(false);
+            if !not_executed || record.tool_name != tool_name || record.tool_input != tool_args {
+                return Err("This tool call is already recorded and was not run again. Review its saved outcome before continuing.".to_string());
+            }
+            record.status = "running".to_string();
+            record.tool_output = None;
+            record.completed_at = None;
+            index
+        } else {
+            self.tool_calls_record.push(ChatToolCall {
+                id: call_id.to_string(),
+                message_id: self.durable_message_id.clone().unwrap_or_default(),
+                tool_name: tool_name.to_string(),
+                tool_input: tool_args.clone(),
+                tool_output: None,
+                status: "running".to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                completed_at: None,
+            });
+            self.tool_calls_record.len() - 1
+        };
         if let Err(error) = self.checkpoint().await {
             let record = self
                 .tool_calls_record
-                .last_mut()
+                .get_mut(record_index)
                 .expect("unstarted tool record");
             record.status = "failed".to_string();
             record.completed_at = Some(Utc::now().to_rfc3339());
@@ -1788,7 +1825,7 @@ impl ChatToolSession {
 
         let record = self
             .tool_calls_record
-            .last_mut()
+            .get_mut(record_index)
             .expect("running tool record");
         record.tool_output = Some(serde_json::Value::String(tool_result.clone()));
         record.status = if is_error { "failed" } else { "complete" }.to_string();
@@ -2215,7 +2252,7 @@ mod tests {
                     {"id": "memory:two", "kind": "memory", "summary": "A fictional observatory"},
                 ]}))
             })
-            .expect(2)
+            .expect(3)
             .mount(&server)
             .await;
         let scope = MemuToolConfig {
@@ -2366,6 +2403,46 @@ mod tests {
             .await
             .unwrap();
         assert!(result.content.starts_with("[10]"));
+        drop(next);
+        reopened
+            .database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM chat_citations WHERE message_id=?1",
+                [&next_user.id],
+            )
+            .unwrap();
+        let after_cleanup = reopened
+            .save_message(cid, "user", "After cleanup")
+            .await
+            .unwrap();
+        let mut after_cleanup = reopened
+            .chat_tool_session(
+                cid,
+                &after_cleanup.id,
+                HashMap::new(),
+                scope.clone(),
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        let result = after_cleanup
+            .execute(
+                "after-cleanup-search",
+                "search_atoms",
+                json!({"query": "detail"}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.content.starts_with("[12]"),
+            "deleted failed-turn citations must not reset the stored high-water mark"
+        );
 
         let other = core
             .create_conversation(&[], None, Some(("TestOwner", "OtherSoul")))
@@ -2459,7 +2536,7 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .execute("DROP TABLE chat_tool_calls", [])
+            .execute_batch("CREATE TRIGGER fail_start BEFORE INSERT ON chat_tool_calls BEGIN SELECT RAISE(ABORT, 'fictional save failure'); END;")
             .unwrap();
         assert!(
             session
@@ -2474,12 +2551,190 @@ mod tests {
                 .contains("Tool was not executed")
         );
         assert!(events.lock().unwrap().is_empty());
-        let records = session.finish();
-        assert_eq!(records.tool_calls[0].status, "failed");
+        assert_eq!(session.tool_calls_record[0].status, "failed");
         assert_eq!(
-            records.tool_calls[0].tool_output.as_ref().unwrap()["executed"],
+            session.tool_calls_record[0].tool_output.as_ref().unwrap()["executed"],
             false
         );
+        core.database()
+            .unwrap()
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_start;")
+            .unwrap();
+        session
+            .execute("other-tool", "focus_atom", json!({"atom_id": "another"}))
+            .await
+            .unwrap();
+        assert!(
+            session
+                .execute(
+                    "unstarted-tool",
+                    "focus_atom",
+                    json!({"atom_id": "changed"})
+                )
+                .await
+                .is_err()
+        );
+        session
+            .execute(
+                "unstarted-tool",
+                "focus_atom",
+                json!({"atom_id": "fictional"}),
+            )
+            .await
+            .unwrap();
+        let records = session.finish();
+        assert_eq!(records.tool_calls.len(), 2);
+        assert_eq!(records.tool_calls[0].status, "complete");
+        assert!(
+            records.tool_calls[0]
+                .tool_output
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("fictional")
+        );
+        assert!(
+            records.tool_calls[1]
+                .tool_output
+                .as_ref()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("another")
+        );
+    }
+
+    #[tokio::test]
+    async fn stopped_writer_running_records_become_unknown_and_refuse_continuation() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("atomic.db");
+        let core = AtomicCore::open_or_create(&db_path).unwrap();
+        let conversation = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conversation.conversation.id;
+        let user = core
+            .save_message(cid, "user", "An interrupted turn")
+            .await
+            .unwrap();
+        let scope = MemuToolConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            user_id: "TestOwner".to_string(),
+            soul_id: "TestSoul".to_string(),
+        };
+        let mut session = core
+            .chat_tool_session(
+                cid,
+                &user.id,
+                HashMap::new(),
+                scope.clone(),
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .unwrap();
+        session.tool_calls_record.push(ChatToolCall {
+            id: "interrupted-tool".to_string(),
+            message_id: user.id.clone(),
+            tool_name: "edit_atom".to_string(),
+            tool_input: json!({"atom_id": "memory:fictional"}),
+            tool_output: Some(json!({"partial": "known observation"})),
+            status: "running".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            completed_at: None,
+        });
+        session.checkpoint().await.unwrap();
+        drop(session); // Simulated stopped writer, not a live tool being cancelled.
+        let reopened = AtomicCore::open_or_create(&db_path).unwrap();
+        for _ in 0..2 {
+            let error = reopened
+                .chat_tool_session(
+                    cid,
+                    &user.id,
+                    HashMap::new(),
+                    scope.clone(),
+                    None,
+                    None,
+                    |_| {},
+                )
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("outcome is unknown"));
+        }
+        let saved = reopened.get_conversation(cid).await.unwrap().unwrap();
+        let call = &saved.messages[0].tool_calls[0];
+        assert_eq!(call.status, "failed");
+        assert_eq!(call.tool_output.as_ref().unwrap()["outcome_unknown"], true);
+        assert_eq!(
+            call.tool_output.as_ref().unwrap()["previous_output"]["partial"],
+            "known observation"
+        );
+        assert!(call.completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_api_citations_refuse_backend_migration_without_rewriting_history() {
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let conversation = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conversation.conversation.id;
+        for source in ["one", "two"] {
+            let message = core
+                .save_message(cid, "assistant", "API reply [1]")
+                .await
+                .unwrap();
+            core.storage
+                .save_citations_sync(
+                    &message.id,
+                    &[ChatCitation {
+                        id: Uuid::new_v4().to_string(),
+                        message_id: message.id.clone(),
+                        citation_index: 1,
+                        atom_id: format!("memory:{source}"),
+                        chunk_index: None,
+                        excerpt: source.to_string(),
+                        relevance_score: None,
+                    }],
+                )
+                .await
+                .unwrap();
+        }
+        let user = core.save_message(cid, "user", "Continue").await.unwrap();
+        let error = core
+            .chat_tool_session(
+                cid,
+                &user.id,
+                HashMap::new(),
+                MemuToolConfig {
+                    base_url: "http://127.0.0.1:1".to_string(),
+                    user_id: "TestOwner".to_string(),
+                    soul_id: "TestSoul".to_string(),
+                },
+                None,
+                None,
+                |_| {},
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("Restore its original chat backend")
+        );
+        let saved = core.get_conversation(cid).await.unwrap().unwrap();
+        assert_eq!(saved.messages[0].citations[0].atom_id, "memory:one");
+        assert_eq!(saved.messages[1].citations[0].atom_id, "memory:two");
     }
 
     #[tokio::test]
@@ -2892,5 +3147,10 @@ mod tests {
         assert!(prompt.contains("You are a helpful AI assistant"));
         assert!(prompt.contains("Guidelines:"));
         assert!(!prompt.contains("Guidelines for Atomic:"));
+        assert!(
+            prompt
+                .contains("cite the exact [N] marker shown in the tool result; never renumber it")
+        );
+        assert!(!prompt.contains("N is a sequential number"));
     }
 }

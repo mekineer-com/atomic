@@ -280,9 +280,6 @@ impl Database {
     /// To add a migration:
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
-    ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 24;
-
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         Self::run_migrations_internal(conn, false)
     }
@@ -1124,7 +1121,7 @@ impl Database {
             if !exists {
                 conn.execute_batch("ALTER TABLE conversations ADD COLUMN atomic_citation_index INTEGER NOT NULL DEFAULT 0;")?;
             }
-            conn.execute_batch(&format!("PRAGMA user_version = {};", Self::LATEST_VERSION))?;
+            conn.execute_batch("PRAGMA user_version = 24;")?;
         }
 
         // --- Triggers (recreated every startup to stay current) ---

@@ -2550,6 +2550,7 @@ impl AtomicCore {
     }
 
     /// Bind tool execution to a saved user turn in an integrated conversation.
+    /// Caller holds the sitting lock and has established that its prior writer stopped.
     pub async fn chat_tool_session<F>(
         &self,
         conversation_id: &str,
@@ -2613,6 +2614,7 @@ impl AtomicCore {
                 user_turn.tool_calls.clone(),
                 user_turn.citations.clone(),
             )
+            .await
             .map_err(AtomicCoreError::Validation)?;
         Ok(session)
     }
