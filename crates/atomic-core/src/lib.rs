@@ -2609,7 +2609,7 @@ impl AtomicCore {
         session
             .bind_user_turn(
                 user_message_id,
-                high_water,
+                Some(high_water),
                 prior,
                 user_turn.tool_calls.clone(),
                 user_turn.citations.clone(),
@@ -2804,7 +2804,7 @@ impl AtomicCore {
         agent::send_chat_message_with_canvas(
             self.storage.clone(),
             conversation_id,
-            content,
+            agent::ApiChatInput::New(content),
             on_event,
             self.settings_for_background().await,
             None,
@@ -2834,7 +2834,7 @@ impl AtomicCore {
         agent::send_chat_message_with_canvas(
             self.storage.clone(),
             conversation_id,
-            content,
+            agent::ApiChatInput::New(content),
             on_event,
             Some(settings),
             memu_tool_config,
@@ -2844,6 +2844,35 @@ impl AtomicCore {
         )
         .await
         .map_err(|e| AtomicCoreError::DatabaseOperation(e))
+    }
+
+    /// Execute an admitted API turn without inserting another user message.
+    /// Caller owns the sitting lock through completion and has drained the prior writer.
+    pub async fn execute_saved_chat_turn<F>(
+        &self,
+        conversation_id: &str,
+        user_message_id: &str,
+        on_event: F,
+        external_settings: HashMap<String, String>,
+        scope: agent::MemuToolConfig,
+    ) -> Result<ChatMessageWithContext, AtomicCoreError>
+    where
+        F: Fn(ChatEvent) + Send + Sync + 'static,
+    {
+        let settings = self.settings_with_overrides(external_settings).await?;
+        agent::send_chat_message_with_canvas(
+            self.storage.clone(),
+            conversation_id,
+            agent::ApiChatInput::Saved(user_message_id),
+            on_event,
+            Some(settings),
+            Some(scope),
+            None,
+            None,
+            Some(self.canvas_cache.clone()),
+        )
+        .await
+        .map_err(AtomicCoreError::DatabaseOperation)
     }
 
     // ==================== Canvas Operations ====================

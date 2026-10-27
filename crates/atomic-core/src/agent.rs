@@ -8,12 +8,12 @@ use crate::atom_edit::{AtomEditOperation, apply_atom_edits};
 use crate::chunking::count_tokens;
 use crate::embedding::EmbeddingEvent;
 use crate::models::{
-    Atom, AtomKind, AtomWithTags, ChatCitation, ChatMessage, ChatMessageWithContext, ChatToolCall,
+    Atom, AtomKind, AtomWithTags, ChatCitation, ChatMessageWithContext, ChatToolCall,
     SemanticSearchResult, Tag,
 };
 use crate::providers::traits::LlmConfig;
 use crate::providers::types::{
-    GenerationParams, Message, MessageRole, StreamDelta, ToolDefinition,
+    GenerationParams, Message, MessageRole, StreamDelta, ToolCall, ToolDefinition,
 };
 use crate::providers::{ProviderConfig, ProviderType, create_streaming_llm_provider};
 use crate::search::{SearchMode, SearchOptions};
@@ -1384,6 +1384,20 @@ pub struct ChatToolResult {
     pub is_error: bool,
 }
 
+fn saved_tool_output(call: &ChatToolCall) -> Result<String, String> {
+    match &call.tool_output {
+        Some(serde_json::Value::String(output)) => Ok(output.clone()),
+        Some(output) => Ok(output.to_string()),
+        None => Err("Saved tool call has no recorded outcome".to_string()),
+    }
+}
+
+/// New input is inserted once; saved input must already have managed admission.
+pub enum ApiChatInput<'a> {
+    New(&'a str),
+    Saved(&'a str),
+}
+
 /// Input for MCP's existing Atomic Claude request. Resume never resends Presence.
 pub struct ClaudeChatInput {
     pub system_prompt: Option<String>,
@@ -1408,6 +1422,9 @@ pub struct ChatToolSession {
     prior_citations: Vec<ChatCitation>,
     durable_message_id: Option<String>,
     tool_calls_record: Vec<ChatToolCall>,
+    restored_call_count: usize,
+    reused_call_ids: HashMap<String, usize>,
+    sitting_wide_citations: bool,
 }
 
 impl ChatToolSession {
@@ -1445,6 +1462,9 @@ impl ChatToolSession {
             prior_citations: Vec::new(),
             durable_message_id: None,
             tool_calls_record: Vec::new(),
+            restored_call_count: 0,
+            reused_call_ids: HashMap::new(),
+            sitting_wide_citations: false,
         }
     }
 
@@ -1514,7 +1534,7 @@ impl ChatToolSession {
     pub(crate) async fn bind_user_turn(
         &mut self,
         message_id: &str,
-        high_water: i32,
+        high_water: Option<i32>,
         prior: Vec<ChatCitation>,
         mut calls: Vec<ChatToolCall>,
         citations: Vec<ChatCitation>,
@@ -1532,7 +1552,10 @@ impl ChatToolSession {
                 .entry(citation.citation_index)
                 .or_insert_with(|| citation.clone());
         }
-        self.citation_index = high_water.max(catalog.keys().next_back().copied().unwrap_or(0));
+        self.sitting_wide_citations = high_water.is_some();
+        self.citation_index = high_water
+            .unwrap_or(0)
+            .max(catalog.keys().next_back().copied().unwrap_or(0));
         self.prior_citations = catalog.into_values().collect();
         self.durable_message_id = Some(message_id.to_string());
         let mut interrupted = false;
@@ -1547,6 +1570,8 @@ impl ChatToolSession {
                 interrupted = true;
             }
         }
+        self.restored_call_count = calls.len();
+        self.reused_call_ids.clear();
         self.tool_calls_record = calls;
         self.citations = citations;
         if interrupted {
@@ -1587,7 +1612,11 @@ impl ChatToolSession {
                     message_id,
                     &self.tool_calls_record,
                     &self.citations,
-                    self.citation_index,
+                    if self.sitting_wide_citations {
+                        self.citation_index
+                    } else {
+                        0
+                    },
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1614,11 +1643,37 @@ impl ChatToolSession {
         tool_name: &str,
         tool_args: serde_json::Value,
     ) -> Result<ChatToolResult, String> {
-        let record_index = if let Some(index) = self
+        let existing = self
             .tool_calls_record
             .iter()
             .position(|record| record.id == call_id)
-        {
+            .or_else(|| self.reused_call_ids.get(call_id).copied());
+        if let Some(index) = existing {
+            let record = &self.tool_calls_record[index];
+            if record.tool_name != tool_name || record.tool_input != tool_args {
+                return Err("This tool call ID already identifies a different request".to_string());
+            }
+        }
+        if tool_name == "edit_atom" {
+            if let Some(index) = self.tool_calls_record[..self.restored_call_count]
+                .iter()
+                .position(|record| {
+                    record.status == "complete"
+                        && record.tool_name == tool_name
+                        && record.tool_input == tool_args
+                })
+            {
+                let content = saved_tool_output(&self.tool_calls_record[index])?;
+                if existing.is_none() {
+                    self.reused_call_ids.insert(call_id.to_string(), index);
+                }
+                return Ok(ChatToolResult {
+                    content,
+                    is_error: false,
+                });
+            }
+        }
+        let record_index = if let Some(index) = existing {
             let record = &mut self.tool_calls_record[index];
             let not_executed = record
                 .tool_output
@@ -1626,7 +1681,7 @@ impl ChatToolSession {
                 .and_then(|output| output.get("executed"))
                 .and_then(serde_json::Value::as_bool)
                 == Some(false);
-            if !not_executed || record.tool_name != tool_name || record.tool_input != tool_args {
+            if !not_executed {
                 return Err("This tool call is already recorded and was not run again. Review its saved outcome before continuing.".to_string());
             }
             record.status = "running".to_string();
@@ -1953,7 +2008,7 @@ async fn run_agent_loop(
     provider_config: ProviderConfig,
     model: String,
     mut ctx: AgentContext,
-) -> Result<ChatMessageWithContext, String> {
+) -> Result<(String, ChatToolRecords), String> {
     let provider = create_streaming_llm_provider(&provider_config)
         .map_err(|e| format!("Failed to create streaming provider: {}", e))?;
     let max_iterations = 10;
@@ -2046,23 +2101,7 @@ async fn run_agent_loop(
             }
         } else {
             // No tool calls - we have the final answer
-            let content = response.content;
-
-            let conversation_id = ctx.tools.conversation_id.clone();
-            let records = ctx.tools.finish();
-
-            return Ok(ChatMessageWithContext {
-                message: ChatMessage {
-                    id: Uuid::new_v4().to_string(),
-                    conversation_id,
-                    role: "assistant".to_string(),
-                    content,
-                    created_at: Utc::now().to_rfc3339(),
-                    message_index: 0, // Set when saving
-                },
-                tool_calls: records.tool_calls,
-                citations: records.citations,
-            });
+            return Ok((response.content, ctx.tools.finish()));
         }
     }
 
@@ -2103,7 +2142,7 @@ where
     send_chat_message_with_canvas(
         storage,
         conversation_id,
-        content,
+        ApiChatInput::New(content),
         on_event,
         external_settings,
         None,
@@ -2119,7 +2158,7 @@ where
 pub async fn send_chat_message_with_canvas<F>(
     storage: StorageBackend,
     conversation_id: &str,
-    content: &str,
+    input: ApiChatInput<'_>,
     on_event: F,
     external_settings: Option<std::collections::HashMap<String, String>>,
     memu_tool_config: Option<MemuToolConfig>,
@@ -2165,11 +2204,75 @@ where
         (provider_config, model)
     };
 
-    // Save user message
-    storage
-        .save_message_sync(conversation_id, "user", content)
+    let mut conversation = storage
+        .get_conversation_sync(conversation_id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .ok_or("Conversation not found")?;
+    if let Some(scope) = &memu_tool_config {
+        if conversation.conversation.user_id.as_deref() != Some(scope.user_id.as_str())
+            || conversation.conversation.soul_id.as_deref() != Some(scope.soul_id.as_str())
+        {
+            return Err("Chat owner/Soul does not match".to_string());
+        }
+    }
+    let (user_message_id, expected_user_message_id, page_context, canvas_context) = match input {
+        ApiChatInput::New(content) => {
+            if conversation.conversation.atomic_chat_state.is_some() {
+                return Err(
+                    "This sitting requires saved-turn admission before API execution".to_string(),
+                );
+            }
+            let message = storage
+                .save_message_sync(conversation_id, "user", content)
+                .await
+                .map_err(|e| e.to_string())?;
+            let id = message.id.clone();
+            conversation.messages.push(ChatMessageWithContext {
+                message,
+                tool_calls: vec![],
+                citations: vec![],
+            });
+            (id, None, page_context, canvas_context)
+        }
+        ApiChatInput::Saved(id) => {
+            if memu_tool_config.is_none() {
+                return Err("Saved API turns require an integrated owner/Soul scope".to_string());
+            }
+            let state = conversation
+                .conversation
+                .atomic_chat_state
+                .as_ref()
+                .ok_or("Saved API execution requires an admitted turn")?;
+            if state.backend != crate::AtomicChatBackend::Api {
+                return Err("This sitting requires claude_code=true. Restore its original backend or start a new sitting.".to_string());
+            }
+            let active = state
+                .active
+                .as_ref()
+                .filter(|turn| {
+                    turn.user_message_id == id
+                        && turn.status == crate::AtomicChatTurnStatus::Running
+                })
+                .ok_or("Saved API execution requires the matching running ordinary turn")?;
+            if state.phase == crate::AtomicChatPhase::Closed
+                || conversation
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|row| matches!(row.message.role.as_str(), "user" | "assistant"))
+                    .is_none_or(|row| row.message.id != id || row.message.role != "user")
+            {
+                return Err("Saved API execution requires the latest unanswered turn in an unfinished sitting".to_string());
+            }
+            (
+                id.to_string(),
+                Some(id.to_string()),
+                active.page_context.clone(),
+                active.canvas_context.clone(),
+            )
+        }
+    };
 
     // Get conversation context
     let scope_tag_ids = storage
@@ -2181,16 +2284,6 @@ where
         .await
         .map_err(|e| e.to_string())?;
 
-    // Get conversation messages via get_conversation_sync and convert to provider format
-    let conversation = storage
-        .get_conversation_sync(conversation_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let messages = match conversation {
-        Some(conv) => chat_messages_to_provider_messages(conv.messages),
-        None => Vec::new(),
-    };
-
     // Build message history for API, with canvas context appended to system prompt
     let system_prompt = chat_system_prompt(
         &settings_map,
@@ -2199,8 +2292,45 @@ where
         page_context.as_ref(),
         canvas_context.as_ref(),
     );
+    let mut tools = ChatToolSession::new(
+        storage.clone(),
+        conversation_id.to_string(),
+        scope_tag_ids,
+        settings_map,
+        memu_tool_config,
+        page_context,
+        canvas_context,
+        canvas_cache,
+        Arc::clone(&on_event),
+    );
+    if tools.memu_tool_config.is_some() {
+        let turn = conversation
+            .messages
+            .iter()
+            .find(|row| row.message.id == user_message_id)
+            .ok_or("Saved user turn not found")?;
+        tools
+            .bind_user_turn(
+                &user_message_id,
+                None,
+                vec![],
+                turn.tool_calls.clone(),
+                turn.citations.clone(),
+            )
+            .await?;
+    }
     let mut api_messages = vec![Message::system(system_prompt)];
-    api_messages.extend(messages);
+    api_messages.extend(chat_messages_to_provider_messages(conversation.messages));
+    for call in &tools.tool_calls_record {
+        api_messages.push(Message::assistant_with_tool_calls(vec![ToolCall {
+            id: call.id.clone(),
+            call_type: Some("function".to_string()),
+            function: None,
+            name: Some(call.tool_name.clone()),
+            arguments: Some(call.tool_input.to_string()),
+        }]));
+        api_messages.push(Message::tool_result(&call.id, saved_tool_output(call)?));
+    }
 
     // Truncate to fit context window for providers with limited context
     let api_messages = truncate_messages_to_context(
@@ -2211,52 +2341,40 @@ where
     // Create agent context
     let ctx = AgentContext {
         messages: api_messages,
-        tools: ChatToolSession::new(
-            storage.clone(),
-            conversation_id.to_string(),
-            scope_tag_ids,
-            settings_map,
-            memu_tool_config,
-            page_context,
-            canvas_context,
-            canvas_cache,
-            Arc::clone(&on_event),
-        ),
+        tools,
     };
 
     // Run agent loop with canvas context
-    let mut result = run_agent_loop(provider_config, model, ctx).await?;
+    let (content, mut records) = run_agent_loop(provider_config, model, ctx).await?;
 
     // Publish text, records and citation numbering together before emitting completion.
-    {
-        let saved_msg = storage
-            .save_chat_reply_sync(
-                conversation_id,
-                None,
-                &result.message.content,
-                &result.tool_calls,
-                &result.citations,
-                0, // API citations are per reply, not a native sitting high-water mark.
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+    let saved_msg = storage
+        .save_chat_reply_sync(
+            conversation_id,
+            expected_user_message_id.as_deref(),
+            &content,
+            &records.tool_calls,
+            &records.citations,
+            0, // API citations are per reply, not a native sitting high-water mark.
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
-        result.message = saved_msg;
-
-        for tool_call in &mut result.tool_calls {
-            tool_call.message_id = result.message.id.clone();
-        }
-        for citation in &mut result.citations {
-            citation.message_id = result.message.id.clone();
-        }
+    for tool_call in &mut records.tool_calls {
+        tool_call.message_id = saved_msg.id.clone();
     }
-
-    // Emit completion event
+    for citation in &mut records.citations {
+        citation.message_id = saved_msg.id.clone();
+    }
+    let result = ChatMessageWithContext {
+        message: saved_msg,
+        tool_calls: records.tool_calls,
+        citations: records.citations,
+    };
     on_event(ChatEvent::Complete {
         conversation_id: conversation_id.to_string(),
         message: result.clone(),
     });
-
     Ok(result)
 }
 
@@ -2271,6 +2389,461 @@ mod tests {
             content: content.to_string(),
             page_context: None,
             canvas_context: None,
+        }
+    }
+
+    fn api_test_settings(url: &str) -> HashMap<String, String> {
+        [
+            ("provider", "openai_compat"),
+            ("openai_compat_base_url", url),
+            ("openai_compat_api_key", "fictional-key"),
+            ("openai_compat_llm_model", "fictional-model"),
+            ("openai_compat_context_length", "200000"),
+            ("memu_log_prompts", "false"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+    }
+
+    fn api_test_response(delta: serde_json::Value) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"delta":delta,"finish_reason":null}]})
+            ))
+    }
+
+    #[tokio::test]
+    async fn saved_api_retry_restores_results_without_editing_twice_or_reusing_old_citations() {
+        use crate::{AtomicChatBackend as Backend, AtomicChatRequest as Request};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("api-retry.db")).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conv.conversation.id;
+        core.save_message(cid, "system", "Fictional Soul Presence")
+            .await
+            .unwrap();
+        core.save_message(cid, "user", "An earlier question")
+            .await
+            .unwrap();
+        let old = core
+            .save_message(cid, "assistant", "Earlier source [1]")
+            .await
+            .unwrap();
+        core.save_chat_tool_records(
+            cid,
+            &old.id,
+            &ChatToolRecords {
+                tool_calls: vec![],
+                citation_index: 40,
+                prior_citations: vec![],
+                citations: vec![ChatCitation {
+                    id: Uuid::new_v4().to_string(),
+                    message_id: old.id.clone(),
+                    citation_index: 1,
+                    atom_id: "memory:older".into(),
+                    chunk_index: None,
+                    excerpt: "Older evidence".into(),
+                    relevance_score: None,
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        let server = MockServer::start().await;
+        let scope = MemuToolConfig {
+            base_url: server.uri(),
+            user_id: "TestOwner".into(),
+            soul_id: "TestSoul".into(),
+        };
+        let args = json!({"atom_id":"memory:fictional", "edits":[{"operation":"append","text":"\naddition"}]});
+        let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let captured = Arc::clone(&requests);
+        Mock::given(method("POST")).and(path("/v1/chat/completions")).respond_with(move |request: &wiremock::Request| {
+            let number = { let mut rows = captured.lock().unwrap(); rows.push(serde_json::from_slice(&request.body).unwrap()); rows.len() - 1 };
+            match number {
+                0 | 2 | 4 => api_test_response(json!({"tool_calls":[{"index":0, "id":format!("edit-{number}"), "type":"function", "function":{"name":"edit_atom", "arguments":args.to_string()}}]})),
+                1 => ResponseTemplate::new(500).set_body_string("Fictional failure after completed edit"),
+                _ => api_test_response(json!({"content":"Edited [1]."})),
+            }
+        }).expect(6).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/memory/memory:fictional"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"id":"memory:fictional","summary":"Base text"})),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/memory/memory:fictional"))
+            .and(body_json(
+                json!({"summary":"Base text\naddition","edited_by":"atomic:agent"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"id":"memory:fictional","summary":"Base text\naddition"}),
+                ),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let settings = api_test_settings(&server.uri());
+        let mut request = new_chat_request("Append to the fictional memory");
+        if let Request::New { page_context, .. } = &mut request {
+            *page_context = Some(
+                serde_json::from_value(json!({"view":"reader", "atom_id":"memory:fictional"}))
+                    .unwrap(),
+            );
+        }
+        let user = core
+            .admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &request,
+                200_000,
+            )
+            .await
+            .unwrap();
+        assert!(
+            core.execute_saved_chat_turn(cid, &user.id, |_| {}, settings.clone(), scope.clone())
+                .await
+                .is_err()
+        );
+        let failed = core.get_conversation(cid).await.unwrap().unwrap();
+        let turn = failed
+            .messages
+            .iter()
+            .find(|row| row.message.id == user.id)
+            .unwrap();
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].status, "complete");
+        let output = saved_tool_output(&turn.tool_calls[0]).unwrap();
+        let mut replay_tools = ChatToolSession::new(
+            core.storage.clone(),
+            cid.to_string(),
+            vec![],
+            settings.clone(),
+            Some(scope.clone()),
+            None,
+            None,
+            None,
+            Arc::new(|_| {}),
+        );
+        replay_tools
+            .bind_user_turn(
+                &user.id,
+                None,
+                vec![],
+                turn.tool_calls.clone(),
+                turn.citations.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replay_tools
+                .execute(
+                    "reused-alias",
+                    "edit_atom",
+                    turn.tool_calls[0].tool_input.clone()
+                )
+                .await
+                .unwrap()
+                .content,
+            output
+        );
+        assert!(
+            replay_tools
+                .execute(
+                    "reused-alias",
+                    "get_atom",
+                    json!({"atom_id":"memory:fictional"})
+                )
+                .await
+                .err()
+                .unwrap()
+                .contains("different request")
+        );
+        drop(replay_tools);
+        core.fail_chat_turn(cid, &user.id, "Fictional model failure", false)
+            .await
+            .unwrap();
+        core.admit_chat_turn(
+            cid,
+            "TestOwner",
+            "TestSoul",
+            &Backend::Api,
+            &Request::Retry {
+                user_message_id: user.id.clone(),
+            },
+            200_000,
+        )
+        .await
+        .unwrap();
+        let result = core
+            .execute_saved_chat_turn(cid, &user.id, |_| {}, settings.clone(), scope.clone())
+            .await
+            .unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.citations.len(), 1);
+        assert_eq!(result.citations[0].citation_index, 1);
+        assert_eq!(result.citations[0].atom_id, "memory:fictional");
+        assert_eq!(
+            core.storage
+                .get_chat_citation_index_sync(cid)
+                .await
+                .unwrap(),
+            40
+        );
+        let again = core
+            .admit_chat_turn(
+                cid,
+                "TestOwner",
+                "TestSoul",
+                &Backend::Api,
+                &new_chat_request("Append again intentionally"),
+                200_000,
+            )
+            .await
+            .unwrap();
+        let result = core
+            .execute_saved_chat_turn(cid, &again.id, |_| {}, settings, scope)
+            .await
+            .unwrap();
+        assert_eq!(result.citations[0].citation_index, 1);
+        let saved = core.get_conversation(cid).await.unwrap().unwrap();
+        assert!(
+            saved
+                .conversation
+                .atomic_chat_state
+                .unwrap()
+                .active
+                .is_none()
+        );
+        assert_eq!(
+            saved
+                .messages
+                .iter()
+                .filter(|row| row.message.content == "Append to the fictional memory")
+                .count(),
+            1
+        );
+        let requests = requests.lock().unwrap();
+        let replay = requests[2]["messages"].as_array().unwrap();
+        assert_eq!(
+            replay
+                .iter()
+                .filter(|message| message["role"] == "user"
+                    && message["content"] == "Append to the fictional memory")
+                .count(),
+            1
+        );
+        assert!(
+            requests[2]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "get_current_page_context")
+        );
+        assert_eq!(replay.last().unwrap()["content"], output);
+        for pair in replay
+            .windows(2)
+            .filter(|pair| pair[0]["tool_calls"].is_array())
+        {
+            assert_eq!(pair[1]["role"], "tool");
+            assert_eq!(pair[1]["tool_call_id"], pair[0]["tool_calls"][0]["id"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_api_replay_preserves_known_failures_without_restoring_capabilities() {
+        use crate::AtomicChatBackend as Backend;
+        use wiremock::{
+            Mock, MockServer,
+            matchers::{method, path},
+        };
+        for provider in ["openai_compat", "ollama"] {
+            let dir = TempDir::new().unwrap();
+            let core = AtomicCore::open_or_create(dir.path().join("api-history.db")).unwrap();
+            let conv = core
+                .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+                .await
+                .unwrap();
+            let cid = &conv.conversation.id;
+            let user = core
+                .admit_chat_turn(
+                    cid,
+                    "TestOwner",
+                    "TestSoul",
+                    &Backend::Api,
+                    &new_chat_request("Continue from saved results"),
+                    200_000,
+                )
+                .await
+                .unwrap();
+            let calls = vec![
+                ChatToolCall {
+                    id: "old-page".into(),
+                    message_id: user.id.clone(),
+                    tool_name: "get_current_page_context".into(),
+                    tool_input: json!({}),
+                    tool_output: Some(json!("Previous page\nverbatim")),
+                    status: "complete".into(),
+                    created_at: user.created_at.clone(),
+                    completed_at: None,
+                },
+                ChatToolCall {
+                    id: "failed-read".into(),
+                    message_id: user.id.clone(),
+                    tool_name: "get_atom".into(),
+                    tool_input: json!({"atom_id":"memory:missing"}),
+                    tool_output: Some(json!({"error":"Fictional missing memory"})),
+                    status: "failed".into(),
+                    created_at: user.created_at.clone(),
+                    completed_at: None,
+                },
+            ];
+            core.storage
+                .save_chat_tool_state_sync(cid, &user.id, &calls, &[], 0)
+                .await
+                .unwrap();
+            let server = MockServer::start().await;
+            let response = if provider == "ollama" {
+                wiremock::ResponseTemplate::new(200).set_body_string(
+                format!("{}\n", json!({"message":{"role":"assistant","content":"Saved evidence considered."},"done":true}))
+            )
+            } else {
+                api_test_response(json!({"content":"Saved evidence considered."}))
+            };
+            Mock::given(method("POST"))
+                .and(path(if provider == "ollama" {
+                    "/api/chat"
+                } else {
+                    "/v1/chat/completions"
+                }))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let mut settings = api_test_settings(&server.uri());
+            if provider == "ollama" {
+                settings.extend([
+                    ("provider".to_string(), "ollama".to_string()),
+                    ("ollama_host".to_string(), server.uri()),
+                    (
+                        "ollama_llm_model".to_string(),
+                        "fictional-model".to_string(),
+                    ),
+                    ("ollama_context_length".to_string(), "200000".to_string()),
+                ]);
+            }
+            let scope = MemuToolConfig {
+                base_url: server.uri(),
+                user_id: "TestOwner".into(),
+                soul_id: "TestSoul".into(),
+            };
+            let wrong = MemuToolConfig {
+                soul_id: "OtherSoul".into(),
+                ..scope.clone()
+            };
+            assert!(
+                core.execute_saved_chat_turn(cid, &user.id, |_| {}, settings.clone(), wrong)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                core.execute_saved_chat_turn(
+                    cid,
+                    "other-turn",
+                    |_| {},
+                    settings.clone(),
+                    scope.clone()
+                )
+                .await
+                .is_err()
+            );
+            core.execute_saved_chat_turn(cid, &user.id, |_| {}, settings.clone(), scope.clone())
+                .await
+                .unwrap();
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert!(
+                !request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "get_current_page_context")
+            );
+            let results: Vec<_> = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .collect();
+            assert_eq!(results[0]["content"], "Previous page\nverbatim");
+            assert_eq!(
+                results[1]["content"],
+                "{\"error\":\"Fictional missing memory\"}"
+            );
+            let call = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["tool_calls"].is_array())
+                .unwrap();
+            assert_eq!(
+                call["tool_calls"][0]["function"]["arguments"].is_object(),
+                provider == "ollama"
+            );
+            let user = core
+                .admit_chat_turn(
+                    cid,
+                    "TestOwner",
+                    "TestSoul",
+                    &Backend::Api,
+                    &new_chat_request("Interrupted work"),
+                    200_000,
+                )
+                .await
+                .unwrap();
+            let mut interrupted = calls[0].clone();
+            interrupted.id = "interrupted".into();
+            interrupted.message_id = user.id.clone();
+            interrupted.status = "running".into();
+            interrupted.tool_output = None;
+            core.storage
+                .save_chat_tool_state_sync(cid, &user.id, &[interrupted], &[], 0)
+                .await
+                .unwrap();
+            assert!(
+                core.execute_saved_chat_turn(cid, &user.id, |_| {}, settings, scope)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unknown")
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            let saved = core.get_conversation(cid).await.unwrap().unwrap();
+            assert_eq!(
+                saved.messages.last().unwrap().tool_calls[0]
+                    .tool_output
+                    .as_ref()
+                    .unwrap()["outcome_unknown"],
+                true
+            );
         }
     }
 
