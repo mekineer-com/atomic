@@ -720,6 +720,12 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       ...(a.pageContext ? { page_context: a.pageContext } : {}),
     }),
   },
+  retry_chat_message: {
+    method: 'POST',
+    path: (a) => `/api/conversations/${encodeURIComponent(a.conversationId as string)}/retry`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ user_message_id: a.userMessageId }),
+  },
 
   // ==================== Ollama ====================
   test_ollama: {

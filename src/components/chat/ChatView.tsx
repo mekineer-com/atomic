@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { MessageSquare } from 'lucide-react';
-import { useChatStore } from '../../stores/chat';
+import { chatRetryMessageId, useChatStore, type Conversation, type ChatMessageWithContext } from '../../stores/chat';
 import { useUIStore, type TabEntry } from '../../stores/ui';
 import { useChatEvents } from '../../hooks/useChatEvents';
 import { useContentSearch } from '../../hooks';
@@ -16,6 +16,24 @@ export function shouldOpenChatSearch(chatSidebarOpen: boolean, entry?: TabEntry)
       && /^(memory|category|entity):/.test(entry.atomId));
 }
 
+export function chatDisplayMessages(conversation: Conversation, messages: ChatMessageWithContext[]) {
+  const recap = conversation.atomic_chat_state?.recap;
+  const replyId = recap?.outcome.status === 'complete' ? recap.outcome.reply_message_id : null;
+  let legacyRecap = false;
+  return messages.flatMap(message => {
+    if (message.id === recap?.request_message_id
+      || (message.role === 'user'
+        && message.content.trim().startsWith('This Atomic session is ending. Write a recap of your activity')
+        && message.content.split('\n').includes('Full Atomic transcript:'))) {
+      legacyRecap = true;
+      return [];
+    }
+    const isRecap = message.id === replyId || (legacyRecap && message.role === 'assistant');
+    legacyRecap = false;
+    return [{ message, isRecap }];
+  });
+}
+
 export function ChatView() {
   const currentConversation = useChatStore(s => s.currentConversation);
   const messages = useChatStore(s => s.messages);
@@ -26,6 +44,15 @@ export function ChatView() {
   const error = useChatStore(s => s.error);
   const sendMessage = useChatStore(s => s.sendMessage);
   const goBack = useChatStore(s => s.goBack);
+  const retryMessage = useChatStore(s => s.retryMessage);
+  const startNewSitting = useChatStore(s => s.startNewSitting);
+  const setDraft = useChatStore(s => s.setDraft);
+  const inputValue = useChatStore(s => s.currentConversation ? s.drafts[s.currentConversation.id] ?? '' : '');
+  const setInputValue = (value: string) => {
+    if (currentConversation) setDraft(currentConversation.id, value);
+  };
+  const lifecycle = currentConversation?.atomic_chat_state;
+  const displayMessages = useMemo(() => currentConversation ? chatDisplayMessages(currentConversation, messages) : [], [currentConversation, messages]);
 
   const openReader = useUIStore(s => s.openReader);
   const chatSearchOwnsFind = useUIStore((s) => {
@@ -34,16 +61,16 @@ export function ChatView() {
     return shouldOpenChatSearch(s.chatSidebarOpen, entry);
   });
 
-  const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const inputBlocked = isStreaming || isSending || Boolean(lifecycle && (lifecycle.phase !== 'open' || lifecycle.active));
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
 
   // Combine all message content for search
   const allContent = useMemo(() => {
-    return messages.map(m => m.content).join('\n\n');
-  }, [messages]);
+    return displayMessages.map(({ message }) => message.content).join('\n\n');
+  }, [displayMessages]);
 
   // Content search across all messages
   const {
@@ -104,16 +131,18 @@ export function ChatView() {
   }, []);
 
   const handleSend = async () => {
-    if (!inputValue.trim() || isStreaming || isSending) return;
+    if (!inputValue.trim() || inputBlocked) return;
 
     const content = inputValue.trim();
     setInputValue('');
     setIsSending(true);
     scrollToBottom(); // Scroll to bottom when user sends a message
     try {
-      if (await sendMessage(content) === 'refused'
-        && useChatStore.getState().currentConversation?.id === currentConversation?.id) {
-        setInputValue(current => current === '' ? inputValue : current);
+      if (await sendMessage(content) === 'refused' && currentConversation) {
+        const drafts = useChatStore.getState().drafts;
+        if (Object.prototype.hasOwnProperty.call(drafts, currentConversation.id) && !drafts[currentConversation.id]) {
+          setDraft(currentConversation.id, inputValue);
+        }
       }
     } finally {
       setIsSending(false);
@@ -179,21 +208,23 @@ export function ChatView() {
           </div>
         )}
 
-        {messages.map((message) => (
-          <ChatMessage
-            key={message.id}
-            message={message}
-            onViewAtom={handleViewAtom}
-            searchQuery={isSearchOpen ? searchQuery : ''}
-            highlightText={highlightText}
-          />
+        {displayMessages.map(({ message, isRecap }) => (
+          <div key={message.id}>
+            {isRecap && <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-2">Session recap</h3>}
+            <ChatMessage
+              message={message}
+              onViewAtom={handleViewAtom}
+              searchQuery={isSearchOpen ? searchQuery : ''}
+              highlightText={highlightText}
+            />
+          </div>
         ))}
 
         {/* Streaming bubble — rendered for the whole streaming turn so tool
             calls show up while the model is still thinking and persist as
             streaming content flows in. ChatMessage handles the empty-content
             "Thinking…" fallback. */}
-        {isStreaming && (
+        {isStreaming && lifecycle?.phase !== 'closing' && (
           <ChatMessage
             message={{
               id: 'streaming',
@@ -212,10 +243,23 @@ export function ChatView() {
           />
         )}
 
+        {lifecycle?.phase === 'closing' && lifecycle.recap?.outcome.status !== 'complete' && (
+          <div role="status" className="text-sm text-[var(--color-text-secondary)]">
+            {lifecycle.recap?.outcome.status === 'failed' || lifecycle.recap?.outcome.status === 'uncertain'
+              ? lifecycle.recap.outcome.error : 'Preparing session recap...'}
+            {streamingContent && <p className="mt-2 whitespace-pre-wrap">{streamingContent}</p>}
+          </div>
+        )}
+
+        {currentConversation && chatRetryMessageId(currentConversation, messages) && (
+          <button disabled={isStreaming || isSending} className="text-sm text-[var(--color-accent)] disabled:opacity-50"
+            onClick={() => retryMessage(chatRetryMessageId(currentConversation, messages)!)}>Retry reply</button>
+        )}
+
         {/* Error message */}
-        {error && (
+        {(error || lifecycle?.active?.error) && (
           <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
-            {error}
+            {error ?? lifecycle?.active?.error}
           </div>
         )}
 
@@ -223,18 +267,23 @@ export function ChatView() {
       </div>
 
       {/* Input area */}
-      <ChatInput
+      {lifecycle?.phase === 'closed' ? (
+        <div className="p-4 text-sm text-[var(--color-text-secondary)]">
+          This sitting is closed and read-only.
+          <button onClick={startNewSitting} className="ml-3 text-[var(--color-accent)]">Start new sitting</button>
+        </div>
+      ) : <ChatInput
         value={inputValue}
         onChange={setInputValue}
         onSend={handleSend}
         onKeyDown={handleKeyDown}
-        disabled={isStreaming || isSending}
+        disabled={inputBlocked}
         placeholder={
           currentConversation.tags.length > 0
             ? `Ask about ${currentConversation.tags.map(t => t.name).join(', ')}...`
             : 'Ask anything about your knowledge base...'
         }
-      />
+      />}
     </div>
   );
 }

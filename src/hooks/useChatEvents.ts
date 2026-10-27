@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
-import { getTransport } from '../lib/transport';
+import { getTransport, TRANSPORT_CONNECTION_EVENT } from '../lib/transport';
 import { useChatStore, ChatMessageWithContext } from '../stores/chat';
+import { useDatabasesStore } from '../stores/databases';
 
 interface ChatStreamDelta {
   conversation_id: string;
@@ -43,6 +44,17 @@ export function useChatEvents(conversationId: string | null) {
 
     const transport = getTransport();
     const unsubs: Array<() => void> = [];
+    const refresh = () => { void useChatStore.getState().refreshConversation(); };
+    const onConnection = (event: Event) => {
+      if ((event as CustomEvent<{ connected: boolean }>).detail.connected) refresh();
+    };
+    window.addEventListener(TRANSPORT_CONNECTION_EVENT, onConnection);
+    unsubs.push(() => window.removeEventListener(TRANSPORT_CONNECTION_EVENT, onConnection));
+    unsubs.push(transport.subscribe('server-events-lagged', refresh));
+    unsubs.push(transport.subscribe<{ database_id: string; conversation_id: string }>('chat-state-changed', payload => {
+      if (payload.conversation_id === conversationId
+        && payload.database_id === useDatabasesStore.getState().activeId) refresh();
+    }));
 
     unsubs.push(transport.subscribe<ChatStreamDelta>('chat-stream-delta', (payload) => {
       if (payload.conversation_id === conversationId) {
@@ -72,7 +84,10 @@ export function useChatEvents(conversationId: string | null) {
 
     unsubs.push(transport.subscribe<ChatComplete>('chat-complete', (payload) => {
       if (payload.conversation_id === conversationId) {
-        completeMessage(payload.message);
+        if (useChatStore.getState().currentConversation?.atomic_chat_state?.phase !== 'closing') {
+          completeMessage(payload.message);
+        }
+        if (useChatStore.getState().currentConversation?.atomic_chat_state) refresh();
       }
     }));
 

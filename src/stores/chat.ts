@@ -18,6 +18,33 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
   is_archived: boolean;
+  atomic_chat_state?: AtomicChatState | null;
+}
+
+export interface AtomicChatState {
+  backend: 'api' | 'claude_code';
+  phase: 'open' | 'closing' | 'closed';
+  context_window_tokens?: number | null;
+  active: { user_message_id: string; status: 'running' | 'failed' | 'uncertain'; error: string | null } | null;
+  recap?: { request_message_id: string; outcome:
+    | { status: 'running' }
+    | { status: 'failed' | 'uncertain'; error: string }
+    | { status: 'complete'; reply_message_id: string }
+  } | null;
+}
+
+export function chatRetryMessageId(conversation: Conversation, messages: ChatMessageWithContext[]): string | null {
+  const active = conversation.atomic_chat_state?.active;
+  if (conversation.atomic_chat_state?.phase !== 'open' || !active || active.status === 'uncertain') return null;
+  const user = messages.find(message => message.id === active.user_message_id);
+  if (user?.tool_calls.some(call => call.status === 'running'
+    || (typeof call.tool_output === 'object' && call.tool_output !== null
+      && 'outcome_unknown' in call.tool_output && call.tool_output.outcome_unknown === true))) return null;
+  return active.user_message_id;
+}
+
+function chatIsRunning(state?: AtomicChatState | null): boolean {
+  return state?.active?.status === 'running' || state?.recap?.outcome.status === 'running';
 }
 
 export interface ConversationWithTags extends Conversation {
@@ -113,6 +140,7 @@ function buildPageContext(): PageContext {
 // ==================== Store ====================
 
 type ChatView = 'list' | 'conversation';
+let refreshVersion = 0;
 
 interface ChatStore {
   // View state
@@ -122,6 +150,7 @@ interface ChatStore {
   currentConversation: ConversationWithTags | null;
   messages: ChatMessageWithContext[];
   lastSend: ChatMessageWithContext | null;
+  drafts: Record<string, string>;
 
   // Conversations list
   conversations: ConversationWithTags[];
@@ -163,8 +192,11 @@ interface ChatStore {
 
   // Actions - Messaging (placeholder for now)
   sendMessage: (content: string) => Promise<'sent' | 'refused' | 'failed'>;
+  setDraft: (conversationId: string, content: string) => void;
+  refreshConversation: () => Promise<void>;
+  retryMessage: (userMessageId: string) => Promise<void>;
+  startNewSitting: () => Promise<void>;
   endMemuSession: () => Promise<void>;
-  cancelResponse: () => void;
 
   // Actions - Streaming updates (called from event handlers)
   appendStreamContent: (delta: string) => void;
@@ -184,6 +216,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   currentConversation: null,
   messages: [],
   lastSend: null,
+  drafts: {},
   conversations: [],
   listFilterTagId: null,
   isLoading: false,
@@ -228,6 +261,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           },
           messages: result.messages,
           isLoading: false,
+          ...(get().currentConversation?.id !== id || (result.atomic_chat_state && !chatIsRunning(result.atomic_chat_state))
+            ? { isStreaming: false, streamingContent: '', streamingToolCalls: [] } : {}),
         });
         useUIStore.getState().setChatSidebarConversationId(id);
       } else {
@@ -401,12 +436,54 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   // Messaging
+  setDraft: (conversationId, content) => set(state => ({ drafts: { ...state.drafts, [conversationId]: content } })),
+
+  refreshConversation: async () => {
+    const current = get().currentConversation;
+    if (!current) return;
+    const send = get().lastSend;
+    const version = ++refreshVersion;
+    try {
+      const saved = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', { conversationId: current.id });
+      if (!saved || version !== refreshVersion || get().currentConversation !== current || get().lastSend !== send) return;
+      set({ currentConversation: { ...saved, message_count: saved.messages.length,
+        last_message_preview: saved.messages[saved.messages.length - 1]?.content.slice(0, 100) ?? null }, messages: saved.messages,
+        ...(saved.atomic_chat_state && !chatIsRunning(saved.atomic_chat_state) ? { isStreaming: false, streamingContent: '', streamingToolCalls: [] } : {}),
+      });
+    } catch (error) {
+      if (version === refreshVersion && get().currentConversation === current && get().lastSend === send) set({ error: String(error) });
+    }
+  },
+
+  retryMessage: async (userMessageId) => {
+    const current = get().currentConversation;
+    if (!current?.atomic_chat_state) return;
+    ++refreshVersion;
+    set({ isStreaming: true, streamingContent: '', streamingToolCalls: [], error: null });
+    try {
+      await getTransport().invoke('retry_chat_message', { conversationId: current.id, userMessageId });
+    } catch (error) {
+      if (get().currentConversation?.id === current.id) set({ error: String(error), isStreaming: false });
+    }
+    if (get().currentConversation?.id === current.id) await get().refreshConversation();
+  },
+
+  startNewSitting: async () => {
+    const current = get().currentConversation;
+    if (!current) return;
+    const draft = get().drafts[current.id] ?? '';
+    const next = await get().createConversation(current.tags.map(tag => tag.id));
+    get().setDraft(next.id, draft);
+    useUIStore.getState().setChatSidebarConversationId(next.id);
+  },
+
   sendMessage: async (content: string) => {
     const { currentConversation, messages, openConversation } = get();
     if (!currentConversation) {
       set({ error: 'No conversation selected' });
       return 'failed';
     }
+    ++refreshVersion;
 
     // Add user message optimistically
     const userMessage: ChatMessageWithContext = {
@@ -475,7 +552,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (saved) {
           unsaved = !saved.messages.some(m => m.role === 'user' && m.content === content
             && !messages.some(previous => previous.id === m.id));
-          if (get().currentConversation?.id === currentConversation.id && get().lastSend === userMessage) set({ messages: saved.messages });
+          if (get().currentConversation?.id === currentConversation.id && get().lastSend === userMessage) {
+            set({ messages: saved.messages, currentConversation: {
+              ...get().currentConversation!, atomic_chat_state: saved.atomic_chat_state,
+            } });
+          }
         }
       }
       // Remove the temp user message on error
@@ -497,17 +578,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       await getTransport().invoke('end_memu_session', {
         conversationId: currentConversation.id,
       });
+      if (currentConversation.atomic_chat_state) {
+        if (get().currentConversation?.id === currentConversation.id) await get().refreshConversation();
+        set({ isEndingSession: false });
+        return;
+      }
       await fetchConversations(get().listFilterTagId ?? undefined);
       set({ view: 'list', currentConversation: null, messages: [], isEndingSession: false });
       useUIStore.getState().setChatSidebarConversationId(null);
     } catch (e) {
       set({ error: String(e), isEndingSession: false });
     }
-  },
-
-  cancelResponse: () => {
-    // TODO: Implement cancellation
-    set({ isStreaming: false, streamingContent: '' });
   },
 
   // Streaming updates - receives full accumulated content from backend
@@ -551,6 +632,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   completeMessage: (message: ChatMessageWithContext) => {
+    ++refreshVersion;
     set((state) => {
       // Don't add if message already exists (prevents duplicates from event + refetch)
       const messageExists = state.messages.some((m) => m.id === message.id);
@@ -573,6 +655,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   setStreamingError: (error: string) => {
+    ++refreshVersion;
     set({
       error,
       isStreaming: false,
@@ -589,6 +672,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       currentConversation: null,
       messages: [],
       lastSend: null,
+      drafts: {},
       conversations: [],
       listFilterTagId: null,
       isLoading: false,

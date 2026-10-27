@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { normalizeServerEvent } from './event-normalizer';
 
 describe('normalizeServerEvent', () => {
+  it('preserves database/conversation scope on durable chat changes', () => {
+    const event = { type: 'ChatStateChanged', database_id: 'test-db', conversation_id: 'test-chat' };
+    expect(normalizeServerEvent(event)).toEqual({ event: 'chat-state-changed', payload: event });
+  });
   it('normalizes memU review changes', () => {
     expect(normalizeServerEvent({
       type: 'MemuReviewsChanged',

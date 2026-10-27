@@ -438,6 +438,10 @@ pub enum ServerEvent {
         conversation_id: String,
         error: String,
     },
+    ChatStateChanged {
+        database_id: String,
+        conversation_id: String,
+    },
 }
 
 impl ServerEvent {
@@ -460,6 +464,9 @@ impl ServerEvent {
             }
             | Self::ChatError {
                 conversation_id, ..
+            }
+            | Self::ChatStateChanged {
+                conversation_id, ..
             } => Some(conversation_id),
             _ => None,
         }
@@ -472,7 +479,8 @@ impl ServerEvent {
             | Self::ChatToolComplete { database_id, .. }
             | Self::ChatComplete { database_id, .. }
             | Self::ChatCanvasAction { database_id, .. }
-            | Self::ChatError { database_id, .. } => Some(database_id),
+            | Self::ChatError { database_id, .. }
+            | Self::ChatStateChanged { database_id, .. } => Some(database_id),
             Self::AtomCreated { database_id, .. } | Self::AtomUpdated { database_id, .. } => {
                 database_id.as_deref()
             }
@@ -841,6 +849,18 @@ mod tests {
             }
             _ => panic!("Wrong variant"),
         }
+    }
+
+    #[test]
+    fn chat_state_change_retains_both_scope_keys() {
+        let event = ServerEvent::ChatStateChanged {
+            database_id: "test-db".into(),
+            conversation_id: "test-chat".into(),
+        };
+        assert_eq!(event.database_id(), Some("test-db"));
+        assert_eq!(event.conversation_id(), Some("test-chat"));
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "ChatStateChanged");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { useChatStore, type ChatMessageWithContext } from './chat';
+import { chatRetryMessageId, useChatStore, type ChatMessageWithContext } from './chat';
+import { useUIStore } from './ui';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('../lib/transport', () => ({ getTransport: () => ({ invoke }) }));
@@ -21,6 +22,94 @@ it('shows failed tool completion immediately and successful completion normally'
   store.startStreamingToolCall({ tool_call_id: 'toolu-success', tool_name: 'get_atom', tool_input: {} });
   store.completeStreamingToolCall({ tool_call_id: 'toolu-success', results_count: 1, is_error: false });
   expect(useChatStore.getState().streamingToolCalls[1].status).toBe('complete');
+});
+
+it('retains drafts per conversation and carries the closed sitting draft to a new one', async () => {
+  const current = useChatStore.getState().currentConversation!;
+  useChatStore.getState().setDraft(current.id, 'Refused draft');
+  invoke.mockResolvedValueOnce([]);
+  useChatStore.getState().showList();
+  expect(useChatStore.getState().drafts[current.id]).toBe('Refused draft');
+  useChatStore.setState({ currentConversation: current });
+  invoke.mockResolvedValue({ ...current, id: 'new-chat' });
+  await useChatStore.getState().startNewSitting();
+  expect(useChatStore.getState().drafts['new-chat']).toBe('Refused draft');
+  expect(useUIStore.getState().chatSidebarConversationId).toBe('new-chat');
+  useChatStore.getState().reset();
+  expect(useChatStore.getState().drafts).toEqual({});
+});
+
+it('offers running/failed recovery but not Retry for unknown tool effects', () => {
+  const current = { ...useChatStore.getState().currentConversation!, atomic_chat_state: {
+    backend: 'api' as const, phase: 'open' as const,
+    active: { user_message_id: 'saved-user', status: 'running' as const, error: null },
+  } };
+  expect(chatRetryMessageId(current, [])).toBe('saved-user');
+  const user: ChatMessageWithContext = { id: 'saved-user', conversation_id: current.id, role: 'user',
+    content: 'An edit', created_at: '', message_index: 0, citations: [], tool_calls: [{
+      id: 'unclear-edit', message_id: 'saved-user', tool_name: 'edit_atom', tool_input: {},
+      tool_output: { outcome_unknown: true }, status: 'failed', created_at: '', completed_at: null,
+    }] };
+  expect(chatRetryMessageId(current, [user])).toBeNull();
+  expect(chatRetryMessageId({ ...current, atomic_chat_state: { ...current.atomic_chat_state, phase: 'closed' } }, [])).toBeNull();
+});
+
+it('refreshes durable state without discarding drafts or switching to a late conversation', async () => {
+  const current = useChatStore.getState().currentConversation!;
+  useChatStore.getState().setDraft(current.id, 'Newer typing');
+  const saved = { ...current, atomic_chat_state: { backend: 'api', phase: 'closed', active: null }, messages: [] };
+  invoke.mockResolvedValue(saved);
+  await useChatStore.getState().refreshConversation();
+  expect(useChatStore.getState().currentConversation?.atomic_chat_state?.phase).toBe('closed');
+  expect(useChatStore.getState().drafts[current.id]).toBe('Newer typing');
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = useChatStore.getState().refreshConversation();
+  useChatStore.setState({ currentConversation: { ...current, id: 'different-chat' } });
+  finish(saved);
+  await pending;
+  expect(useChatStore.getState().currentConversation?.id).toBe('different-chat');
+});
+
+it('refreshes after Retry without sending another user input', async () => {
+  const current = useChatStore.getState().currentConversation!;
+  useChatStore.setState({ currentConversation: { ...current, atomic_chat_state: {
+    backend: 'api', phase: 'open', active: { user_message_id: 'saved-user', status: 'failed', error: 'Test failure' },
+  } } });
+  invoke.mockResolvedValue({ ...current, atomic_chat_state: { backend: 'api', phase: 'open', active: null }, messages: [] });
+  await useChatStore.getState().retryMessage('saved-user');
+  expect(invoke.mock.calls.map(([command]) => command)).toEqual(['retry_chat_message', 'get_conversation']);
+  expect(invoke.mock.calls[0][1]).toEqual({ conversationId: current.id, userMessageId: 'saved-user' });
+  expect(useChatStore.getState().isStreaming).toBe(false);
+});
+
+it.each(['completion', 'retry'])('ignores a pre-%s refresh after newer work begins', async (transition) => {
+  const current = { ...useChatStore.getState().currentConversation!, atomic_chat_state: {
+    backend: 'api' as const, phase: 'open' as const,
+    active: { user_message_id: 'saved-user', status: 'failed' as const, error: 'Earlier failure' },
+  } };
+  useChatStore.setState({ currentConversation: current });
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = useChatStore.getState().refreshConversation();
+  let retry: Promise<void> | undefined;
+  let finishRetry!: () => void;
+  if (transition === 'completion') {
+    useChatStore.getState().completeMessage({ id: 'new-answer', conversation_id: current.id, role: 'assistant',
+      content: 'New answer', created_at: '', message_index: 1, tool_calls: [], citations: [] });
+  } else {
+    invoke.mockImplementationOnce(() => new Promise<void>(resolve => { finishRetry = resolve; }));
+    retry = useChatStore.getState().retryMessage('saved-user');
+  }
+  finish({ ...current, messages: [] });
+  await pending;
+  if (transition === 'completion') expect(useChatStore.getState().messages[0].id).toBe('new-answer');
+  else {
+    expect(useChatStore.getState().isStreaming).toBe(true);
+    invoke.mockResolvedValueOnce({ ...current, atomic_chat_state: { ...current.atomic_chat_state, active: null }, messages: [] });
+    finishRetry();
+    await retry;
+  }
 });
 
 it('reports a refused send without leaving synthetic chat history', async () => {
