@@ -1449,13 +1449,22 @@ fn recap_messages(
 ) -> Vec<Message> {
     let mut messages = Vec::new();
     let mut actions = Vec::new();
+    let mut skip_recap_reply = false;
     for row in &conversation.messages {
-        if row.message.id == control_id {
-            continue;
-        }
+        // Old End controls embedded transcripts; quoted instruction prose alone is dialogue.
+        let is_control = row.message.id == control_id
+            || (row.message.role == "user"
+                && crate::chat::is_atomic_recap_prompt(&row.message.content)
+                && row
+                    .message
+                    .content
+                    .lines()
+                    .any(|line| line == "Full Atomic transcript:"));
+        let omit_text = is_control || (skip_recap_reply && row.message.role == "assistant");
+        skip_recap_reply = is_control;
         for call in &row.tool_calls {
             let mut input = serde_json::Map::new();
-            for key in ["atom_id", "query", "title", "cluster_label"] {
+            for key in ["atom_id", "query", "cluster_label"] {
                 if let Some(value) = call.tool_input.get(key).and_then(|v| v.as_str()) {
                     input.insert(
                         key.into(),
@@ -1480,7 +1489,7 @@ fn recap_messages(
                 .and_then(|v| v.get("outcome_unknown"))
                 .and_then(|v| v.as_bool())
                 == Some(true)
-                || matches!(call.status.as_str(), "pending" | "running");
+                || call.status == "running";
             let output = call.tool_output.as_ref();
             let text = output.and_then(|v| v.as_str());
             let outcome = if unknown {
@@ -1493,7 +1502,7 @@ fn recap_messages(
                         .take(240)
                         .collect::<String>()
                 )
-            } else if matches!(call.tool_name.as_str(), "create_atom" | "edit_atom") {
+            } else if call.tool_name == "edit_atom" {
                 let result =
                     text.and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
                 json!({"atom_id": result.as_ref().and_then(|v| v.get("atom_id")),
@@ -1507,11 +1516,11 @@ fn recap_messages(
                 "tool": call.tool_name,
                 "input": input,
                 "status": call.status,
-                "outcome_unknown": unknown,
                 "outcome": outcome,
             }));
         }
-        if matches!(row.message.role.as_str(), "system" | "user" | "assistant")
+        if !omit_text
+            && matches!(row.message.role.as_str(), "system" | "user" | "assistant")
             && !row.message.content.trim().is_empty()
         {
             messages.extend(chat_messages_to_provider_messages(vec![row.clone()]));
@@ -2644,11 +2653,59 @@ mod tests {
         core.save_message(cid, "assistant", "The edit outcome was unclear")
             .await
             .unwrap();
+        let older_control = core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity\n\nFull Atomic transcript:\nSECRET_OLDER_TRANSCRIPT").await.unwrap();
+        let mut legacy_edit = core
+            .get_conversation(cid)
+            .await
+            .unwrap()
+            .unwrap()
+            .messages
+            .into_iter()
+            .flat_map(|row| row.tool_calls)
+            .find(|call| call.id == "fictional-edit")
+            .unwrap();
+        legacy_edit.id = "older-completed-edit".into();
+        legacy_edit.message_id = older_control.id.clone();
+        legacy_edit.status = "complete".into();
+        legacy_edit.tool_input = json!({"atom_id":"memory:older", "edits":[{"operation":"append", "text":"SECRET_OLD_EDIT_BODY"}]});
+        legacy_edit.tool_output = Some(json!(json!({"atom_id":"memory:older", "title":"Fictional updated note", "snippet":"SECRET_OLD_EDIT_BODY"}).to_string()));
+        core.save_chat_tool_records(
+            cid,
+            &older_control.id,
+            &ChatToolRecords {
+                tool_calls: vec![legacy_edit.clone()],
+                citations: vec![],
+                prior_citations: vec![],
+                citation_index: 0,
+            },
+        )
+        .await
+        .unwrap();
+        core.save_message(cid, "assistant", "SECRET_OLD_RECAP")
+            .await
+            .unwrap();
         core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity is wording I want to discuss, not a control").await.unwrap();
         core.save_message(cid, "assistant", "We discussed the quoted wording")
             .await
             .unwrap();
         let legacy = core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity\nFull Atomic transcript: SECRET_NESTED_HISTORY").await.unwrap();
+        legacy_edit.id = "current-unclear-edit".into();
+        legacy_edit.message_id = legacy.id.clone();
+        legacy_edit.status = "running".into();
+        legacy_edit.tool_input = json!({"atom_id":"memory:current-control"});
+        legacy_edit.tool_output = None;
+        core.save_chat_tool_records(
+            cid,
+            &legacy.id,
+            &ChatToolRecords {
+                tool_calls: vec![legacy_edit],
+                citations: vec![],
+                prior_citations: vec![],
+                citation_index: 0,
+            },
+        )
+        .await
+        .unwrap();
         core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closing)
             .await
             .unwrap();
@@ -2738,6 +2795,9 @@ mod tests {
             "SECRET_EDIT_BODY",
             "SECRET_RESPONSE",
             "SECRET_NESTED_HISTORY",
+            "SECRET_OLDER_TRANSCRIPT",
+            "SECRET_OLD_EDIT_BODY",
+            "SECRET_OLD_RECAP",
             "tool_call_id",
             "Use search_atoms",
         ] {
@@ -2751,10 +2811,46 @@ mod tests {
             "We discussed the quoted wording",
             "Error: fictional missing target",
             "no results",
+            "Fictional updated note",
         ] {
             assert_eq!(serialized.matches(once).count(), 1);
         }
-        assert!(serialized.contains("outcome_unknown") && serialized.contains("failed"));
+        let messages = body["messages"].as_array().unwrap();
+        let dialogue: Vec<_> = messages[1..messages.len() - 1]
+            .iter()
+            .map(|row| row["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            dialogue,
+            vec![
+                "Fictional original Presence",
+                "Please change the fictional note",
+                "The edit outcome was unclear",
+                "This Atomic session is ending. Write a recap of your activity is wording I want to discuss, not a control",
+                "We discussed the quoted wording",
+            ]
+        );
+        let (_, digest) = messages.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .rsplit_once('\n')
+            .unwrap();
+        let actions: serde_json::Value = serde_json::from_str(digest).unwrap();
+        let current = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["input"]["atom_id"] == "memory:current-control")
+            .unwrap();
+        assert_eq!(current["outcome"], "unknown");
+        let older = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["input"]["atom_id"] == "memory:older")
+            .unwrap();
+        assert_eq!(older["status"], "complete");
+        assert_eq!(older["outcome"]["title"], "Fictional updated note");
         let saved = core.get_conversation(cid).await.unwrap().unwrap();
         assert_eq!(saved.messages.last().unwrap().message.id, result.message.id);
         assert!(
