@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 pub const CHAT_TOOLS_PATH: &str = "/openalma/chat-tools/mcp";
@@ -176,10 +176,9 @@ impl ChatMcpServer {
             self.0.work.start()
         };
         let turn = Arc::clone(&self.0);
-        let (send, receive) = oneshot::channel();
         // The turn's executor owns work even if a caller drops this future;
         // do not make that guarantee depend on rmcp's detached-handler policy.
-        executor::spawn(async move {
+        let receive = executor::spawn_with_result(async move {
             let _work = work;
             let result = turn
                 .state
@@ -189,7 +188,7 @@ impl ChatMcpServer {
                 .expect("active tool session")
                 .execute(&call_id, &name, arguments)
                 .await;
-            let result = match result {
+            match result {
                 Ok(result) => {
                     let content = vec![Content::text(result.content)];
                     Ok(if result.is_error {
@@ -199,8 +198,7 @@ impl ChatMcpServer {
                     })
                 }
                 Err(error) => Err(ErrorData::internal_error(error, None)),
-            };
-            let _ = send.send(result);
+            }
         });
         receive
             .await

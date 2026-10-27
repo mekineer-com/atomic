@@ -5,7 +5,7 @@
 //! concurrent API calls stay within safe limits regardless of caller.
 
 use std::sync::LazyLock;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{Semaphore, watch};
 
 /// Completion accounting only: callers must stop producers before waiting.
 #[derive(Clone)]
@@ -86,9 +86,46 @@ where
     });
 }
 
+/// The executor owns completion; dropping the returned receiver only loses delivery.
+pub fn spawn_with_result<F, T>(future: F) -> tokio::sync::oneshot::Receiver<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (finished, result) = tokio::sync::oneshot::channel();
+    spawn(async move {
+        let outcome = future.await;
+        let _ = finished.send(outcome);
+    });
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn owned_lock_wait_survives_delivery_loss_and_participates_in_drain() {
+        let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let held = std::sync::Arc::clone(&lock).lock_owned().await;
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (finished, complete) = tokio::sync::oneshot::channel();
+        let delivery = spawn_with_result(async move {
+            let _ = started.send(());
+            let _work = lock.lock_owned().await;
+            let _ = finished.send(());
+        });
+        waiting.await.unwrap();
+        drop(delivery);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), wait_idle())
+                .await
+                .is_err()
+        );
+        drop(held);
+        complete.await.unwrap();
+        wait_idle().await;
+    }
 
     #[tokio::test]
     async fn completion_includes_children_and_unwinding() {

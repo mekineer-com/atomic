@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::error::{JsonError, json_error_response};
 use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -141,12 +142,18 @@ fn identity_header(request: &HttpRequest, name: &str) -> Result<String, HttpResp
 }
 
 pub fn client() -> Result<reqwest::Client, HttpResponse> {
+    client_data().map_err(json_error_response)
+}
+
+pub fn client_data() -> Result<reqwest::Client, JsonError> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| {
-            HttpResponse::InternalServerError()
-                .json(json!({"error": format!("memU client failed: {e}")}))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": format!("memU client failed: {e}")}),
+            )
         })
 }
 
@@ -154,19 +161,32 @@ pub async fn memu_json(
     request: reqwest::RequestBuilder,
     error_prefix: &str,
 ) -> Result<Value, HttpResponse> {
+    memu_json_data(request, error_prefix)
+        .await
+        .map_err(json_error_response)
+}
+
+pub async fn memu_json_data(
+    request: reqwest::RequestBuilder,
+    error_prefix: &str,
+) -> Result<Value, JsonError> {
     let response = request.send().await.map_err(|e| {
-        HttpResponse::BadGateway()
-            .json(json!({"error": format!("{error_prefix} request failed: {e}")}))
+        (
+            StatusCode::BAD_GATEWAY,
+            json!({"error": format!("{error_prefix} request failed: {e}")}),
+        )
     })?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return Err(HttpResponse::build(status).json(json!({"error": memu_error_value(&body)})));
+        return Err((status, json!({"error": memu_error_value(&body)})));
     }
     response.json::<Value>().await.map_err(|e| {
-        HttpResponse::BadGateway()
-            .json(json!({"error": format!("{error_prefix} returned invalid JSON: {e}")}))
+        (
+            StatusCode::BAD_GATEWAY,
+            json!({"error": format!("{error_prefix} returned invalid JSON: {e}")}),
+        )
     })
 }
 

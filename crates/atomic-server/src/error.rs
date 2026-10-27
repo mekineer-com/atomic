@@ -9,33 +9,22 @@ pub struct ApiErrorResponse {
     pub error: String,
 }
 
-/// Convert AtomicCoreError to an appropriate HTTP response
-pub fn error_response(e: atomic_core::AtomicCoreError) -> HttpResponse {
-    match &e {
-        atomic_core::AtomicCoreError::NotFound(_) => {
-            HttpResponse::NotFound().json(ApiErrorResponse {
-                error: e.to_string(),
-            })
-        }
-        atomic_core::AtomicCoreError::Validation(_) => {
-            HttpResponse::BadRequest().json(ApiErrorResponse {
-                error: e.to_string(),
-            })
-        }
-        atomic_core::AtomicCoreError::Configuration(_) => {
-            HttpResponse::BadRequest().json(ApiErrorResponse {
-                error: e.to_string(),
-            })
-        }
-        atomic_core::AtomicCoreError::Conflict(_) => {
-            HttpResponse::Conflict().json(ApiErrorResponse {
-                error: e.to_string(),
-            })
-        }
-        _ => HttpResponse::InternalServerError().json(ApiErrorResponse {
-            error: e.to_string(),
-        }),
-    }
+/// Transport-independent status and JSON body for background work.
+pub type JsonError = (actix_web::http::StatusCode, serde_json::Value);
+
+pub fn core_json_error(error: atomic_core::AtomicCoreError) -> JsonError {
+    (
+        status_code_for(&error),
+        serde_json::json!({"error": error.to_string()}),
+    )
+}
+
+pub fn json_error_response((status, body): JsonError) -> HttpResponse {
+    HttpResponse::build(status).json(body)
+}
+
+pub fn error_response(error: atomic_core::AtomicCoreError) -> HttpResponse {
+    json_error_response(core_json_error(error))
 }
 
 /// Shorthand to convert Result<T, AtomicCoreError> to HttpResponse
@@ -65,6 +54,20 @@ mod tests {
     use super::*;
     use actix_web::http::StatusCode;
     use atomic_core::AtomicCoreError;
+
+    #[actix_web::test]
+    async fn structured_json_error_survives_http_boundary() {
+        let body = serde_json::json!({"error": {"code": "soul_paused", "message": "Retry later"}});
+        let response = json_error_response((StatusCode::CONFLICT, body.clone()));
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = actix_web::body::to_bytes(response.into_body())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            body
+        );
+    }
 
     #[test]
     fn test_not_found_maps_to_404() {

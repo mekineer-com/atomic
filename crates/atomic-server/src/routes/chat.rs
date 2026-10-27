@@ -1,16 +1,13 @@
 //! Chat / Conversation routes
 
 use crate::db_extractor::Db;
-use crate::error::{ApiErrorResponse, ok_or_error};
+use crate::error::{
+    ApiErrorResponse, JsonError, core_json_error, json_error_response, ok_or_error,
+};
 use crate::event_bridge::chat_event_callback;
 use crate::routes::memu_proxy::{self, MemuScope, memu_error_text};
 use crate::state::AppState;
-use actix_web::{
-    HttpRequest, HttpResponse,
-    body::MessageBody,
-    http::{StatusCode, header::HeaderMap},
-    web,
-};
+use actix_web::{HttpRequest, HttpResponse, http::StatusCode, web};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -24,47 +21,6 @@ static CONVERSATION_WORK: LazyLock<
     tokio::sync::Mutex<HashMap<ConversationKey, Arc<tokio::sync::Mutex<()>>>>,
 > = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
-fn spawn_chat_work<F, T>(future: F) -> tokio::sync::oneshot::Receiver<T>
-where
-    F: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let (finished, result) = tokio::sync::oneshot::channel();
-    atomic_core::executor::spawn(async move {
-        let outcome = future.await;
-        let _ = finished.send(outcome); // Delivery loss does not cancel admitted work.
-    });
-    result
-}
-
-// Actix responses are thread-local; only their buffered wire data crosses runtimes.
-struct BufferedChatResponse {
-    status: StatusCode,
-    headers: HeaderMap,
-    body: web::Bytes,
-}
-
-impl BufferedChatResponse {
-    fn capture(response: HttpResponse) -> Self {
-        Self {
-            status: response.status(),
-            headers: response.headers().clone(),
-            body: response
-                .into_body()
-                .try_into_bytes()
-                .expect("chat responses are buffered JSON"),
-        }
-    }
-
-    fn into_response(self) -> HttpResponse {
-        let mut response = HttpResponse::build(self.status);
-        for (name, value) in self.headers.iter() {
-            response.append_header((name.clone(), value.clone()));
-        }
-        response.body(self.body)
-    }
-}
-
 fn lost_chat_worker() -> HttpResponse {
     HttpResponse::InternalServerError().json(ApiErrorResponse {
         error:
@@ -73,13 +29,14 @@ fn lost_chat_worker() -> HttpResponse {
     })
 }
 
-fn end_work_response(conversation_id: &str, response: HttpResponse) -> BufferedChatResponse {
-    let response = BufferedChatResponse::capture(response);
-    if !response.status.is_success() {
-        tracing::error!(conversation_id, status = %response.status,
-            error = %String::from_utf8_lossy(&response.body), "Atomic End Session failed");
+fn end_work_result(
+    conversation_id: &str,
+    result: Result<serde_json::Value, JsonError>,
+) -> Result<serde_json::Value, JsonError> {
+    if let Err((status, body)) = &result {
+        tracing::error!(conversation_id, status = %status, error = %body, "Atomic End Session failed");
     }
-    response
+    result
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -186,9 +143,9 @@ async fn fetch_atomic_snapshot(
 
 async fn fetch_atomic_chat_profile(
     config: &MemuScope,
-) -> Result<HashMap<String, String>, HttpResponse> {
-    let client = memu_proxy::client()?;
-    let value = memu_proxy::memu_json(
+) -> Result<HashMap<String, String>, JsonError> {
+    let client = memu_proxy::client_data()?;
+    let value = memu_proxy::memu_json_data(
         client
             .get(format!(
                 "{}/integration/atomic/chat_profile",
@@ -199,13 +156,16 @@ async fn fetch_atomic_chat_profile(
     )
     .await?;
     let body = serde_json::from_value::<AtomicChatProfileResponse>(value).map_err(|e| {
-        HttpResponse::BadGateway().json(
+        (
+            StatusCode::BAD_GATEWAY,
             serde_json::json!({"error": format!("memU chat_profile returned invalid JSON: {e}")}),
         )
     })?;
     if body.settings.is_empty() {
-        return Err(HttpResponse::BadGateway()
-            .json(serde_json::json!({"error": "memU chat_profile returned empty settings"})));
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({"error": "memU chat_profile returned empty settings"}),
+        ));
     }
     Ok(body.settings)
 }
@@ -236,17 +196,17 @@ async fn require_conversation_owner(
     db: &Db,
     id: &str,
     scope: Option<&MemuScope>,
-) -> Result<(), HttpResponse> {
+) -> Result<(), JsonError> {
     let Some(scope) = scope else {
         return Ok(());
     };
     match db.0.get_conversation(id).await {
         Ok(Some(conv)) if conversation_matches(&conv, scope) => Ok(()),
-        Ok(_) => {
-            Err(HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "Conversation not found"})))
-        }
-        Err(error) => Err(crate::error::error_response(error)),
+        Ok(_) => Err((
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error": "Conversation not found"}),
+        )),
+        Err(error) => Err(core_json_error(error)),
     }
 }
 
@@ -254,7 +214,7 @@ async fn lock_conversation(
     db: &Db,
     id: &str,
     scope: Option<&MemuScope>,
-) -> Result<tokio::sync::OwnedMutexGuard<()>, HttpResponse> {
+) -> Result<tokio::sync::OwnedMutexGuard<()>, JsonError> {
     require_conversation_owner(db, id, scope).await?;
     let key = (db.1.clone(), id.to_string());
     let lock = {
@@ -375,15 +335,8 @@ async fn post_atomic_session_end(
     atomic_conversation_id: &str,
     recap: Option<String>,
     transcript: Vec<AtomicTranscriptRow>,
-) -> Result<serde_json::Value, HttpResponse> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| {
-            HttpResponse::InternalServerError()
-                .json(serde_json::json!({"error": format!("memU client failed: {e}")}))
-        })?;
-    let response = client
+) -> Result<serde_json::Value, JsonError> {
+    let request = memu_proxy::client_data()?
         .post(format!(
             "{}/integration/atomic/session_end",
             config.base_url
@@ -394,27 +347,16 @@ async fn post_atomic_session_end(
             conversation_id: format!("chat:atomic-{atomic_conversation_id}"),
             activity_recap: recap,
             transcript,
-        })
-        .send()
+        });
+    memu_proxy::memu_json_data(request, "memU session_end")
         .await
-        .map_err(|e| {
-            HttpResponse::BadGateway()
-                .json(serde_json::json!({"error": format!("memU session_end request failed: {e}")}))
-        })?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(HttpResponse::build(
-            actix_web::http::StatusCode::from_u16(status.as_u16())
-                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY),
-        )
-        .json(serde_json::json!({"error": memu_error_text(&body)})));
-    }
-    response.json::<serde_json::Value>().await.map_err(|e| {
-        HttpResponse::BadGateway().json(
-            serde_json::json!({"error": format!("memU session_end returned invalid JSON: {e}")}),
-        )
-    })
+        .map_err(|(status, body)| {
+            // End's existing contract renders remote errors as text, unlike other proxies.
+            (
+                status,
+                serde_json::json!({"error": memu_error_text(&body.to_string())}),
+            )
+        })
 }
 
 #[utoipa::path(post, path = "/api/conversations", request_body = CreateConversationBody, responses((status = 201, description = "Created conversation", body = atomic_core::ConversationWithTags)), tag = "chat")]
@@ -567,7 +509,7 @@ pub async fn update_conversation(
     };
     let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(error) => return json_error_response(error),
     };
     let req = body.into_inner();
     ok_or_error(
@@ -590,7 +532,7 @@ pub async fn delete_conversation(
     };
     let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(error) => return json_error_response(error),
     };
     ok_or_error(db.0.delete_conversation(&id).await)
 }
@@ -617,7 +559,7 @@ pub async fn set_conversation_scope(
     };
     let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(error) => return json_error_response(error),
     };
     let tag_ids = body.into_inner().tag_ids;
     ok_or_error(db.0.set_conversation_scope(&id, &tag_ids).await)
@@ -644,7 +586,7 @@ pub async fn add_tag_to_scope(
     };
     let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(error) => return json_error_response(error),
     };
     let tag_id = body.into_inner().tag_id;
     ok_or_error(db.0.add_tag_to_scope(&id, &tag_id).await)
@@ -664,7 +606,7 @@ pub async fn remove_tag_from_scope(
     };
     let _work = match lock_conversation(&db, &id, scope.as_ref()).await {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(error) => return json_error_response(error),
     };
     ok_or_error(db.0.remove_tag_from_scope(&id, &tag_id).await)
 }
@@ -697,7 +639,7 @@ pub async fn send_chat_message(
     };
     let _work = match lock_conversation(&db, &conversation_id, memu_session.as_ref()).await {
         Ok(guard) => guard,
-        Err(response) => return response,
+        Err(error) => return json_error_response(error),
     };
     let event_owner = memu_session
         .as_ref()
@@ -706,14 +648,14 @@ pub async fn send_chat_message(
     let result = if let Some(memu_session) = memu_session {
         let settings = match fetch_atomic_chat_profile(&memu_session).await {
             Ok(settings) => settings,
-            Err(response) => return response,
+            Err(error) => return json_error_response(error),
         };
         let memu_tools = atomic_core::MemuToolConfig {
             base_url: memu_session.base_url,
             user_id: memu_session.user_id,
             soul_id: memu_session.soul_id,
         };
-        let result = spawn_chat_work(async move {
+        let result = atomic_core::executor::spawn_with_result(async move {
             let _work = _work;
             let result =
                 db.0.send_chat_message_with_external_settings(
@@ -772,19 +714,20 @@ pub async fn end_memu_session(
             .json(serde_json::json!({"error": "conversation_id is required"}));
     }
     let conversation_id = conversation_id.to_string();
-    let result = spawn_chat_work(async move {
+    let result = atomic_core::executor::spawn_with_result(async move {
         // End intent survives browser loss even while an admitted reply holds the lock.
         let _work = match lock_conversation(&db, &conversation_id, Some(&memu_session)).await {
             Ok(guard) => guard,
-            Err(response) => return end_work_response(&conversation_id, response),
+            Err(error) => return end_work_result(&conversation_id, Err(error)),
         };
-        end_work_response(
+        end_work_result(
             &conversation_id,
             finish_memu_session(state, db, memu_session, &conversation_id).await,
         )
     });
     match result.await {
-        Ok(response) => response.into_response(),
+        Ok(Ok(body)) => HttpResponse::Ok().json(body),
+        Ok(Err(error)) => json_error_response(error),
         Err(_) => lost_chat_worker(),
     }
 }
@@ -794,14 +737,16 @@ async fn finish_memu_session(
     db: Db,
     memu_session: MemuScope,
     conversation_id: &str,
-) -> HttpResponse {
+) -> Result<serde_json::Value, JsonError> {
     let mut conv = match db.0.get_conversation(conversation_id).await {
         Ok(Some(conv)) => conv,
         Ok(None) => {
-            return HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "Conversation not found"}));
+            return Err((
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": "Conversation not found"}),
+            ));
         }
-        Err(e) => return crate::error::error_response(e),
+        Err(e) => return Err(core_json_error(e)),
     };
     let mut rows = transcript_rows(&conv);
     let recap_instruction = atomic_recap_instruction(&memu_session.user_id);
@@ -809,10 +754,7 @@ async fn finish_memu_session(
 
     if recap.is_none() && has_user_assistant_interchange(&rows) {
         let transcript_before_recap = std::mem::take(&mut rows);
-        let settings = match fetch_atomic_chat_profile(&memu_session).await {
-            Ok(settings) => settings,
-            Err(response) => return response,
-        };
+        let settings = fetch_atomic_chat_profile(&memu_session).await?;
         let on_event = chat_event_callback(
             state.event_tx.clone(),
             db.1.clone(),
@@ -836,85 +778,45 @@ async fn finish_memu_session(
             )
             .await
         {
-            return crate::error::error_response(e);
+            return Err(core_json_error(e));
         }
         conv = match db.0.get_conversation(conversation_id).await {
             Ok(Some(conv)) => conv,
             Ok(None) => {
-                return HttpResponse::NotFound()
-                    .json(serde_json::json!({"error": "Conversation not found"}));
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({"error": "Conversation not found"}),
+                ));
             }
-            Err(e) => return crate::error::error_response(e),
+            Err(e) => return Err(core_json_error(e)),
         };
         recap = existing_recap(&conv, &recap_instruction);
         rows = transcript_before_recap;
     }
     rows = rows_for_saved_history(&rows, &recap_instruction);
 
-    match post_atomic_session_end(&memu_session, conversation_id, recap, rows).await {
-        Ok(body) => HttpResponse::Ok().json(body),
-        Err(response) => response,
-    }
+    post_atomic_session_end(&memu_session, conversation_id, recap, rows).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn owned_lock_wait_survives_delivery_loss_and_participates_in_drain() {
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        let held = Arc::clone(&lock).lock_owned().await;
-        let (started, waiting) = tokio::sync::oneshot::channel();
-        let (finished, complete) = tokio::sync::oneshot::channel();
-        let delivery = spawn_chat_work(async move {
-            let _ = started.send(());
-            let _work = lock.lock_owned().await;
-            let _ = finished.send(());
-        });
-        waiting.await.unwrap();
-        drop(delivery);
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(10),
-                atomic_core::executor::wait_idle()
-            )
-            .await
-            .is_err()
-        );
-        drop(held);
-        complete.await.unwrap();
-        atomic_core::executor::wait_idle().await;
-    }
-
-    #[actix_web::test]
-    async fn buffered_chat_response_preserves_error_status_headers_and_body() {
-        let body = serde_json::json!({"error": {"code": "soul_paused", "message": "Retry later"}});
-        let original = HttpResponse::Conflict()
-            .append_header(("X-Test-Error", "paused"))
-            .json(&body);
+    #[test]
+    fn end_errors_are_plain_data_and_logged_before_delivery() {
+        let body = serde_json::json!({"error": {"code": "soul_paused"}});
         let logs = crate::log_buffer::LogBuffer::new(4);
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_writer(logs.make_writer())
             .finish();
-        let response = tracing::subscriber::with_default(subscriber, || {
-            end_work_response("test-conversation", original)
-        })
-        .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(response.headers().get("X-Test-Error").unwrap(), "paused");
-        assert_eq!(
-            response.headers().get("Content-Type").unwrap(),
-            "application/json"
-        );
-        let bytes = actix_web::body::to_bytes(response.into_body())
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
-            body
-        );
+        let result = tracing::subscriber::with_default(subscriber, || {
+            end_work_result(
+                "test-conversation",
+                Err((StatusCode::CONFLICT, body.clone())),
+            )
+        });
+        assert_eq!(result.unwrap_err(), (StatusCode::CONFLICT, body));
         assert!(logs.dump().contains("Atomic End Session failed"));
         assert!(logs.dump().contains("soul_paused"));
     }
