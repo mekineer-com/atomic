@@ -1656,7 +1656,7 @@ mod tests {
         let old: AtomicChatState = serde_json::from_value(serde_json::json!({
             "backend":"api", "phase":"open", "active":null
         })).unwrap();
-        assert!(old.native_outcome.is_none());
+        assert!(old.native_usage.is_none());
     }
 
     #[test]
