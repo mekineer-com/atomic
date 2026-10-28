@@ -1665,7 +1665,8 @@ mod tests {
                 continuation: matches!(mode, "retry" | "continuation_refused"),
                 input: ClaudeChatInput {
                     prompt: input.content.clone(),
-                    system_prompt: (!mode.starts_with("recap") && mode != "retry")
+                    system_prompt: (!mode.starts_with("recap")
+                        && !matches!(mode, "retry" | "continuation_refused"))
                         .then(|| "saved presence".into()),
                 },
             };
