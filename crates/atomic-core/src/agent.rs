@@ -1605,14 +1605,19 @@ pub(crate) async fn estimate_chat_request_tokens(
     {
         return Err("Chat owner/Soul does not match".to_string());
     }
-    if conversation
-        .conversation
-        .atomic_chat_state
-        .as_ref()
-        .is_some_and(|state| state.backend != crate::AtomicChatBackend::Api)
-    {
-        return Err("API sizing cannot be used for a Claude Code sitting".to_string());
-    }
+    let last = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|row| matches!(row.message.role.as_str(), "user" | "assistant"))
+        .map(|row| &row.message);
+    let state = crate::chat::bound_chat_state(
+        conversation.conversation.atomic_chat_state.clone(),
+        &crate::AtomicChatBackend::Api,
+        last.map(|message| message.role.as_str()),
+    )
+    .map_err(|error| error.to_string())?;
+    let (saved_input, admission_content) = crate::chat::chat_admission_input(&state, last, request);
     let (page, canvas) = match request {
         crate::AtomicChatRequest::New {
             page_context,
@@ -1620,11 +1625,7 @@ pub(crate) async fn estimate_chat_request_tokens(
             ..
         } => (page_context.clone(), canvas_context.clone()),
         crate::AtomicChatRequest::Retry { user_message_id } => {
-            let active = conversation
-                .conversation
-                .atomic_chat_state
-                .as_ref()
-                .and_then(|state| state.active.as_ref());
+            let active = state.active.as_ref();
             if active.is_some_and(|turn| turn.user_message_id != *user_message_id) {
                 return Err("Retry sizing requires the matching saved turn".to_string());
             }
@@ -1656,7 +1657,7 @@ pub(crate) async fn estimate_chat_request_tokens(
     let mut recap = None;
     let mut content = None;
     match request {
-        crate::AtomicChatRequest::New { content: input, .. } => content = Some(input.as_str()),
+        crate::AtomicChatRequest::New { .. } => content = Some(admission_content),
         crate::AtomicChatRequest::Retry { user_message_id } => {
             let user = conversation
                 .messages
@@ -1667,28 +1668,15 @@ pub(crate) async fn estimate_chat_request_tokens(
             tools.tool_calls_record = user.tool_calls.clone();
             tools.require_known_outcomes()?;
         }
-        crate::AtomicChatRequest::Recap { instruction } => {
+        crate::AtomicChatRequest::Recap { .. } => {
             tools.tools.clear();
-            let control_id = conversation
-                .conversation
-                .atomic_chat_state
-                .as_ref()
-                .and_then(|state| state.recap.as_ref())
-                .map(|recap| recap.request_message_id.as_str())
-                .or_else(|| {
-                    conversation
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|row| matches!(row.message.role.as_str(), "user" | "assistant"))
-                        .filter(|row| {
-                            row.message.role == "user"
-                                && crate::chat::is_atomic_recap_prompt(&row.message.content)
-                        })
-                        .map(|row| row.message.id.as_str())
-                })
-                .unwrap_or("");
-            recap = Some((control_id, instruction.as_str()));
+            recap = Some((
+                saved_input
+                    .as_ref()
+                    .map(|message| message.id.as_str())
+                    .unwrap_or(""),
+                admission_content,
+            ));
         }
     }
     let messages = api_request_messages(&conversation, &tools, &description, recap, content)?;
@@ -1892,11 +1880,13 @@ impl ChatToolSession {
 
     fn require_known_outcomes(&self) -> Result<(), String> {
         if self.tool_calls_record.iter().any(|call| {
-            call.tool_output
-                .as_ref()
-                .and_then(|output| output.get("outcome_unknown"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
+            call.status == "running"
+                || call
+                    .tool_output
+                    .as_ref()
+                    .and_then(|output| output.get("outcome_unknown"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
         }) {
             return Err("A previous tool's outcome is unknown. Do not resume or repeat it. Close out from saved history or start a new sitting.".to_string());
         }
@@ -2812,10 +2802,8 @@ mod tests {
                 > captured
         );
         let large = new_chat_request(&"Fictional evidence ".repeat(20_000));
-        let mut small_window = settings.clone();
-        small_window.insert("openai_compat_context_length".into(), "128".into());
         assert!(
-            core.estimate_chat_request_tokens(cid, &large, small_window, scope.clone())
+            core.estimate_chat_request_tokens(cid, &large, settings.clone(), scope.clone())
                 .await
                 .unwrap()
                 > plain + 10_000
@@ -2967,18 +2955,20 @@ mod tests {
         .await
         .unwrap();
         let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
-        assert!(
-            core.estimate_chat_request_tokens(
+        let error = core
+            .estimate_chat_request_tokens(
                 cid,
                 &Request::Retry {
-                    user_message_id: user.id
+                    user_message_id: user.id,
                 },
                 settings.clone(),
-                scope.clone()
+                scope.clone(),
             )
             .await
-            .is_err()
-        );
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outcome is unknown"));
+        assert!(error.contains("Close out from saved history"));
         assert!(
             core.estimate_chat_request_tokens(cid, &recap, settings, scope)
                 .await
@@ -2988,6 +2978,58 @@ mod tests {
         assert_eq!(
             serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
             before
+        );
+    }
+
+    #[tokio::test]
+    async fn recap_projection_keeps_failed_ordinary_recap_like_wording() {
+        use crate::{
+            AtomicChatBackend as Backend, AtomicChatPhase as Phase, AtomicChatRequest as Request,
+        };
+        let dir = TempDir::new().unwrap();
+        let core =
+            AtomicCore::open_or_create(dir.path().join("projection-recap-choice.db")).unwrap();
+        let conv = core
+            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .await
+            .unwrap();
+        let cid = &conv.conversation.id;
+        let scope = MemuToolConfig {
+            base_url: "http://127.0.0.1:9".into(),
+            user_id: "TestOwner".into(),
+            soul_id: "TestSoul".into(),
+        };
+        let settings = api_test_settings("http://127.0.0.1:9");
+        let ordinary = core.admit_chat_turn(cid, "TestOwner", "TestSoul", &Backend::Api,
+            &new_chat_request("This Atomic session is ending. Write a recap of your activity is wording I want to discuss, not a control"), 200_000).await.unwrap();
+        core.fail_chat_turn(cid, &ordinary.id, "Fictional ordinary failure", false)
+            .await
+            .unwrap();
+        core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closing)
+            .await
+            .unwrap();
+        let recap = Request::Recap {
+            instruction: "Fictional clean recap control".into(),
+        };
+        let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
+        let projected = core
+            .estimate_chat_request_tokens(cid, &recap, settings.clone(), scope.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
+            before
+        );
+        let control = core
+            .admit_chat_turn(cid, "TestOwner", "TestSoul", &Backend::Api, &recap, 200_000)
+            .await
+            .unwrap();
+        assert_ne!(control.id, ordinary.id);
+        assert_eq!(
+            core.estimate_chat_request_tokens(cid, &recap, settings, scope)
+                .await
+                .unwrap(),
+            projected
         );
     }
 
