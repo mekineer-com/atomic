@@ -2,9 +2,6 @@
 
 This directory contains utility scripts for the Atomic application.
 
-Claude session maintenance's callable helper and offline tests live in
-[`claude_session/`](claude_session/README.md).
-
 ## Obsidian Import Script
 
 The `import/obsidian.js` script imports notes from an Obsidian vault into Atomic.
@@ -246,3 +243,4 @@ All scripts automatically detect the database location based on your OS:
 - **Windows**: `%APPDATA%/com.atomic.app/atomic.db`
 
 You can override this with the `--db` flag on any script.
+
