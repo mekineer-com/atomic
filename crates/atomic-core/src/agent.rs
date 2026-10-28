@@ -4394,6 +4394,7 @@ mod tests {
         let saved = reopened.get_conversation(cid).await.unwrap().unwrap();
         let state = saved.conversation.atomic_chat_state.as_ref().unwrap();
         assert_eq!(state.backend, backend);
+        let first_attempt = state.active.as_ref().unwrap().native_attempt_id.clone().unwrap();
         assert_eq!(state.active.as_ref().unwrap().user_message_id, user.id);
         assert_eq!(
             state.active.as_ref().unwrap().status,
@@ -4449,6 +4450,8 @@ mod tests {
         reopened.admit_chat_turn(cid, "TestOwner", "TestSoul", &backend,
             &crate::AtomicChatRequest::Retry { user_message_id: user.id.clone() }, 200_000)
             .await.unwrap();
+        let retry_state = reopened.get_conversation(cid).await.unwrap().unwrap().conversation.atomic_chat_state.unwrap();
+        assert_ne!(retry_state.active.unwrap().native_attempt_id.unwrap(), first_attempt);
         let final_usage = crate::AtomicChatUsage { input_tokens: 20, ..usage.clone() };
         let wrong_usage = crate::AtomicChatUsage { turn_id: "other-turn".into(), ..final_usage.clone() };
         assert!(reopened.save_chat_reply(cid, Some(&user.id), "Wrong usage", &records, Some(&wrong_usage))

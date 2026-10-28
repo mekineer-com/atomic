@@ -26,6 +26,7 @@ pub(super) enum Purpose {
 pub(super) struct NativeTurn<'a> {
     pub conversation_id: &'a str,
     pub turn_id: &'a str,
+    pub attempt_id: &'a str,
     pub operation: Operation,
     pub purpose: Purpose,
     pub input: ClaudeChatInput,
@@ -41,8 +42,19 @@ struct UsageCounts {
 
 #[derive(Deserialize)]
 pub(super) struct NativeUsage {
+    #[serde(deserialize_with = "nonempty_message_id")]
     message_id: String,
     usage: UsageCounts,
+}
+
+fn nonempty_message_id<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<String, D::Error> {
+    let id = String::deserialize(decoder)?;
+    if id.is_empty() {
+        return Err(serde::de::Error::custom(
+            "Native usage requires a message ID",
+        ));
+    }
+    Ok(id)
 }
 
 impl NativeUsage {
@@ -69,10 +81,9 @@ pub(super) struct NativeStatus {
 pub(super) struct NativeReceipt {
     pub session_id: String,
     pub turn_id: String,
+    pub attempt_id: String,
     pub purpose: String,
     pub status: String,
-    pub submission: String,
-    pub initialized: bool,
     pub usage: Option<NativeUsage>,
     pub text: Option<String>,
     pub error: Option<String>,
@@ -82,6 +93,7 @@ impl NativeStatus {
     fn matches_turn(&self, turn: &NativeTurn<'_>, observed_session: Option<&str>) -> bool {
         self.turn.as_ref().is_some_and(|receipt| {
             receipt.turn_id == turn.turn_id
+                && receipt.attempt_id == turn.attempt_id
                 && Some(&receipt.session_id) == self.session_id.as_ref()
                 && observed_session.is_none_or(|id| id == receipt.session_id)
                 && receipt.purpose
@@ -135,28 +147,15 @@ enum Frame {
     Session {
         session_id: String,
         turn_id: String,
-        profile: Value,
+        attempt_id: String,
     },
     Text {
         #[serde(flatten)]
         identity: BlockIdentity,
-        mode: String,
         text: String,
     },
-    ToolCall {
-        #[serde(flatten)]
-        _identity: BlockIdentity,
-        call_id: String,
-        name: String,
-        input: Value,
-    },
-    ToolResult {
-        #[serde(flatten)]
-        _identity: BlockIdentity,
-        call_id: String,
-        content: Value,
-        is_error: bool,
-    },
+    ToolCall,
+    ToolResult,
     Usage {
         #[serde(flatten)]
         usage: NativeUsage,
@@ -184,31 +183,23 @@ impl NativeStream {
         &mut self,
         frame: Frame,
         turn: &NativeTurn<'_>,
-        fingerprint: &str,
         on_event: &impl Fn(ChatEvent),
     ) -> Result<Option<String>, String> {
         match frame {
             Frame::Session {
                 session_id,
                 turn_id,
-                profile,
+                attempt_id,
             } => {
                 if turn_id != turn.turn_id
-                    || profile["fingerprint"].as_str() != Some(fingerprint)
+                    || attempt_id != turn.attempt_id
                     || self.session_id.as_ref().is_some_and(|id| id != &session_id)
                 {
-                    return Err("Native session/profile does not match this turn".into());
+                    return Err("Native session/attempt does not match this turn".into());
                 }
                 self.session_id = Some(session_id);
             }
-            Frame::Text {
-                identity,
-                mode,
-                text,
-            } => {
-                if mode != "replace" {
-                    return Err("Invalid native text snapshot mode".into());
-                }
+            Frame::Text { identity, text } => {
                 if identity.parent_call_id.is_none() {
                     let key = identity.message_id.unwrap_or(identity.record_id);
                     if self.text_message.as_ref() != Some(&key) {
@@ -227,28 +218,10 @@ impl NativeStream {
                 if self.session_id.as_ref() != Some(&session_id) {
                     return Err("Native completion has no matching session".into());
                 }
-                if turn.purpose == Purpose::Recap && text.trim().is_empty() {
-                    return Err("The recap was empty. Retry close-out.".into());
-                }
                 return Ok(Some(text));
             }
             Frame::Error { error } => return Err(error),
-            Frame::ToolCall {
-                call_id,
-                name,
-                input,
-                ..
-            } => {
-                let _ = (call_id, name, input);
-            }
-            Frame::ToolResult {
-                call_id,
-                content,
-                is_error,
-                ..
-            } => {
-                let _ = (call_id, content, is_error);
-            }
+            Frame::ToolCall | Frame::ToolResult => {}
         }
         Ok(None)
     }
@@ -275,6 +248,7 @@ async fn read_reply(
         .json(&serde_json::json!({
             "user_id": scope.user_id, "soul_id": scope.soul_id,
             "conversation_id": turn.conversation_id, "turn_id": turn.turn_id,
+            "attempt_id": turn.attempt_id,
             "operation": turn.operation, "purpose": turn.purpose,
             "prompt": turn.input.prompt, "system_prompt": turn.input.system_prompt,
             "bridge_url": bridge_url, "profile_fingerprint": profile.fingerprint,
@@ -289,7 +263,7 @@ async fn read_reply(
     })?;
     if !response.status().is_success() {
         let code = response.status();
-        stream.refused = code.is_client_error();
+        stream.refused = true;
         let body = response.text().await.map_err(|e| e.to_string())?;
         return Err(format!("Native chat refused ({code}): {body}"));
     }
@@ -303,7 +277,7 @@ async fn read_reply(
             }
             let frame =
                 serde_json::from_slice(&line).map_err(|e| format!("Invalid native frame: {e}"))?;
-            if let Some(text) = stream.accept(frame, turn, &profile.fingerprint, on_event)? {
+            if let Some(text) = stream.accept(frame, turn, on_event)? {
                 return Ok(text);
             }
         }
@@ -313,6 +287,50 @@ async fn read_reply(
         }
     }
     Err("Native stream ended without validated completion; reload before retrying".into())
+}
+
+async fn observe(
+    scope: &MemuScope,
+    turn: &NativeTurn<'_>,
+    stream: &mut NativeStream,
+    observation_budget: Duration,
+) -> Result<NativeStatus, String> {
+    let started = std::time::Instant::now();
+    let mut first_observation = true;
+    loop {
+        // Even a fully elapsed HTTP timeout gets one bounded receipt read.
+        let remaining = if first_observation {
+            Duration::from_secs(30)
+        } else {
+            observation_budget.saturating_sub(started.elapsed())
+        };
+        first_observation = false;
+        if remaining.is_zero() {
+            break Err("Native exit could not be confirmed within the execution budget".into());
+        }
+        let mut evidence =
+            tokio::time::timeout(remaining, status(scope, turn.conversation_id, turn.turn_id))
+                .await
+                .unwrap_or_else(|_| Err("Native status observation timed out".into()));
+        if let Ok(evidence) = &mut evidence {
+            if evidence.matches_turn(turn, stream.session_id.as_deref()) {
+                if let Some(usage) = evidence.turn.as_mut().and_then(|turn| turn.usage.take()) {
+                    stream.usage = Some(usage.snapshot(turn.turn_id));
+                }
+            }
+        }
+        if stream.refused
+            || evidence.as_ref().is_ok_and(|e| {
+                e.writer_idle == Some(true) && e.matches_turn(turn, stream.session_id.as_deref())
+            })
+        {
+            break evidence;
+        }
+        tokio::time::sleep(
+            Duration::from_secs(2).min(observation_budget.saturating_sub(started.elapsed())),
+        )
+        .await;
+    }
 }
 
 /// Called only under the executor-owned sitting lock, after managed admission.
@@ -374,34 +392,13 @@ pub(super) async fn execute(
     // A local timeout, terminal frame, or dead MCP connection is not writer proof.
     // After the captured execution budget plus grace, abandon future admission,
     // drain admitted tools and retain Uncertain. That is not proof of child exit.
-    let evidence = loop {
-        let remaining = observation_budget.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            break Err("Native exit could not be confirmed within the execution budget".into());
-        }
-        let mut evidence =
-            tokio::time::timeout(remaining, status(scope, turn.conversation_id, turn.turn_id))
-                .await
-                .unwrap_or_else(|_| Err("Native status observation timed out".into()));
-        if let Ok(evidence) = &mut evidence {
-            if evidence.matches_turn(&turn, stream.session_id.as_deref()) {
-                if let Some(usage) = evidence.turn.as_mut().and_then(|turn| turn.usage.take()) {
-                    stream.usage = Some(usage.snapshot(turn.turn_id));
-                }
-            }
-        }
-        if stream.refused
-            || evidence.as_ref().is_ok_and(|e| {
-                e.writer_idle == Some(true) && e.matches_turn(&turn, stream.session_id.as_deref())
-            })
-        {
-            break evidence;
-        }
-        tokio::time::sleep(
-            Duration::from_secs(2).min(observation_budget.saturating_sub(started.elapsed())),
-        )
-        .await;
-    };
+    let evidence = observe(
+        scope,
+        &turn,
+        &mut stream,
+        observation_budget.saturating_sub(started.elapsed()),
+    )
+    .await;
     // Stop admission and drain actual tools on every path, before terminal publication.
     let records = match lease {
         Some(lease) => lease.finish().await,
@@ -417,17 +414,7 @@ pub(super) async fn execute(
         match evidence {
             Ok(status) if status.matches_turn(&turn, stream.session_id.as_deref()) => {
                 let receipt = status.turn.expect("matched native receipt");
-                if let Some(usage) = receipt.usage {
-                    stream.usage = Some(usage.snapshot(turn.turn_id));
-                }
-                if status.writer_idle == Some(true)
-                    && receipt.status == "complete"
-                    && !(turn.purpose == Purpose::Recap
-                        && receipt
-                            .text
-                            .as_ref()
-                            .is_some_and(|text| text.trim().is_empty()))
-                {
+                if status.writer_idle == Some(true) && receipt.status == "complete" {
                     // Prefer the persisted terminal result on stream recovery;
                     // direct completion must agree with that same receipt.
                     match (result, receipt.text) {
@@ -437,7 +424,7 @@ pub(super) async fn execute(
                     }
                 } else {
                     Err((
-                        error,
+                        receipt.error.unwrap_or(error),
                         !(status.writer_idle == Some(true) && receipt.status == "failed"),
                     ))
                 }
@@ -517,6 +504,7 @@ mod tests {
     struct MockNative {
         mode: &'static str,
         credential: Mutex<String>,
+        attempt_id: Mutex<String>,
         status_reads: AtomicUsize,
     }
 
@@ -530,6 +518,7 @@ mod tests {
         let turn = NativeTurn {
             conversation_id: "conversation",
             turn_id: "turn",
+            attempt_id: "attempt",
             operation: Operation::Continue,
             purpose: Purpose::Reply,
             input: ClaudeChatInput {
@@ -546,16 +535,11 @@ mod tests {
         let mut stream = NativeStream::default();
         let mut accept = |value| {
             stream
-                .accept(
-                    serde_json::from_value(value).unwrap(),
-                    &turn,
-                    "fingerprint",
-                    &on_event,
-                )
+                .accept(serde_json::from_value(value).unwrap(), &turn, &on_event)
                 .unwrap()
         };
         accept(
-            serde_json::json!({"type":"session","session_id":"native","turn_id":"turn","profile":{"fingerprint":"fingerprint"}}),
+            serde_json::json!({"type":"session","session_id":"native","turn_id":"turn","attempt_id":"attempt","profile":{"fingerprint":"fingerprint"}}),
         );
         for (index, text, parent) in [
             (0, "old", None),
@@ -582,14 +566,25 @@ mod tests {
         assert_eq!(stream.usage.unwrap().message_id, "latest");
         let mut status: NativeStatus = serde_json::from_value(serde_json::json!({
             "session_id":"native", "writer_idle":true,
-            "turn":{"session_id":"native","turn_id":"turn","purpose":"reply",
+            "turn":{"session_id":"native","turn_id":"turn","attempt_id":"attempt","purpose":"reply",
                 "status":"complete","submission":"recorded","initialized":true,"text":"exact"}
         }))
         .unwrap();
         assert!(status.matches_turn(&turn, Some("native")));
         assert!(!status.matches_turn(&turn, Some("other-session")));
+        status.turn.as_mut().unwrap().attempt_id = "older-attempt".into();
+        assert!(!status.matches_turn(&turn, Some("native")));
+        status.turn.as_mut().unwrap().attempt_id = "attempt".into();
         status.turn.as_mut().unwrap().turn_id = "other-turn".into();
         assert!(!status.matches_turn(&turn, Some("native")));
+        assert!(serde_json::from_value::<NativeUsage>(serde_json::json!({
+            "message_id":"", "usage":counts()
+        }))
+        .is_err());
+        let _: Frame = serde_json::from_value(
+            serde_json::json!({"type":"tool_call","unused":"observation only"}),
+        )
+        .unwrap();
     }
 
     async fn mock_chat(
@@ -598,6 +593,7 @@ mod tests {
         body: web::Json<Value>,
     ) -> HttpResponse {
         assert_eq!(body["profile_fingerprint"], "fingerprint");
+        *mock.attempt_id.lock().unwrap() = body["attempt_id"].as_str().unwrap().into();
         if mock.mode == "recap" {
             assert_eq!(body["operation"], "continue");
             assert!(body["system_prompt"].is_null() && body["bridge_url"].is_null());
@@ -610,8 +606,13 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_string();
-            assert_eq!(body["operation"], "new");
-            assert_eq!(body["system_prompt"], "saved presence");
+            if mock.mode == "retry" {
+                assert_eq!(body["operation"], "retry");
+                assert!(body["system_prompt"].is_null());
+            } else {
+                assert_eq!(body["operation"], "new");
+                assert_eq!(body["system_prompt"], "saved presence");
+            }
             assert!(body["bridge_url"]
                 .as_str()
                 .unwrap()
@@ -621,8 +622,12 @@ mod tests {
             return HttpResponse::Conflict()
                 .json(serde_json::json!({"detail":"Profile changed; reload before sending"}));
         }
+        if mock.mode == "server_refused" {
+            return HttpResponse::BadGateway()
+                .json(serde_json::json!({"detail":"Atomic scoped tool discovery failed"}));
+        }
         let mut frames = vec![
-            serde_json::json!({"type":"session","session_id":"native-id","turn_id":body["turn_id"],"profile":{"fingerprint":"fingerprint"}}),
+            serde_json::json!({"type":"session","session_id":"native-id","turn_id":body["turn_id"],"attempt_id":body["attempt_id"],"profile":{"fingerprint":"fingerprint"}}),
             serde_json::json!({"type":"text","record_id":"record","message_id":"message","parent_call_id":null,
                 "block_index":0,"mode":"replace","text":"é first"}),
             serde_json::json!({"type":"text","record_id":"record","message_id":"message","parent_call_id":null,
@@ -634,7 +639,7 @@ mod tests {
         match mock.mode {
             "success" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact terminal response"})),
             "recap" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact recap"})),
-            "failed" => frames.push(serde_json::json!({"type":"error","error":"Recorded provider error"})),
+            "mismatch" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Not the saved answer"})),
             _ => {} // EOF is not completion; status decides what was recorded.
         }
         let bytes = frames
@@ -656,13 +661,14 @@ mod tests {
         query: web::Query<HashMap<String, String>>,
         request: HttpRequest,
     ) -> HttpResponse {
-        if mock.mode == "refused" {
+        if matches!(mock.mode, "refused" | "server_refused") {
             return HttpResponse::Ok()
                 .json(serde_json::json!({"session_id":null,"writer_idle":true,"turn":null}));
         }
-        let active =
-            mock.mode == "active" && mock.status_reads.fetch_add(1, Ordering::Relaxed) == 0;
-        if active {
+        let first = mock.status_reads.fetch_add(1, Ordering::Relaxed) == 0;
+        let active = mock.mode == "active" && first;
+        let older_attempt = mock.mode == "retry" && first;
+        if active || older_attempt {
             let url = format!(
                 "http://{}{CHAT_TOOLS_PATH}",
                 request.connection_info().host()
@@ -682,15 +688,19 @@ mod tests {
             );
         }
         let status = match mock.mode {
-            "success" | "recover" | "recap" => "complete",
+            "success" | "recover" | "recap" | "mismatch" => "complete",
+            "retry" if !older_attempt => "complete",
             "active" if !active => "complete",
-            "failed" => "failed",
+            "failed" | "retry" => "failed",
             _ => "uncertain",
         };
+        let mut receipt_counts = counts();
+        receipt_counts["cache_read_input_tokens"] = serde_json::json!(321);
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id","writer_idle":!active,
-            "turn":{"session_id":"native-id","turn_id":query["turn_id"],"purpose":if mock.mode == "recap" { "recap" } else { "reply" },
+            "turn":{"session_id":"native-id","turn_id":query["turn_id"],"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode == "recap" { "recap" } else { "reply" },
                 "status":status,"submission":"recorded","initialized":true,
-                "usage":{"message_id":"message","usage":counts()},
+                "usage":{"message_id":"message","usage":receipt_counts},
+                "error":if status == "failed" { Some("Saved native failure") } else { None },
                 "text":if mock.mode == "recap" { Some("Exact recap") }
                     else if mock.mode == "success" { Some("Exact terminal response") }
                     else if status == "complete" { Some("Recovered terminal response") } else { None }}}))
@@ -704,8 +714,11 @@ mod tests {
             "uncertain",
             "recover",
             "refused",
+            "server_refused",
             "active",
             "recap",
+            "retry",
+            "mismatch",
         ] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
@@ -729,6 +742,7 @@ mod tests {
             let mock = web::Data::new(MockNative {
                 mode,
                 credential: Mutex::new(String::new()),
+                attempt_id: Mutex::new(String::new()),
                 status_reads: AtomicUsize::new(0),
             });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -804,6 +818,24 @@ mod tests {
                     .await
                     .unwrap();
             }
+            if mode == "retry" {
+                db.0.fail_chat_turn(id, &input.id, "Previous attempt failed", false, None)
+                    .await
+                    .unwrap();
+                input =
+                    db.0.admit_chat_turn(
+                        id,
+                        &scope.user_id,
+                        &scope.soul_id,
+                        &Backend::ClaudeCode,
+                        &ChatRequest::Retry {
+                            user_message_id: input.id.clone(),
+                        },
+                        128000,
+                    )
+                    .await
+                    .unwrap();
+            }
             let session =
                 db.0.chat_tool_session(
                     id,
@@ -825,11 +857,27 @@ mod tests {
                 memu_response_sentences: 0,
                 memu_log_prompts: false,
             };
+            let lifecycle =
+                db.0.get_conversation(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .conversation
+                    .atomic_chat_state
+                    .unwrap();
+            let attempt = if mode == "recap" {
+                lifecycle.recap.unwrap().native_attempt_id.unwrap()
+            } else {
+                lifecycle.active.unwrap().native_attempt_id.unwrap()
+            };
             let turn = NativeTurn {
                 conversation_id: id,
                 turn_id: &input.id,
+                attempt_id: &attempt,
                 operation: if mode == "recap" {
                     Operation::Continue
+                } else if mode == "retry" {
+                    Operation::Retry
                 } else {
                     Operation::New
                 },
@@ -840,9 +888,17 @@ mod tests {
                 },
                 input: ClaudeChatInput {
                     prompt: input.content.clone(),
-                    system_prompt: (mode != "recap").then(|| "saved presence".into()),
+                    system_prompt: (!matches!(mode, "recap" | "retry"))
+                        .then(|| "saved presence".into()),
                 },
             };
+            if mode == "recover" {
+                *mock.attempt_id.lock().unwrap() = attempt.clone();
+                let mut expired_stream = NativeStream::default();
+                let recovered = observe(&scope, &turn, &mut expired_stream, Duration::ZERO).await.unwrap();
+                assert_eq!(recovered.turn.unwrap().status, "complete");
+                assert_eq!(expired_stream.usage.unwrap().cache_read_input_tokens, 321);
+            }
             let mut events = state.event_tx.subscribe();
             let result = execute(
                 &state, &db, &scope, &profile, &bridge, &base_url, turn, session,
@@ -850,10 +906,10 @@ mod tests {
             .await;
             let saved = db.0.get_conversation(id).await.unwrap().unwrap();
             let lifecycle = saved.conversation.atomic_chat_state.unwrap();
-            if mode == "refused" {
+            if matches!(mode, "refused" | "server_refused") {
                 assert!(lifecycle.native_usage.is_none());
             } else {
-                assert_eq!(lifecycle.native_usage.unwrap().cache_read_input_tokens, 100);
+                assert_eq!(lifecycle.native_usage.unwrap().cache_read_input_tokens, 321);
             }
             assert!(saved.messages.iter().all(|row| row.tool_calls.is_empty()));
             match mode {
@@ -870,7 +926,7 @@ mod tests {
                         ));
                     }
                 }
-                "success" | "recover" | "active" => {
+                "success" | "recover" | "active" | "retry" => {
                     let expected = if mode == "success" {
                         "Exact terminal response"
                     } else {
@@ -881,11 +937,15 @@ mod tests {
                     assert!(lifecycle.active.is_none());
                 }
                 _ => {
-                    assert!(result.is_err());
+                    if mode == "failed" {
+                        assert_eq!(result.unwrap_err().1["error"], "Saved native failure");
+                    } else {
+                        assert!(result.is_err());
+                    }
                     assert_eq!(saved.messages.len(), 1);
                     assert_eq!(
                         lifecycle.active.unwrap().status,
-                        if mode == "uncertain" {
+                        if matches!(mode, "uncertain" | "mismatch") {
                             TurnStatus::Uncertain
                         } else {
                             TurnStatus::Failed

@@ -814,6 +814,8 @@ pub enum AtomicChatRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AtomicChatTurn {
     pub user_message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_attempt_id: Option<String>,
     pub status: AtomicChatTurnStatus,
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -826,6 +828,8 @@ pub struct AtomicChatTurn {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AtomicChatRecap {
     pub request_message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_attempt_id: Option<String>,
     pub outcome: AtomicChatRecapOutcome,
 }
 

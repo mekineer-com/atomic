@@ -732,6 +732,8 @@ pub(crate) fn admitted_chat_message(
     request: &AtomicChatRequest,
     message_id: &str,
 ) {
+    let native_attempt_id = (state.backend == AtomicChatBackend::ClaudeCode)
+        .then(|| uuid::Uuid::new_v4().to_string());
     match request {
         AtomicChatRequest::New {
             page_context,
@@ -740,6 +742,7 @@ pub(crate) fn admitted_chat_message(
         } => {
             state.active = Some(AtomicChatTurn {
                 user_message_id: message_id.to_string(),
+                native_attempt_id,
                 status: AtomicChatTurnStatus::Running,
                 error: None,
                 page_context: page_context.clone(),
@@ -749,6 +752,7 @@ pub(crate) fn admitted_chat_message(
         AtomicChatRequest::Retry { .. } => {
             let turn = state.active.get_or_insert(AtomicChatTurn {
                 user_message_id: message_id.to_string(),
+                native_attempt_id: None,
                 status: AtomicChatTurnStatus::Running,
                 error: None,
                 page_context: None,
@@ -756,10 +760,12 @@ pub(crate) fn admitted_chat_message(
             });
             turn.status = AtomicChatTurnStatus::Running;
             turn.error = None;
+            turn.native_attempt_id = native_attempt_id;
         }
         AtomicChatRequest::Recap { .. } => {
             state.recap = Some(AtomicChatRecap {
                 request_message_id: message_id.to_string(),
+                native_attempt_id,
                 outcome: AtomicChatRecapOutcome::Running,
             });
         }
