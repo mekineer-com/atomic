@@ -638,13 +638,6 @@ pub trait ChatStore: Send + Sync {
         error: &str,
         uncertain: bool,
     ) -> StorageResult<()>;
-    async fn record_native_usage(
-        &self,
-        conversation_id: &str,
-        user_id: &str,
-        soul_id: &str,
-        usage: &AtomicChatUsage,
-    ) -> StorageResult<()>;
     async fn set_chat_phase(
         &self,
         conversation_id: &str,

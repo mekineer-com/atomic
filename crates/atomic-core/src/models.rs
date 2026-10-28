@@ -846,21 +846,9 @@ pub struct AtomicChatUsage {
     pub turn_id: String,
     pub message_id: String,
     pub input_tokens: usize,
-    #[serde(default)]
     pub cache_creation_input_tokens: usize,
-    #[serde(default)]
     pub cache_read_input_tokens: usize,
-    #[serde(default)]
     pub output_tokens: usize,
-}
-
-impl AtomicChatUsage {
-    pub fn context_tokens(&self) -> usize {
-        self.input_tokens
-            .saturating_add(self.cache_creation_input_tokens)
-            .saturating_add(self.cache_read_input_tokens)
-            .saturating_add(self.output_tokens)
-    }
 }
 
 /// Durable admission, not a process-local claim that a native writer is idle.

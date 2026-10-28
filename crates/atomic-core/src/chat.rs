@@ -6,7 +6,7 @@
 use crate::error::AtomicCoreError;
 use crate::models::{
     AtomicChatBackend, AtomicChatPhase, AtomicChatRecap, AtomicChatRecapOutcome, AtomicChatRequest,
-    AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus, AtomicChatUsage, ChatCitation, ChatMessage,
+    AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus, ChatCitation, ChatMessage,
     ChatMessageWithContext, ChatToolCall, Conversation, ConversationWithMessages,
     ConversationWithTags, Tag,
 };
@@ -874,44 +874,6 @@ pub fn fail_chat_turn(
     Ok(())
 }
 
-pub(crate) fn recorded_native_usage(
-    state: &mut AtomicChatState,
-    usage: &AtomicChatUsage,
-) -> Result<(), AtomicCoreError> {
-    let current = match &state.recap {
-        Some(recap) if !matches!(recap.outcome, AtomicChatRecapOutcome::Complete { .. }) =>
-            Some(recap.request_message_id.as_str()),
-        Some(_) => None,
-        None => state.active.as_ref().map(|turn| turn.user_message_id.as_str()),
-    };
-    if state.backend != AtomicChatBackend::ClaudeCode || state.phase == AtomicChatPhase::Closed
-        || current != Some(usage.turn_id.as_str()) || usage.message_id.trim().is_empty()
-    {
-        return Err(AtomicCoreError::Conflict(
-            "Native usage requires the matching admitted Claude turn".to_string(),
-        ));
-    }
-    // Each finalized primary message replaces the prior snapshot, never adds rounds.
-    state.native_usage = Some(usage.clone());
-    Ok(())
-}
-
-pub fn record_native_usage(
-    conn: &Connection,
-    conversation_id: &str,
-    user_id: &str,
-    soul_id: &str,
-    usage: &AtomicChatUsage,
-) -> Result<(), AtomicCoreError> {
-    let tx = conn.unchecked_transaction()?;
-    let mut state = owned_chat_state(&tx, conversation_id, user_id, soul_id)?
-        .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
-    recorded_native_usage(&mut state, usage)?;
-    write_chat_state(&tx, conversation_id, Some(&state))?;
-    tx.commit()?;
-    Ok(())
-}
-
 pub fn set_chat_phase(
     conn: &Connection,
     conversation_id: &str,
@@ -1637,45 +1599,22 @@ mod tests {
     }
 
     #[test]
-    fn native_usage_is_scoped_replaces_rounds_and_tracks_current_purpose() {
-        let (db, _temp) = setup_db();
-        let conn = db.conn.lock().unwrap();
-        let conv = create_conversation(&conn, &[], None, Some(("TestOwner", "TestSoul"))).unwrap();
-        let id = &conv.conversation.id;
-        set_chat_phase(&conn, id, "TestOwner", "TestSoul", &AtomicChatBackend::ClaudeCode, &AtomicChatPhase::Open).unwrap();
-        let user = admit_chat_turn(&conn, id, "TestOwner", "TestSoul", &AtomicChatBackend::ClaudeCode,
-            &AtomicChatRequest::New { content:"Fictional question".into(), page_context:None, canvas_context:None }, 128000).unwrap();
-        let mut usage = AtomicChatUsage { turn_id:user.id.clone(), message_id:"primary-1".into(),
-            input_tokens:100, cache_creation_input_tokens:200, cache_read_input_tokens:300, output_tokens:40 };
-        assert_eq!(usage.context_tokens(), 640);
-        record_native_usage(&conn, id, "TestOwner", "TestSoul", &usage).unwrap();
-        assert!(record_native_usage(&conn, id, "TestOwner", "OtherSoul", &usage).is_err());
-        let wrong = AtomicChatUsage { turn_id:"stale-input".into(), ..usage.clone() };
-        assert!(record_native_usage(&conn, id, "TestOwner", "TestSoul", &wrong).is_err());
-        fail_chat_turn(&conn, id, &user.id, "Fictional recorded failure", false).unwrap();
-        usage.message_id = "primary-2".into();
-        usage.input_tokens = 25;
-        record_native_usage(&conn, id, "TestOwner", "TestSoul", &usage).unwrap();
-        let saved = stored_chat_state(&conn, id).unwrap().unwrap();
-        assert_eq!(saved.native_usage, Some(usage.clone()));
-        assert_eq!(saved.native_usage.unwrap().context_tokens(), 565, "replace, do not sum model rounds");
-        set_chat_phase(&conn, id, "TestOwner", "TestSoul", &AtomicChatBackend::ClaudeCode, &AtomicChatPhase::Closing).unwrap();
-        let recap = admit_chat_turn(&conn, id, "TestOwner", "TestSoul", &AtomicChatBackend::ClaudeCode,
-            &AtomicChatRequest::Recap { instruction:"Fictional tool-free recap".into() }, 128000).unwrap();
-        assert!(record_native_usage(&conn, id, "TestOwner", "TestSoul", &usage).is_err());
-        usage.turn_id = recap.id;
-        record_native_usage(&conn, id, "TestOwner", "TestSoul", &usage).unwrap();
-        let mut closed = stored_chat_state(&conn, id).unwrap().unwrap();
-        closed.phase = AtomicChatPhase::Closed;
-        assert!(recorded_native_usage(&mut closed, &usage).is_err());
-        let mut api = closed.clone();
-        api.phase = AtomicChatPhase::Closing;
-        api.backend = AtomicChatBackend::Api;
-        assert!(recorded_native_usage(&mut api, &usage).is_err());
-        let legacy: AtomicChatState = serde_json::from_value(serde_json::json!({
+    fn native_usage_requires_complete_normalized_counts_but_old_state_still_reads() {
+        let value = serde_json::json!({"turn_id":"fictional-turn", "message_id":"primary",
+            "input_tokens":10, "cache_creation_input_tokens":0, "cache_read_input_tokens":20, "output_tokens":5});
+        assert!(serde_json::from_value::<crate::AtomicChatUsage>(value.clone()).is_ok());
+        for key in ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(serde_json::from_value::<crate::AtomicChatUsage>(missing).is_err());
+            let mut null = value.clone();
+            null[key] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<crate::AtomicChatUsage>(null).is_err());
+        }
+        let old: AtomicChatState = serde_json::from_value(serde_json::json!({
             "backend":"api", "phase":"open", "active":null
         })).unwrap();
-        assert!(legacy.native_usage.is_none());
+        assert!(old.native_usage.is_none());
     }
 
     #[test]
