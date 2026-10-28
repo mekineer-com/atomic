@@ -302,6 +302,7 @@ impl_reborrow_struct!(
     AtomicChatBackend,
     AtomicChatPhase,
     AtomicChatRequest,
+    AtomicChatUsage,
     CreateAtomRequest,
     UpdateAtomRequest,
     ListAtomsParams,
@@ -574,6 +575,8 @@ dispatch! {
         => sqlite: fail_chat_turn_sync, pg_trait: ChatStore, pg_method: fail_chat_turn;
     fn set_chat_phase_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, backend: &AtomicChatBackend, phase: &AtomicChatPhase) -> Result<(), AtomicCoreError>
         => sqlite: set_chat_phase_sync, pg_trait: ChatStore, pg_method: set_chat_phase;
+    fn record_native_usage_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, usage: &AtomicChatUsage) -> Result<(), AtomicCoreError>
+        => sqlite: record_native_usage_sync, pg_trait: ChatStore, pg_method: record_native_usage;
 
     // ---- WikiStore ----
     fn get_wiki_sync(&self, tag_id: &str) -> Result<Option<WikiArticleWithCitations>, AtomicCoreError>

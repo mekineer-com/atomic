@@ -839,6 +839,30 @@ pub enum AtomicChatRecapOutcome {
     Complete { reply_message_id: String },
 }
 
+/// One finalized primary Claude message, not cumulative sitting usage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AtomicChatUsage {
+    pub turn_id: String,
+    pub message_id: String,
+    pub input_tokens: usize,
+    #[serde(default)]
+    pub cache_creation_input_tokens: usize,
+    #[serde(default)]
+    pub cache_read_input_tokens: usize,
+    #[serde(default)]
+    pub output_tokens: usize,
+}
+
+impl AtomicChatUsage {
+    pub fn context_tokens(&self) -> usize {
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+            .saturating_add(self.output_tokens)
+    }
+}
+
 /// Durable admission, not a process-local claim that a native writer is idle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -850,6 +874,8 @@ pub struct AtomicChatState {
     pub recap: Option<AtomicChatRecap>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_usage: Option<AtomicChatUsage>,
 }
 
 /// Chat conversation

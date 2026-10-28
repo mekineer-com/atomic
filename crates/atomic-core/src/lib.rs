@@ -2724,6 +2724,17 @@ impl AtomicCore {
             .fail_chat_turn_sync(conversation_id, user_message_id, error, uncertain)
             .await
     }
+    /// Caller holds the scoped sitting lock and supplies finalized primary usage.
+    pub async fn record_native_usage(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        usage: &AtomicChatUsage,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage.record_native_usage_sync(conversation_id, user_id, soul_id, usage).await
+    }
+
     pub async fn set_chat_phase(
         &self,
         conversation_id: &str,

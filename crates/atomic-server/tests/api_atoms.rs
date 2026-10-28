@@ -378,6 +378,14 @@ fn start_memu_stub_with_model(
                     let backend = if profile_state.cli.load(Ordering::SeqCst) { "claude_code" } else { "api" };
                     async move {
                         assert_eq!(request.query_string(), "user_id=TestOwner&soul_id=TestSoul");
+                        if backend == "claude_code" {
+                            return HttpResponse::Ok().json(json!({
+                                "backend":"claude_code", "settings":{},
+                                "cli":{"model":"fictional-cli", "context_window_tokens":capacity,
+                                    "timeout_seconds":90, "effort":"medium", "fingerprint":"fictional-profile",
+                                    "memu_response_sentences":3, "memu_log_prompts":false}
+                            }));
+                        }
                         HttpResponse::Ok().json(json!({
                             "backend": backend,
                             "settings": {

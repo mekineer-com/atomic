@@ -44,6 +44,16 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         crate::chat::fail_chat_turn(&conn, conversation_id, user_message_id, error, uncertain)
     }
+    pub(crate) fn record_native_usage_sync(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        usage: &AtomicChatUsage,
+    ) -> StorageResult<()> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::chat::record_native_usage(&conn, conversation_id, user_id, soul_id, usage)
+    }
     pub(crate) fn set_chat_phase_sync(
         &self,
         conversation_id: &str,
@@ -301,6 +311,20 @@ impl ChatStore for SqliteStorage {
         })
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+    async fn record_native_usage(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        usage: &AtomicChatUsage,
+    ) -> StorageResult<()> {
+        let (storage, conversation_id, user_id, soul_id, usage) = (
+            self.clone(), conversation_id.to_string(), user_id.to_string(), soul_id.to_string(), usage.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            storage.record_native_usage_sync(&conversation_id, &user_id, &soul_id, &usage)
+        }).await.map_err(|e| AtomicCoreError::Lock(e.to_string()))?
     }
     async fn set_chat_phase(
         &self,

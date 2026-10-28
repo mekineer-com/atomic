@@ -524,6 +524,21 @@ impl ChatStore for PostgresStorage {
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
     }
 
+    async fn record_native_usage(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        usage: &AtomicChatUsage,
+    ) -> StorageResult<()> {
+        let mut tx = self.pool.begin().await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let mut state = owned_chat_state(&mut tx, &self.db_id, conversation_id, user_id, soul_id).await?
+            .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
+        crate::chat::recorded_native_usage(&mut state, usage)?;
+        write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
+        tx.commit().await.map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
+    }
     async fn set_chat_phase(
         &self,
         conversation_id: &str,

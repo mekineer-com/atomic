@@ -67,9 +67,45 @@ struct AtomicSessionStartResponse {
 }
 
 #[derive(Deserialize)]
-struct AtomicChatProfileResponse {
-    backend: Backend,
-    settings: HashMap<String, String>,
+#[serde(tag = "backend", rename_all = "snake_case")]
+enum AtomicChatProfileResponse {
+    Api { settings: HashMap<String, String> },
+    ClaudeCode { cli: ClaudeChatProfile },
+}
+
+#[derive(Deserialize)]
+struct ClaudeChatProfile {
+    model: String,
+    context_window_tokens: usize,
+    timeout_seconds: u64,
+    effort: String,
+    fingerprint: String,
+    memu_response_sentences: usize,
+    memu_log_prompts: bool,
+}
+
+impl ClaudeChatProfile {
+    fn validate(&self) -> Result<(), JsonError> {
+        if self.model.trim().is_empty() || self.fingerprint.trim().is_empty()
+            || self.context_window_tokens <= 20_000 || self.timeout_seconds == 0
+            || self.memu_response_sentences == 0
+        {
+            return Err((StatusCode::CONFLICT, serde_json::json!({"error":
+                "Configure a Claude model, usable claude_code_context_window_tokens above 20000, positive timeout and response sentence limit; reload the profile."})));
+        }
+        Ok(())
+    }
+
+    fn reader_timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout_seconds)
+    }
+
+    fn common_settings(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("memu_response_sentences".into(), self.memu_response_sentences.to_string()),
+            ("memu_log_prompts".into(), if self.memu_log_prompts { "1" } else { "0" }.into()),
+        ])
+    }
 }
 
 #[derive(Serialize)]
@@ -136,9 +172,9 @@ async fn fetch_atomic_snapshot(
     Ok(snapshot)
 }
 
-async fn fetch_atomic_chat_profile(
+async fn fetch_chat_profile(
     config: &MemuScope,
-) -> Result<HashMap<String, String>, JsonError> {
+) -> Result<AtomicChatProfileResponse, JsonError> {
     let client = memu_proxy::client_data()?;
     let value = memu_proxy::memu_json_data(
         client
@@ -156,20 +192,30 @@ async fn fetch_atomic_chat_profile(
             serde_json::json!({"error": format!("memU chat_profile returned invalid JSON: {e}")}),
         )
     })?;
-    if body.backend != Backend::Api {
-        return Err((
+    if let AtomicChatProfileResponse::ClaudeCode { cli } = &body {
+        cli.validate()?;
+    }
+    Ok(body)
+}
+
+async fn fetch_atomic_chat_profile(
+    config: &MemuScope,
+) -> Result<HashMap<String, String>, JsonError> {
+    let settings = match fetch_chat_profile(config).await? {
+        AtomicChatProfileResponse::Api { settings } => settings,
+        // N2 parses CLI metadata; production dispatch stays dormant until N4.
+        AtomicChatProfileResponse::ClaudeCode { .. } => return Err((
             StatusCode::CONFLICT,
             serde_json::json!({"error": "Claude Code dispatch is not connected yet. Restore claude_code=false for API sittings; no API fallback is used."}),
-        ));
-    }
-    api_capacity(&body.settings)?;
-    let (model_key, url_key) = match body.settings.get("provider").map(String::as_str) {
+        )),
+    };
+    api_capacity(&settings)?;
+    let (model_key, url_key) = match settings.get("provider").map(String::as_str) {
         Some("openai_compat") => ("openai_compat_llm_model", Some("openai_compat_base_url")),
         Some("ollama") => ("ollama_llm_model", Some("ollama_host")),
         _ => ("chat_model", None),
     };
-    if body
-        .settings
+    if settings
         .get(model_key)
         .is_none_or(|model| model.trim().is_empty())
     {
@@ -179,8 +225,7 @@ async fn fetch_atomic_chat_profile(
         ));
     }
     if let Some(key) = url_key {
-        if !body
-            .settings
+        if !settings
             .get(key)
             .and_then(|value| reqwest::Url::parse(value).ok())
             .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
@@ -191,14 +236,14 @@ async fn fetch_atomic_chat_profile(
             ));
         }
     }
-    let provider = atomic_core::providers::ProviderConfig::from_settings(&body.settings);
+    let provider = atomic_core::providers::ProviderConfig::from_settings(&settings);
     atomic_core::providers::create_streaming_llm_provider(&provider).map_err(|error| {
         (
             StatusCode::CONFLICT,
             serde_json::json!({"error":error.to_string()}),
         )
     })?;
-    Ok(body.settings)
+    Ok(settings)
 }
 
 fn api_capacity(settings: &HashMap<String, String>) -> Result<usize, JsonError> {
@@ -1262,6 +1307,35 @@ async fn finish_memu_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_profile_is_typed_without_api_settings_or_timeout_assumptions() {
+        let value = serde_json::json!({"backend":"claude_code", "cli":{
+            "model":"fictional-cli", "context_window_tokens":128000, "timeout_seconds":90,
+            "effort":"high", "fingerprint":"captured-profile", "memu_response_sentences":5,
+            "memu_log_prompts":true
+        }});
+        let profile: AtomicChatProfileResponse = serde_json::from_value(value.clone()).unwrap();
+        let AtomicChatProfileResponse::ClaudeCode { cli } = profile else { panic!("CLI backend") };
+        assert!(cli.validate().is_ok());
+        assert_eq!(cli.reader_timeout(), Duration::from_secs(90));
+        assert_eq!(cli.effort, "high");
+        assert_eq!(cli.common_settings(), HashMap::from([
+            ("memu_response_sentences".into(), "5".into()), ("memu_log_prompts".into(), "1".into()),
+        ]));
+        for (key, invalid) in [("context_window_tokens", serde_json::json!(20000)),
+            ("timeout_seconds", serde_json::json!(0)), ("model", serde_json::json!(" ")),
+            ("fingerprint", serde_json::json!(""))] {
+            let mut broken = value.clone();
+            broken["cli"][key] = invalid;
+            let parsed: AtomicChatProfileResponse = serde_json::from_value(broken).unwrap();
+            let AtomicChatProfileResponse::ClaudeCode { cli } = parsed else { panic!("CLI backend") };
+            assert!(cli.validate().is_err());
+        }
+        assert!(serde_json::from_value::<AtomicChatProfileResponse>(serde_json::json!({
+            "backend":"claude_code", "settings":{"chat_model":"not-a-CLI-profile"}
+        })).is_err());
+    }
 
     #[test]
     fn end_errors_are_plain_data_and_logged_before_delivery() {
