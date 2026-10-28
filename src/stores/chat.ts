@@ -360,6 +360,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         isLoading: false,
       }));
 
+      if (conversation.atomic_chat_state) void get().refreshConversation();
+
       return conversation;
     } catch (e) {
       set({ error: String(e), isLoading: false });

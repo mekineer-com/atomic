@@ -163,6 +163,17 @@ it('refreshes after Retry without sending another user input', async () => {
   expect(useChatStore.getState().isStreaming).toBe(false);
 });
 
+it('hydrates the server meter when a managed sitting is created', async () => {
+  const created = { ...useChatStore.getState().currentConversation!, id: 'new-managed-chat',
+    atomic_chat_state: { backend: 'api' as const, phase: 'open' as const, active: null } };
+  invoke.mockResolvedValueOnce(created).mockResolvedValueOnce({ ...created, messages: [],
+    context_meter: { estimated_tokens: 1234, limit_tokens: 180000, usable_tokens: 200000 } });
+  await useChatStore.getState().createConversation();
+  await Promise.resolve();
+  expect(useChatStore.getState().currentConversation?.context_meter?.estimated_tokens).toBe(1234);
+  expect(invoke.mock.calls.map(([command]) => command)).toEqual(['create_conversation', 'get_conversation']);
+});
+
 it('does not let a successful Send reload overwrite a newer durable state read', async () => {
   const current = useChatStore.getState().currentConversation!;
   const send: ChatMessageWithContext = { id: 'temp-send', conversation_id: current.id, role: 'user', content: 'Test',
