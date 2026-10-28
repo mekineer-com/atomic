@@ -731,6 +731,7 @@ async fn run_server(
     let server_shutdown = shutdown.clone();
     let shutdown_exports = app_state.export_jobs.clone();
     let shutdown_mcp = mcp_transport.clone();
+    let listener_chat_tools = chat_tools.clone();
 
     let server = HttpServer::new(move || {
         let cors = build_cors(cors_public_url.as_deref());
@@ -817,8 +818,9 @@ async fn run_server(
     .disable_signals()
     // Only idle connections remain when stop(true) is called below.
     .shutdown_timeout(2)
-    .bind((bind_owned.as_str(), port))?
-    .run();
+    .bind((bind_owned.as_str(), port))?;
+    listener_chat_tools.set_listeners(&server.addrs());
+    let server = server.run();
     let handle = server.handle();
     let stop = async move {
         if !stop_signal.await.map_err(std::io::Error::other)?? {

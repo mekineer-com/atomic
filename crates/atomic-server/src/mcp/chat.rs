@@ -16,7 +16,7 @@ use rmcp::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 use tokio::sync::Mutex as AsyncMutex;
@@ -27,6 +27,7 @@ pub const CHAT_TOOLS_PATH: &str = "/openalma/chat-tools/mcp";
 #[derive(Clone, Default)]
 pub struct ChatToolBridge {
     turns: Arc<Mutex<HashMap<String, (AtomicMcpTransport<ChatMcpServer>, Arc<ChatTurn>)>>>,
+    local_url: Arc<OnceLock<String>>,
 }
 
 /// Finish the lease before publishing its tool state. Drop is abandonment cleanup.
@@ -50,6 +51,30 @@ struct ChatTurn {
 struct ChatMcpServer(Arc<ChatTurn>);
 
 impl ChatToolBridge {
+    /// Resolve only from the actual bound listener, never a browser/proxy Host.
+    pub fn set_listeners(&self, addresses: &[std::net::SocketAddr]) {
+        if let Some(address) = addresses
+            .iter()
+            .find(|address| address.ip().is_loopback() || address.ip().is_unspecified())
+        {
+            let mut address = *address;
+            if address.ip().is_unspecified() {
+                address.set_ip(if address.is_ipv4() {
+                    std::net::Ipv4Addr::LOCALHOST.into()
+                } else {
+                    std::net::Ipv6Addr::LOCALHOST.into()
+                });
+            }
+            let _ = self.local_url.set(format!("http://{address}"));
+        }
+    }
+
+    pub(crate) fn local_url(&self) -> Result<&str, String> {
+        self.local_url.get().map(String::as_str).ok_or_else(|| {
+            "Native chat tools require Atomic to bind a loopback or wildcard listener".into()
+        })
+    }
+
     pub fn register(&self, session: ChatToolSession) -> Result<ChatToolLease, String> {
         let (owner, soul, conversation, message) = session.binding()
             .ok_or("Scoped tools require a saved owner/Soul/user turn")?;
@@ -312,6 +337,30 @@ mod tests {
         AtomicCore,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn bridge_uses_bound_loopback_port_not_a_public_url() {
+        for (bound, expected) in [
+            ("0.0.0.0:8123", "http://127.0.0.1:8123"),
+            ("[::]:8124", "http://[::1]:8124"),
+            ("127.0.0.1:8125", "http://127.0.0.1:8125"),
+        ] {
+            let bridge = ChatToolBridge::default();
+            assert!(bridge.local_url().is_err());
+            bridge.set_listeners(&[bound.parse().unwrap()]);
+            assert_eq!(bridge.clone().local_url().unwrap(), expected);
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bridge = ChatToolBridge::default();
+        bridge.set_listeners(&[listener.local_addr().unwrap()]);
+        assert_eq!(
+            bridge.local_url().unwrap(),
+            format!("http://{}", listener.local_addr().unwrap())
+        );
+        let external = ChatToolBridge::default();
+        external.set_listeners(&["192.0.2.1:8123".parse().unwrap()]);
+        assert!(external.local_url().is_err());
+    }
 
     async fn session(core: &AtomicCore, events: Arc<Mutex<Vec<ChatEvent>>>) -> ChatToolSession {
         let conversation = core

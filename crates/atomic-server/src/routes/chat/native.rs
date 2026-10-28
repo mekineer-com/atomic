@@ -184,24 +184,7 @@ pub(super) async fn prepare_input(
     let saved = conv.conversation.atomic_chat_state.as_ref()
         .filter(|saved| saved.backend == Backend::ClaudeCode && saved.phase != Phase::Closed)
         .ok_or_else(|| (StatusCode::CONFLICT, serde_json::json!({"error":"Native input requires an open or closing Claude Code sitting; existing API history cannot be migrated."})))?;
-    let previous_turn = saved
-        .recap
-        .as_ref()
-        .map(|recap| recap.request_message_id.as_str())
-        .or_else(|| {
-            saved
-                .active
-                .as_ref()
-                .map(|turn| turn.user_message_id.as_str())
-        })
-        .or_else(|| {
-            conv.messages
-                .iter()
-                .rev()
-                .find(|row| row.message.role == "user")
-                .map(|row| row.message.id.as_str())
-        })
-        .unwrap_or("");
+    let previous_turn = status_turn(&conv);
     let observed = status(scope, id, previous_turn)
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, serde_json::json!({"error":error})))?;
@@ -247,6 +230,72 @@ pub(super) async fn prepare_input(
         input_tokens: tokens,
         context_tokens,
     })
+}
+
+fn status_turn(conv: &atomic_core::ConversationWithMessages) -> &str {
+    conv.conversation
+        .atomic_chat_state
+        .as_ref()
+        .and_then(|saved| {
+            saved
+                .recap
+                .as_ref()
+                .map(|recap| recap.request_message_id.as_str())
+                .or_else(|| {
+                    saved
+                        .active
+                        .as_ref()
+                        .map(|turn| turn.user_message_id.as_str())
+                })
+        })
+        .or_else(|| {
+            conv.messages
+                .iter()
+                .rev()
+                .find(|row| row.message.role == "user")
+                .map(|row| row.message.id.as_str())
+        })
+        .unwrap_or("")
+}
+
+pub(super) async fn drain_idle(
+    db: &Db,
+    scope: &MemuScope,
+    id: &str,
+    bridge: &ChatToolBridge,
+    work: &ConversationWork,
+) -> Result<(), JsonError> {
+    if !work.matches(db, id) {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"Native drain requires this sitting's lock"}),
+        ));
+    }
+    let conv = read_chat(db, id).await?;
+    if !conversation_matches(&conv, scope) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error":"Conversation not found"}),
+        ));
+    }
+    let observed = status(scope, id, status_turn(&conv))
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, serde_json::json!({"error":error})))?;
+    if observed.writer_idle != Some(true) {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"Native writer exit is not established. Wait and reload; saved history is retained."}),
+        ));
+    }
+    for (turn, records) in bridge
+        .drain_sitting(&scope.user_id, &scope.soul_id, work)
+        .await
+    {
+        db.0.save_chat_tool_records(id, &turn, &records)
+            .await
+            .map_err(core_json_error)?;
+    }
+    Ok(())
 }
 
 /// Choose input before admission replaces the saved attempt. A receipt from an
@@ -856,7 +905,104 @@ async fn observe(
 }
 
 /// Called only under the executor-owned sitting lock, after managed admission.
-/// Production entry points remain gated until N4; N2c supplies reconciled input.
+/// Carry the exact read-only projection into the runner; production stays gated until N4.
+pub(super) async fn execute_prepared(
+    state: &AppState,
+    db: &Db,
+    scope: &MemuScope,
+    profile: &ClaudeChatProfile,
+    bridge: &ChatToolBridge,
+    id: &str,
+    turn_id: &str,
+    purpose: Purpose,
+    prepared: PreparedInput,
+) -> Result<ChatMessageWithContext, JsonError> {
+    let bridge_url = bridge
+        .local_url()
+        .map_err(|error| (StatusCode::CONFLICT, serde_json::json!({"error":error})))?;
+    let conv = read_chat(db, id).await?;
+    let saved = conv
+        .conversation
+        .atomic_chat_state
+        .as_ref()
+        .expect("admitted sitting");
+    let (attempt, page, canvas) = match purpose {
+        Purpose::Reply => {
+            let active = saved
+                .active
+                .as_ref()
+                .filter(|turn| turn.user_message_id == turn_id)
+                .expect("admitted native reply");
+            (
+                active.native_attempt_id.as_deref(),
+                active.page_context.clone(),
+                active.canvas_context.clone(),
+            )
+        }
+        Purpose::Recap => (
+            saved
+                .recap
+                .as_ref()
+                .filter(|recap| recap.request_message_id == turn_id)
+                .and_then(|recap| recap.native_attempt_id.as_deref()),
+            None,
+            None,
+        ),
+    };
+    let attempt = attempt.expect("admitted native attempt");
+    let session =
+        db.0.chat_tool_session(
+            id,
+            turn_id,
+            profile.common_settings(),
+            tools_for(scope),
+            page,
+            canvas,
+            chat_event_callback(
+                state.event_tx.clone(),
+                db.1.clone(),
+                Some((scope.user_id.clone(), scope.soul_id.clone())),
+            ),
+        )
+        .await;
+    let session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            let outcome = AtomicChatNativeOutcome {
+                attempt_id: attempt.into(),
+                usage: None,
+                input_recorded: Some(prepared.continuation),
+                context_tokens: saved.native_context_tokens,
+            };
+            db.0.fail_chat_turn(id, turn_id, &error.to_string(), false, Some(&outcome))
+                .await
+                .map_err(core_json_error)?;
+            chat_changed(state, db, id);
+            return Err(core_json_error(error));
+        }
+    };
+    execute(
+        state,
+        db,
+        scope,
+        profile,
+        bridge,
+        bridge_url,
+        NativeTurn {
+            conversation_id: id,
+            turn_id,
+            attempt_id: attempt,
+            purpose,
+            operation: prepared.operation,
+            continuation: prepared.continuation,
+            input: prepared.input,
+            input_tokens: prepared.input_tokens,
+        },
+        session,
+    )
+    .await
+}
+
 pub(super) async fn execute(
     state: &AppState,
     db: &Db,
@@ -1260,6 +1406,19 @@ mod tests {
         body: web::Json<Value>,
     ) -> HttpResponse {
         assert_eq!(body["profile_fingerprint"], "fingerprint");
+        if matches!(
+            mock.mode,
+            "success" | "route" | "retry" | "continuation_refused"
+        ) {
+            assert_eq!(
+                body["prompt_tokens"].as_u64().unwrap() as usize,
+                atomic_core::chunking::count_tokens(body["prompt"].as_str().unwrap()) + 8
+            );
+            assert!(
+                body["overhead_tokens"].as_u64().unwrap() > 0,
+                "the runner must receive preparation's schema-inclusive token count"
+            );
+        }
         *mock.attempt_id.lock().unwrap() = body["attempt_id"].as_str().unwrap().into();
         if mock.mode.starts_with("recap") {
             assert_eq!(body["operation"], "continue");
@@ -1307,7 +1466,7 @@ mod tests {
             serde_json::json!({"type":"usage","message_id":"message","usage":counts()}),
         ];
         match mock.mode {
-            "success" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact terminal response"})),
+            "success" | "route" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact terminal response"})),
             "recap" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact recap"})),
             "mismatch" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Not the saved answer"})),
             _ => {} // EOF is not completion; status decides what was recorded.
@@ -1388,7 +1547,7 @@ mod tests {
             );
         }
         let status = match mock.mode {
-            "success" | "recover" | "recap" | "mismatch" | "reload" => "complete",
+            "success" | "route" | "recover" | "recap" | "mismatch" | "reload" => "complete",
             "retry" if !older_attempt => "complete",
             "active" if !active => "complete",
             "failed" | "retry" | "reload_failed" => "failed",
@@ -1403,7 +1562,7 @@ mod tests {
                 "usage":{"message_id":"message","usage":receipt_counts},
                 "error":if status == "failed" { Some("Saved native failure") } else { None },
                 "text":if mock.mode.starts_with("recap") { Some("Exact recap") }
-                    else if mock.mode == "success" { Some("Exact terminal response") }
+                    else if matches!(mock.mode, "success" | "route") { Some("Exact terminal response") }
                     else if status == "complete" { Some("Recovered terminal response") } else { None }}}))
     }
 
@@ -1411,6 +1570,7 @@ mod tests {
     async fn native_runner_preserves_terminal_text_usage_and_uncertainty_then_revokes_tools() {
         for mode in [
             "success",
+            "route",
             "failed",
             "uncertain",
             "recover",
@@ -1455,6 +1615,7 @@ mod tests {
                 status_reads: AtomicUsize::new(0),
             });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            bridge.set_listeners(&[listener.local_addr().unwrap()]);
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let factory_bridge = bridge.clone();
             let factory_mock = mock.clone();
@@ -1501,8 +1662,8 @@ mod tests {
             };
             let mut prepared = None;
             let mut _prepared_work = None;
-            if mode == "success" {
-                // Native creation must bind its backend before first Send (remaining route work).
+            if matches!(mode, "success" | "route") {
+                // Creation binds the backend before saving the first input.
                 db.0.set_chat_phase(
                     id,
                     &scope.user_id,
@@ -1515,6 +1676,11 @@ mod tests {
                 db.0.save_message(id, "system", "saved presence")
                     .await
                     .unwrap();
+                let empty = read_chat(&db, id).await.unwrap();
+                assert!(!needs_activity_recap(
+                    &empty,
+                    &rows_for_saved_history(&empty)
+                ));
                 db.0.set_setting(
                     "chat_prompt",
                     "Local override must not leak into native input",
@@ -1523,6 +1689,11 @@ mod tests {
                 .unwrap();
                 let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
                 let before = serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap();
+                assert!(AtomicChatProfileResponse::Api {
+                    settings: HashMap::new()
+                }
+                .check_binding(&read_chat(&db, id).await.unwrap())
+                .is_err());
                 let first = prepare_input(&db, &scope, id, &request, &profile, &work)
                     .await
                     .unwrap();
@@ -1548,6 +1719,80 @@ mod tests {
                 );
                 prepared = Some(first);
                 _prepared_work = Some(work);
+            }
+            if mode == "route" {
+                let state = web::Data::new(state);
+                let mut small = profile.clone();
+                small.context_window_tokens = 20_001;
+                let work = _prepared_work.take().unwrap();
+                let before = serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap();
+                let error = chat_work_with_profile(
+                    state.clone(),
+                    Db(db.0.clone(), db.1.clone()),
+                    scope.clone(),
+                    id.clone(),
+                    request.clone(),
+                    web::Data::new(bridge.clone()),
+                    AtomicChatProfileResponse::ClaudeCode { cli: small },
+                    work,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.1["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("too long even for a fresh sitting"));
+                assert_eq!(
+                    serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap(),
+                    before
+                );
+                // The production gate is intentionally bypassed only at this typed
+                // internal entry; this runs the same admission/capacity/dispatch path.
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                let result = chat_work_with_profile(
+                    state.clone(),
+                    Db(db.0.clone(), db.1.clone()),
+                    scope.clone(),
+                    id.clone(),
+                    request,
+                    web::Data::new(bridge.clone()),
+                    AtomicChatProfileResponse::ClaudeCode {
+                        cli: profile.clone(),
+                    },
+                    work,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.message.content, "Exact terminal response");
+                let saved = read_chat(&db, id).await.unwrap();
+                let lifecycle = saved.conversation.atomic_chat_state.as_ref().unwrap();
+                assert_eq!(lifecycle.backend, Backend::ClaudeCode);
+                assert_eq!(lifecycle.native_context_tokens, Some(700));
+                assert_eq!(lifecycle.context_window_tokens, Some(128000));
+                assert!(lifecycle.active.is_none());
+                assert_eq!(saved.messages.len(), 3);
+                let original_attempt = mock.attempt_id.lock().unwrap().clone();
+                let user = saved
+                    .messages
+                    .iter()
+                    .find(|row| row.message.role == "user")
+                    .unwrap();
+                handle.stop(true).await;
+                let recovered = chat_work(
+                    state,
+                    Db(db.0.clone(), db.1.clone()),
+                    scope.clone(),
+                    id.clone(),
+                    ChatRequest::Retry {
+                        user_message_id: user.message.id.clone(),
+                    },
+                    web::Data::new(bridge.clone()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(recovered.message.id, result.message.id);
+                assert_eq!(*mock.attempt_id.lock().unwrap(), original_attempt);
+                continue;
             }
             let mut input =
                 db.0.admit_chat_turn(
@@ -1859,7 +2104,7 @@ mod tests {
                 handle.stop(true).await;
                 continue;
             }
-            let mut turn = NativeTurn {
+            let turn = NativeTurn {
                 conversation_id: id,
                 turn_id: &input.id,
                 attempt_id: &attempt,
@@ -1884,12 +2129,6 @@ mod tests {
                 },
                 input_tokens: 100,
             };
-            if let Some(prepared) = prepared {
-                turn.operation = prepared.operation;
-                turn.continuation = prepared.continuation;
-                turn.input = prepared.input;
-                turn.input_tokens = prepared.input_tokens;
-            }
             if mode == "recover" {
                 *mock.attempt_id.lock().unwrap() = attempt.clone();
                 let mut expired_stream = NativeStream::default();
@@ -1900,10 +2139,26 @@ mod tests {
                 assert_eq!(expired_stream.usage.unwrap().cache_read_input_tokens, 321);
             }
             let mut events = state.event_tx.subscribe();
-            let result = execute(
-                &state, &db, &scope, &profile, &bridge, &base_url, turn, session,
-            )
-            .await;
+            let result = if let Some(prepared) = prepared {
+                let _ = session.finish();
+                execute_prepared(
+                    &state,
+                    &db,
+                    &scope,
+                    &profile,
+                    &bridge,
+                    id,
+                    &input.id,
+                    Purpose::Reply,
+                    prepared,
+                )
+                .await
+            } else {
+                execute(
+                    &state, &db, &scope, &profile, &bridge, &base_url, turn, session,
+                )
+                .await
+            };
             if mode == "failed" {
                 let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
                 let retry = ChatRequest::Retry {
@@ -1939,6 +2194,17 @@ mod tests {
                 );
             }
             let saved = db.0.get_conversation(id).await.unwrap().unwrap();
+            if matches!(mode, "refused" | "server_refused") {
+                assert!(!needs_activity_recap(
+                    &saved,
+                    &rows_for_saved_history(&saved)
+                ));
+            } else if matches!(mode, "failed" | "uncertain") {
+                assert!(
+                    needs_activity_recap(&saved, &rows_for_saved_history(&saved)),
+                    "recorded native work needs a recap even without a saved assistant row"
+                );
+            }
             let lifecycle = saved.conversation.atomic_chat_state.unwrap();
             assert_eq!(
                 lifecycle.native_context_tokens,

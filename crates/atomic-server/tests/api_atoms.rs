@@ -665,6 +665,7 @@ fn test_app(
 > {
     App::new()
         .app_data(ctx.state.clone())
+        .app_data(web::Data::new(atomic_server::mcp::chat::ChatToolBridge::default()))
         .route(
             "/api/exports/{id}/download",
             web::get().to(atomic_server::routes::exports::download_export),

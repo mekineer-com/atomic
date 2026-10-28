@@ -7,6 +7,7 @@ use crate::error::{
     core_json_error, json_error_response, ok_or_error, ApiErrorResponse, JsonError,
 };
 use crate::event_bridge::chat_event_callback;
+use crate::mcp::chat::ChatToolBridge;
 use crate::routes::memu_proxy::{self, memu_error_text, MemuScope};
 use crate::state::{AppState, ServerEvent};
 use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse};
@@ -77,14 +78,14 @@ struct AtomicSessionStartResponse {
     snapshot_text: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 enum AtomicChatProfileResponse {
     Api { settings: HashMap<String, String> },
     ClaudeCode { cli: ClaudeChatProfile },
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ClaudeChatProfile {
     model: String,
     context_window_tokens: usize,
@@ -101,6 +102,46 @@ impl ClaudeChatProfile {
             ("memu_response_sentences".into(), self.memu_response_sentences.to_string()),
             ("memu_log_prompts".into(), self.memu_log_prompts.to_string()),
         ])
+    }
+}
+
+impl AtomicChatProfileResponse {
+    fn backend(&self) -> Backend {
+        match self {
+            Self::Api { .. } => Backend::Api,
+            Self::ClaudeCode { .. } => Backend::ClaudeCode,
+        }
+    }
+
+    fn capacity(&self) -> Result<usize, JsonError> {
+        match self {
+            Self::Api { settings } => api_capacity(settings),
+            Self::ClaudeCode { cli } if cli.context_window_tokens > 20_000 => {
+                Ok(cli.context_window_tokens)
+            }
+            Self::ClaudeCode { .. } => Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({"error":"Set claude_code_context_window_tokens above 20000 to the account's usable allowance"}),
+            )),
+        }
+    }
+
+    fn check_binding(&self, conv: &atomic_core::ConversationWithMessages) -> Result<(), JsonError> {
+        let backend = conv
+            .conversation
+            .atomic_chat_state
+            .as_ref()
+            .map(|saved| saved.backend)
+            .unwrap_or(Backend::Api);
+        if backend != self.backend() {
+            return Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({"error":format!(
+                "This sitting requires claude_code={}. Restore its original backend to continue/end it, or start a new sitting.",
+                backend == Backend::ClaudeCode)}),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -193,16 +234,19 @@ async fn fetch_chat_profile(
 
 async fn fetch_atomic_chat_profile(
     config: &MemuScope,
-) -> Result<HashMap<String, String>, JsonError> {
-    let settings = match fetch_chat_profile(config).await? {
+) -> Result<AtomicChatProfileResponse, JsonError> {
+    let profile = fetch_chat_profile(config).await?;
+    profile.capacity()?;
+    let settings = match &profile {
         AtomicChatProfileResponse::Api { settings } => settings,
         // N2 parses CLI metadata; production dispatch stays dormant until N4.
-        AtomicChatProfileResponse::ClaudeCode { .. } => return Err((
-            StatusCode::CONFLICT,
-            serde_json::json!({"error": "Claude Code dispatch is not connected yet. Restore claude_code=false for API sittings; no API fallback is used."}),
-        )),
+        AtomicChatProfileResponse::ClaudeCode { .. } => {
+            return Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "Claude Code dispatch is not connected yet. Restore claude_code=false for API sittings; no API fallback is used."}),
+            ))
+        }
     };
-    api_capacity(&settings)?;
     let (model_key, url_key) = match settings.get("provider").map(String::as_str) {
         Some("openai_compat") => ("openai_compat_llm_model", Some("openai_compat_base_url")),
         Some("ollama") => ("ollama_llm_model", Some("ollama_host")),
@@ -229,14 +273,14 @@ async fn fetch_atomic_chat_profile(
             ));
         }
     }
-    let provider = atomic_core::providers::ProviderConfig::from_settings(&settings);
+    let provider = atomic_core::providers::ProviderConfig::from_settings(settings);
     atomic_core::providers::create_streaming_llm_provider(&provider).map_err(|error| {
         (
             StatusCode::CONFLICT,
             serde_json::json!({"error":error.to_string()}),
         )
     })?;
-    Ok(settings)
+    Ok(profile)
 }
 
 fn api_capacity(settings: &HashMap<String, String>) -> Result<usize, JsonError> {
@@ -293,7 +337,14 @@ async fn change_phase(
     id: &str,
     phase: Phase,
 ) -> Result<(), JsonError> {
-    db.0.set_chat_phase(id, &scope.user_id, &scope.soul_id, &Backend::Api, &phase)
+    let backend = read_chat(db, id)
+        .await?
+        .conversation
+        .atomic_chat_state
+        .as_ref()
+        .map(|saved| saved.backend)
+        .unwrap_or(Backend::Api);
+    db.0.set_chat_phase(id, &scope.user_id, &scope.soul_id, &backend, &phase)
         .await
         .map_err(core_json_error)?;
     chat_changed(state, db, id);
@@ -442,6 +493,13 @@ pub(crate) async fn lock_conversation(
     scope: Option<&MemuScope>,
 ) -> Result<ConversationWork, JsonError> {
     require_conversation_owner(db, id, scope).await?;
+    let (key, lock) = conversation_lock(db, id).await;
+    let guard = lock.lock_owned().await;
+    require_conversation_owner(db, id, scope).await?;
+    Ok(ConversationWork { key, _guard: guard })
+}
+
+async fn conversation_lock(db: &Db, id: &str) -> (ConversationKey, Arc<tokio::sync::Mutex<()>>) {
     let key = (db.1.clone(), id.to_string());
     let lock = {
         let mut locks = CONVERSATION_WORK.lock().await;
@@ -453,9 +511,7 @@ pub(crate) async fn lock_conversation(
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
         )
     };
-    let guard = lock.lock_owned().await;
-    require_conversation_owner(db, id, scope).await?;
-    Ok(ConversationWork { key, _guard: guard })
+    (key, lock)
 }
 
 fn rows_for_saved_history(
@@ -474,6 +530,25 @@ fn rows_for_saved_history(
 
 fn has_user_assistant_interchange(rows: &[AtomicTranscriptRow]) -> bool {
     rows.iter().any(|m| m.role == "user") && rows.iter().any(|m| m.role == "assistant")
+}
+
+fn needs_activity_recap(
+    conv: &atomic_core::ConversationWithMessages,
+    rows: &[AtomicTranscriptRow],
+) -> bool {
+    has_user_assistant_interchange(rows)
+        || conv
+            .conversation
+            .atomic_chat_state
+            .as_ref()
+            .is_some_and(|saved| {
+                saved.backend == Backend::ClaudeCode
+                    && (saved
+                        .active
+                        .as_ref()
+                        .is_some_and(|turn| turn.native_input_recorded != Some(false))
+                        || conv.messages.iter().any(|row| !row.tool_calls.is_empty()))
+            })
 }
 
 fn existing_recap(conv: &atomic_core::ConversationWithMessages) -> Option<String> {
@@ -558,11 +633,14 @@ pub async fn create_conversation(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Some(scope) = &memu_session {
-        if let Err(error) = fetch_atomic_chat_profile(scope).await {
-            return json_error_response(error);
+    let backend = if let Some(scope) = &memu_session {
+        match fetch_atomic_chat_profile(scope).await {
+            Ok(profile) => profile.backend(),
+            Err(error) => return json_error_response(error),
         }
-    }
+    } else {
+        Backend::Api
+    };
     let req = body.into_inner();
     let mut conv = match db
         .0
@@ -603,7 +681,7 @@ pub async fn create_conversation(
             &conv_id,
             &memu_session.user_id,
             &memu_session.soul_id,
-            &Backend::Api,
+            &backend,
             &Phase::Open,
         )
         .await?;
@@ -674,6 +752,7 @@ pub async fn get_conversation(
     state: web::Data<AppState>,
     db: Db,
     path: web::Path<String>,
+    bridge: web::Data<ChatToolBridge>,
 ) -> HttpResponse {
     let scope = match request_scope(&state, &request).await {
         Ok(value) => value,
@@ -681,11 +760,39 @@ pub async fn get_conversation(
     };
     let id = path.into_inner();
     match db.0.get_conversation(&id).await {
-        Ok(Some(conv))
+        Ok(Some(mut conv))
             if scope
                 .as_ref()
                 .map_or(true, |scope| conversation_matches(&conv, scope)) =>
         {
+            let mut recovery_error = None;
+            if let Some(scope) = scope.as_ref().filter(|_| {
+                conv.conversation
+                    .atomic_chat_state
+                    .as_ref()
+                    .is_some_and(|saved| {
+                        saved.backend == Backend::ClaudeCode && saved.phase != Phase::Closed
+                    })
+            }) {
+                let (key, lock) = conversation_lock(&db, &id).await;
+                // A read must not queue behind or drain the active sitting worker.
+                if let Ok(guard) = lock.try_lock_owned() {
+                    let work = ConversationWork { key, _guard: guard };
+                    if let Err((_, error)) =
+                        native::reconcile(&state, &db, scope, &bridge, &id, &work).await
+                    {
+                        recovery_error = Some(error);
+                    }
+                    conv = match read_chat(&db, &id).await {
+                        Ok(saved) => saved,
+                        Err(error) => return json_error_response(error),
+                    };
+                    if !conversation_matches(&conv, scope) {
+                        return HttpResponse::NotFound()
+                            .json(serde_json::json!({"error":"Conversation not found"}));
+                    }
+                }
+            }
             let mut value = serde_json::to_value(hide_system_messages(conv.clone()))
                 .expect("serializable conversation");
             if let Some(scope) = scope.filter(|_| {
@@ -696,10 +803,18 @@ pub async fn get_conversation(
                     .is_some_and(|saved| saved.phase == Phase::Closed)
             }) {
                 let meter: Result<serde_json::Value, JsonError> = async {
-                    let settings = fetch_atomic_chat_profile(&scope).await?;
-                    let capacity = api_capacity(&settings)?;
-                    let tokens = db.0.estimate_chat_request_tokens(&id, &standing_request(&conv, &scope.user_id), settings, tools_for(&scope))
-                        .await.map_err(core_json_error)?;
+                    let profile = fetch_atomic_chat_profile(&scope).await?;
+                    profile.check_binding(&conv)?;
+                    let capacity = profile.capacity()?;
+                    let tokens = match profile {
+                        AtomicChatProfileResponse::Api { settings } => db.0.estimate_chat_request_tokens(
+                            &id, &standing_request(&conv, &scope.user_id), settings, tools_for(&scope))
+                            .await.map_err(core_json_error)?,
+                        AtomicChatProfileResponse::ClaudeCode { .. } => conv.conversation.atomic_chat_state
+                            .as_ref().and_then(|saved| saved.native_context_tokens)
+                            .ok_or_else(|| (StatusCode::CONFLICT,
+                                serde_json::json!({"error":"Native context size is unknown; no fit estimate is available. End can still attempt a same-session recap."})))?,
+                    };
                     Ok(serde_json::json!({"estimated_tokens":tokens,"limit_tokens":capacity - 20_000,"usable_tokens":capacity}))
                 }.await;
                 match meter {
@@ -709,6 +824,9 @@ pub async fn get_conversation(
                             serde_json::json!(memu_error_text(&error.to_string()))
                     }
                 }
+            }
+            if let Some(error) = recovery_error {
+                value["context_error"] = serde_json::json!(memu_error_text(&error.to_string()));
             }
             HttpResponse::Ok().json(value)
         }
@@ -864,66 +982,93 @@ pub struct RetryMessageBody {
     user_message_id: String,
 }
 
-fn schedule_close_out(state: web::Data<AppState>, db: Db, scope: MemuScope, id: String) {
+fn schedule_close_out(
+    state: web::Data<AppState>,
+    db: Db,
+    scope: MemuScope,
+    id: String,
+    bridge: web::Data<ChatToolBridge>,
+) {
     atomic_core::executor::spawn(async move {
         let result = async {
-            let _work = lock_conversation(&db, &id, Some(&scope)).await?;
-            finish_memu_session(state, db, scope, &id).await
+            let work = lock_conversation(&db, &id, Some(&scope)).await?;
+            finish_memu_session(state, db, scope, &id, &bridge, &work).await
         }
         .await;
         let _ = end_work_result(&id, result);
     });
 }
 
-async fn api_chat_work(
+async fn chat_work(
     state: web::Data<AppState>,
     db: Db,
     scope: MemuScope,
     id: String,
     request: ChatRequest,
+    bridge: web::Data<ChatToolBridge>,
 ) -> Result<atomic_core::ChatMessageWithContext, JsonError> {
-    let _work = lock_conversation(&db, &id, Some(&scope)).await?;
-    let settings = fetch_atomic_chat_profile(&scope).await?;
-    let capacity = api_capacity(&settings)?;
-    reconcile_api(&state, &db, &id).await?;
+    let work = lock_conversation(&db, &id, Some(&scope)).await?;
+    if let Some(reply) = saved_retry_reply(&read_chat(&db, &id).await?, &request) {
+        return Ok(reply);
+    }
+    let profile = fetch_atomic_chat_profile(&scope).await?;
+    chat_work_with_profile(state, db, scope, id, request, bridge, profile, work).await
+}
+
+// The captured profile and sitting guard survive browser delivery loss together.
+async fn chat_work_with_profile(
+    state: web::Data<AppState>,
+    db: Db,
+    scope: MemuScope,
+    id: String,
+    request: ChatRequest,
+    bridge: web::Data<ChatToolBridge>,
+    profile: AtomicChatProfileResponse,
+    work: ConversationWork,
+) -> Result<atomic_core::ChatMessageWithContext, JsonError> {
     let conv = read_chat(&db, &id).await?;
-    if let ChatRequest::Retry { user_message_id } = &request {
-        let dialogue = atomic_core::chat::dialogue_messages(&conv, None);
-        if let Some((index, _)) = dialogue
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, row)| row.message.role == "user")
-            .filter(|(_, row)| {
-                row.message.id == *user_message_id
-                    && !(conv.conversation.atomic_chat_state.is_none()
-                        && is_atomic_recap_prompt(&row.message.content))
-            })
-        {
-            if let Some(reply) = dialogue
-                .iter()
-                .skip(index + 1)
-                .find(|row| row.message.role == "assistant")
-            {
-                return Ok((**reply).clone());
-            }
+    let capacity = profile.capacity()?;
+    let backend = profile.backend();
+    profile.check_binding(&conv)?;
+    match &profile {
+        AtomicChatProfileResponse::Api { .. } => reconcile_api(&state, &db, &id).await?,
+        AtomicChatProfileResponse::ClaudeCode { .. } => {
+            bridge
+                .local_url()
+                .map_err(|error| (StatusCode::CONFLICT, serde_json::json!({"error":error})))?;
+            native::reconcile(&state, &db, &scope, &bridge, &id, &work).await?;
+            native::drain_idle(&db, &scope, &id, &bridge, &work).await?;
         }
+    }
+    let conv = read_chat(&db, &id).await?;
+    if let Some(reply) = saved_retry_reply(&conv, &request) {
+        return Ok(reply);
     }
     // Validate using admission's pure rules before sizing or choosing close-out.
     db.0.validate_chat_request(
         &id,
         &scope.user_id,
         &scope.soul_id,
-        &Backend::Api,
+        &backend,
         &request,
         capacity,
     )
     .await
     .map_err(core_json_error)?;
-    let projected =
-        db.0.estimate_chat_request_tokens(&id, &request, settings.clone(), tools_for(&scope))
-            .await
-            .map_err(core_json_error)?;
+    let prepared = match &profile {
+        AtomicChatProfileResponse::ClaudeCode { cli } => {
+            Some(native::prepare_input(&db, &scope, &id, &request, cli, &work).await?)
+        }
+        _ => None,
+    };
+    let projected = match &profile {
+        AtomicChatProfileResponse::Api { settings } =>
+            db.0.estimate_chat_request_tokens(&id, &request, settings.clone(), tools_for(&scope))
+                .await.map_err(core_json_error)?,
+        AtomicChatProfileResponse::ClaudeCode { .. } => prepared.as_ref().unwrap().context_tokens
+            .ok_or_else(|| (StatusCode::CONFLICT, serde_json::json!({"error":
+                "Native context size is unknown. Keep this history and close out in the same sitting, or reload after native work settles; the draft is retained."})))?,
+    };
     if projected >= capacity - 20_000 {
         let previous = conv
             .conversation
@@ -933,22 +1078,39 @@ async fn api_chat_work(
         if previous.is_some_and(|old| capacity < old && projected < old.saturating_sub(20_000)) {
             return Err((
                 StatusCode::CONFLICT,
-                serde_json::json!({"error":"The selected model/provider has too small a usable context window for this sitting. Restore a larger compatible model and llm.context_window_tokens; the draft and sitting are retained."}),
+                serde_json::json!({"error":format!("The selected model/provider has too small a usable context window for this sitting. Restore a larger compatible model and {}; the draft and sitting are retained.", if backend == Backend::Api { "llm.context_window_tokens" } else { "claude_code_context_window_tokens" })}),
             ));
         }
-        if matches!(request, ChatRequest::New { .. })
-            && db
-                .0
-                .estimate_fresh_chat_request_tokens(
-                    &id,
-                    &request,
-                    settings.clone(),
-                    tools_for(&scope),
-                )
-                .await
-                .map_err(core_json_error)?
-                >= capacity - 20_000
-        {
+        let fresh_tokens = if matches!(request, ChatRequest::New { .. }) {
+            match &profile {
+                AtomicChatProfileResponse::Api { settings } => {
+                    db.0.estimate_fresh_chat_request_tokens(
+                        &id,
+                        &request,
+                        settings.clone(),
+                        tools_for(&scope),
+                    )
+                    .await
+                    .map_err(core_json_error)?
+                }
+                AtomicChatProfileResponse::ClaudeCode { cli } => {
+                    db.0.project_claude_chat_input(
+                        &id,
+                        &request,
+                        cli.common_settings(),
+                        tools_for(&scope),
+                        true,
+                        None,
+                    )
+                    .await
+                    .map_err(core_json_error)?
+                    .1
+                }
+            }
+        } else {
+            0
+        };
+        if fresh_tokens >= capacity - 20_000 {
             return Err((
                 StatusCode::CONFLICT,
                 serde_json::json!({"error":"This message is too long even for a fresh sitting with this model. Shorten it or choose a larger usable context window; the sitting stays open."}),
@@ -961,7 +1123,7 @@ async fn api_chat_work(
             ));
         }
         change_phase(&state, &db, &scope, &id, Phase::Closing).await?;
-        schedule_close_out(state, db, scope, id);
+        schedule_close_out(state, db, scope, id, bridge);
         return Err((
             StatusCode::CONFLICT,
             serde_json::json!({"error":if matches!(request, ChatRequest::New { .. }) {
@@ -974,7 +1136,7 @@ async fn api_chat_work(
             &id,
             &scope.user_id,
             &scope.soul_id,
-            &Backend::Api,
+            &backend,
             &request,
             capacity,
         )
@@ -986,45 +1148,109 @@ async fn api_chat_work(
         db.1.clone(),
         Some((scope.user_id.clone(), scope.soul_id.clone())),
     );
-    let result =
-        db.0.execute_saved_chat_turn(
-            &id,
-            &input.id,
-            on_event,
-            settings.clone(),
-            tools_for(&scope),
-        )
-        .await;
-    let result = match result {
-        Ok(reply) => {
-            chat_changed(&state, &db, &id);
-            Ok(reply)
+    let result = match &profile {
+        AtomicChatProfileResponse::ClaudeCode { cli } => {
+            native::execute_prepared(
+                &state,
+                &db,
+                &scope,
+                cli,
+                &bridge,
+                &id,
+                &input.id,
+                native::Purpose::Reply,
+                prepared.expect("prepared native input"),
+            )
+            .await
         }
-        Err(error) => {
-            fail_execution(&state, &db, &id, &input.id, &error).await?;
-            Err(core_json_error(error))
+        AtomicChatProfileResponse::Api { settings } => {
+            let result =
+                db.0.execute_saved_chat_turn(
+                    &id,
+                    &input.id,
+                    on_event,
+                    settings.clone(),
+                    tools_for(&scope),
+                )
+                .await;
+            match result {
+                Ok(reply) => {
+                    chat_changed(&state, &db, &id);
+                    Ok(reply)
+                }
+                Err(error) => {
+                    fail_execution(&state, &db, &id, &input.id, &error).await?;
+                    Err(core_json_error(error))
+                }
+            }
         }
     };
     // The persisted dialogue/tool outcomes remain available on failed turns too.
     let measured: Result<usize, JsonError> = async {
-        let standing = standing_request(&read_chat(&db, &id).await?, &scope.user_id);
-        db.0.estimate_chat_request_tokens(&id, &standing, settings.clone(), tools_for(&scope))
-            .await
-            .map_err(core_json_error)
+        let saved = read_chat(&db, &id).await?;
+        match &profile {
+            AtomicChatProfileResponse::Api { settings } => {
+                let standing = standing_request(&saved, &scope.user_id);
+                db.0.estimate_chat_request_tokens(
+                    &id,
+                    &standing,
+                    settings.clone(),
+                    tools_for(&scope),
+                )
+                .await
+                .map_err(core_json_error)
+            }
+            AtomicChatProfileResponse::ClaudeCode { .. } => saved
+                .conversation
+                .atomic_chat_state
+                .as_ref()
+                .and_then(|saved| saved.native_context_tokens)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::CONFLICT,
+                        serde_json::json!({"error":"Native context size is unknown"}),
+                    )
+                }),
+        }
     }
     .await;
     let tokens = match measured {
         Ok(tokens) => tokens,
         Err(error) => {
-            tracing::error!(conversation_id = %id, error = ?error, "Could not size saved API turn; preserving its actual result");
+            tracing::error!(conversation_id = %id, error = ?error, "Could not size saved turn; preserving its actual result");
             return result;
         }
     };
     if tokens >= capacity - 20_000 {
         change_phase(&state, &db, &scope, &id, Phase::Closing).await?;
-        schedule_close_out(state, db, scope, id);
+        schedule_close_out(state, db, scope, id, bridge);
     }
     result
+}
+
+fn saved_retry_reply(
+    conv: &atomic_core::ConversationWithMessages,
+    request: &ChatRequest,
+) -> Option<atomic_core::ChatMessageWithContext> {
+    let ChatRequest::Retry { user_message_id } = request else {
+        return None;
+    };
+    let dialogue = atomic_core::chat::dialogue_messages(conv, None);
+    let (index, _) = dialogue
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, row)| row.message.role == "user")
+        .filter(|(_, row)| {
+            row.message.id == *user_message_id
+                && !(conv.conversation.atomic_chat_state.is_none()
+                    && is_atomic_recap_prompt(&row.message.content))
+        })?;
+    dialogue
+        .iter()
+        .skip(index + 1)
+        .find(|row| row.message.role == "assistant")
+        .map(|reply| (**reply).clone())
 }
 
 fn standing_request(conv: &atomic_core::ConversationWithMessages, user_id: &str) -> ChatRequest {
@@ -1077,6 +1303,7 @@ pub async fn retry_chat_message(
     db: Db,
     path: web::Path<String>,
     body: web::Json<RetryMessageBody>,
+    bridge: web::Data<ChatToolBridge>,
 ) -> HttpResponse {
     let scope = match memu_proxy::session(&state, &request).await {
         Ok(scope) => scope,
@@ -1087,7 +1314,8 @@ pub async fn retry_chat_message(
         user_message_id: body.user_message_id.clone(),
     };
     let result =
-        atomic_core::executor::spawn_with_result(api_chat_work(state, db, scope, id, input)).await;
+        atomic_core::executor::spawn_with_result(chat_work(state, db, scope, id, input, bridge))
+            .await;
     match result {
         Ok(Ok(reply)) => HttpResponse::Ok().json(reply),
         Ok(Err(error)) => json_error_response(error),
@@ -1102,6 +1330,7 @@ pub async fn send_chat_message(
     db: Db,
     path: web::Path<String>,
     body: web::Json<SendMessageBody>,
+    bridge: web::Data<ChatToolBridge>,
 ) -> HttpResponse {
     let conversation_id = path.into_inner();
     let body = body.into_inner();
@@ -1115,12 +1344,13 @@ pub async fn send_chat_message(
             page_context: body.page_context,
             canvas_context: body.canvas_context,
         };
-        let result = atomic_core::executor::spawn_with_result(api_chat_work(
+        let result = atomic_core::executor::spawn_with_result(chat_work(
             state,
             db,
             scope,
             conversation_id,
             input,
+            bridge,
         ))
         .await;
         return match result {
@@ -1160,6 +1390,7 @@ pub async fn end_memu_session(
     state: web::Data<AppState>,
     db: Db,
     body: web::Json<EndMemuSessionBody>,
+    bridge: web::Data<ChatToolBridge>,
 ) -> HttpResponse {
     let memu_session = match memu_proxy::session(&state, &request).await {
         Ok(value) => value,
@@ -1173,13 +1404,13 @@ pub async fn end_memu_session(
     let conversation_id = conversation_id.to_string();
     let result = atomic_core::executor::spawn_with_result(async move {
         // End intent survives browser loss even while an admitted reply holds the lock.
-        let _work = match lock_conversation(&db, &conversation_id, Some(&memu_session)).await {
+        let work = match lock_conversation(&db, &conversation_id, Some(&memu_session)).await {
             Ok(guard) => guard,
             Err(error) => return end_work_result(&conversation_id, Err(error)),
         };
         end_work_result(
             &conversation_id,
-            finish_memu_session(state, db, memu_session, &conversation_id).await,
+            finish_memu_session(state, db, memu_session, &conversation_id, &bridge, &work).await,
         )
     });
     match result.await {
@@ -1194,6 +1425,8 @@ async fn finish_memu_session(
     db: Db,
     memu_session: MemuScope,
     conversation_id: &str,
+    bridge: &ChatToolBridge,
+    work: &ConversationWork,
 ) -> Result<serde_json::Value, JsonError> {
     let mut conv = read_chat(&db, conversation_id).await?;
     if conv
@@ -1207,44 +1440,81 @@ async fn finish_memu_session(
     let request = ChatRequest::Recap {
         instruction: atomic_recap_instruction(&memu_session.user_id),
     };
-    let rows = rows_for_saved_history(&conv);
     let mut recap = existing_recap(&conv);
     // Completed pre-activation sittings retain their existing publication semantics.
     if conv.conversation.atomic_chat_state.is_none() && recap.is_some() {
-        return post_atomic_session_end(&memu_session, conversation_id, recap, rows).await;
+        return post_atomic_session_end(
+            &memu_session,
+            conversation_id,
+            recap,
+            rows_for_saved_history(&conv),
+        )
+        .await;
     }
-    let settings = fetch_atomic_chat_profile(&memu_session).await?;
-    let capacity = api_capacity(&settings)?;
-    reconcile_api(&state, &db, conversation_id).await?;
-    if recap.is_none() && has_user_assistant_interchange(&rows) {
-        let projected =
-            db.0.estimate_chat_request_tokens(
-                conversation_id,
-                &request,
-                settings.clone(),
-                tools_for(&memu_session),
-            )
-            .await
-            .map_err(core_json_error)?;
-        if projected.saturating_add(atomic_core::agent::CHAT_RESPONSE_MAX_TOKENS as usize)
-            > capacity
-        {
+    let profile = fetch_atomic_chat_profile(&memu_session).await?;
+    let capacity = profile.capacity()?;
+    let backend = profile.backend();
+    profile.check_binding(&conv)?;
+    match &profile {
+        AtomicChatProfileResponse::Api { .. } => {
+            reconcile_api(&state, &db, conversation_id).await?
+        }
+        AtomicChatProfileResponse::ClaudeCode { .. } => {
+            bridge
+                .local_url()
+                .map_err(|error| (StatusCode::CONFLICT, serde_json::json!({"error":error})))?;
+            native::reconcile(&state, &db, &memu_session, bridge, conversation_id, work).await?;
+            native::drain_idle(&db, &memu_session, conversation_id, bridge, work).await?;
+        }
+    }
+    // Recovery may have saved the recap or recovered an ordinary assistant row.
+    conv = read_chat(&db, conversation_id).await?;
+    recap = existing_recap(&conv);
+    let rows = rows_for_saved_history(&conv);
+    let needs_recap = recap.is_none() && needs_activity_recap(&conv, &rows);
+    let mut prepared = None;
+    if needs_recap {
+        let projected = match &profile {
+            AtomicChatProfileResponse::Api { settings } => Some(
+                db.0.estimate_chat_request_tokens(
+                    conversation_id,
+                    &request,
+                    settings.clone(),
+                    tools_for(&memu_session),
+                )
+                .await
+                .map_err(core_json_error)?,
+            ),
+            AtomicChatProfileResponse::ClaudeCode { cli } => {
+                let input =
+                    native::prepare_input(&db, &memu_session, conversation_id, &request, cli, work)
+                        .await?;
+                let tokens = input.context_tokens;
+                prepared = Some(input);
+                tokens
+            }
+        };
+        if projected.is_some_and(|tokens| {
+            tokens.saturating_add(atomic_core::agent::CHAT_RESPONSE_MAX_TOKENS as usize) > capacity
+        }) {
             return Err((
                 StatusCode::CONFLICT,
                 serde_json::json!({"error":if conv.conversation.atomic_chat_state.is_none() {
                     LEGACY_CONTEXT_ERROR
+                } else if backend == Backend::ClaudeCode {
+                    "The recap needs more native context space. Keep this history; same-session Session Survivor close-out recovery is not connected yet."
                 } else { "The recap needs a model/provider with a larger usable context window. Increase llm.context_window_tokens with a compatible model; saved history is unchanged." }}),
             ));
         }
     }
     change_phase(&state, &db, &memu_session, conversation_id, Phase::Closing).await?;
-    if recap.is_none() && has_user_assistant_interchange(&rows) {
+    if needs_recap {
         let control =
             db.0.admit_chat_turn(
                 conversation_id,
                 &memu_session.user_id,
                 &memu_session.soul_id,
-                &Backend::Api,
+                &backend,
                 &request,
                 capacity,
             )
@@ -1255,22 +1525,40 @@ async fn finish_memu_session(
             unreachable!()
         };
         // Recap delivery uses durable state, never an ordinary reply/stream bubble.
-        match db
-            .0
-            .execute_saved_chat_recap(
-                conversation_id,
-                &control.id,
-                instruction,
-                |_| {},
-                settings,
-                tools_for(&memu_session),
-            )
-            .await
-        {
-            Ok(_) => chat_changed(&state, &db, conversation_id),
-            Err(error) => {
-                fail_execution(&state, &db, conversation_id, &control.id, &error).await?;
-                return Err(core_json_error(error));
+        match &profile {
+            AtomicChatProfileResponse::ClaudeCode { cli } => {
+                native::execute_prepared(
+                    &state,
+                    &db,
+                    &memu_session,
+                    cli,
+                    bridge,
+                    conversation_id,
+                    &control.id,
+                    native::Purpose::Recap,
+                    prepared.expect("prepared native recap"),
+                )
+                .await?;
+            }
+            AtomicChatProfileResponse::Api { settings } => {
+                match db
+                    .0
+                    .execute_saved_chat_recap(
+                        conversation_id,
+                        &control.id,
+                        instruction,
+                        |_| {},
+                        settings.clone(),
+                        tools_for(&memu_session),
+                    )
+                    .await
+                {
+                    Ok(_) => chat_changed(&state, &db, conversation_id),
+                    Err(error) => {
+                        fail_execution(&state, &db, conversation_id, &control.id, &error).await?;
+                        return Err(core_json_error(error));
+                    }
+                }
             }
         }
         conv = read_chat(&db, conversation_id).await?;
@@ -1301,10 +1589,25 @@ mod tests {
             "memu_log_prompts":true
         }});
         let profile: AtomicChatProfileResponse = serde_json::from_value(value.clone()).unwrap();
-        assert!(matches!(profile, AtomicChatProfileResponse::ClaudeCode { .. }));
-        assert!(serde_json::from_value::<AtomicChatProfileResponse>(serde_json::json!({
-            "backend":"claude_code", "settings":{"chat_model":"not-a-CLI-profile"}
-        })).is_err());
+        assert_eq!(profile.backend(), Backend::ClaudeCode);
+        assert_eq!(profile.capacity().unwrap(), 128000);
+        assert!(matches!(
+            profile,
+            AtomicChatProfileResponse::ClaudeCode { .. }
+        ));
+        let mut too_small = value;
+        too_small["cli"]["context_window_tokens"] = serde_json::json!(20000);
+        let profile: AtomicChatProfileResponse = serde_json::from_value(too_small).unwrap();
+        assert!(profile.capacity().unwrap_err().1["error"]
+            .as_str()
+            .unwrap()
+            .contains("claude_code_context_window_tokens"));
+        assert!(
+            serde_json::from_value::<AtomicChatProfileResponse>(serde_json::json!({
+                "backend":"claude_code", "settings":{"chat_model":"not-a-CLI-profile"}
+            }))
+            .is_err()
+        );
     }
 
     #[test]
