@@ -95,6 +95,15 @@ struct ClaudeChatProfile {
     memu_log_prompts: bool,
 }
 
+impl ClaudeChatProfile {
+    fn common_settings(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("memu_response_sentences".into(), self.memu_response_sentences.to_string()),
+            ("memu_log_prompts".into(), self.memu_log_prompts.to_string()),
+        ])
+    }
+}
+
 #[derive(Serialize)]
 struct AtomicSessionEndRequest {
     user_id: String,

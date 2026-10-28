@@ -8,7 +8,7 @@ use atomic_core::{
 };
 use serde_json::Value;
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Operation {
     New,
@@ -87,6 +87,163 @@ pub(super) struct NativeReceipt {
     pub usage: Option<NativeUsage>,
     pub text: Option<String>,
     pub error: Option<String>,
+    pub submission: Option<Submission>,
+    pub initialized: Option<bool>,
+    #[serde(default)]
+    pub input_recorded: bool,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Submission {
+    NotSubmitted,
+    Recorded,
+    Unknown,
+}
+
+struct InputPlan {
+    operation: Operation,
+    continuation: bool,
+}
+
+impl InputPlan {
+    fn new_sitting(&self) -> bool {
+        self.operation == Operation::New
+    }
+}
+
+const RETRY_CONTINUATION: &str = "Continue the recorded unfinished turn from its saved native context. The user's message is already recorded; do not repeat it or repeat completed actions.";
+
+/// Read-only preparation under the same guard later used for admission/execution.
+/// The count sizes this input and schemas, not the sitting's native occupancy.
+pub(super) async fn prepare_input(
+    db: &Db,
+    scope: &MemuScope,
+    id: &str,
+    request: &ChatRequest,
+    profile: &ClaudeChatProfile,
+    work: &ConversationWork,
+) -> Result<(Operation, ClaudeChatInput, usize), JsonError> {
+    if !work.matches(db, id) {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"Input preparation requires this sitting's lock"}),
+        ));
+    }
+    let conv = read_chat(db, id).await?;
+    if !conversation_matches(&conv, scope) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error":"Conversation not found"}),
+        ));
+    }
+    let saved = conv.conversation.atomic_chat_state.as_ref()
+        .filter(|saved| saved.backend == Backend::ClaudeCode && saved.phase != Phase::Closed)
+        .ok_or_else(|| (StatusCode::CONFLICT, serde_json::json!({"error":"Native input requires an open or closing Claude Code sitting; existing API history cannot be migrated."})))?;
+    let previous_turn = saved
+        .recap
+        .as_ref()
+        .map(|recap| recap.request_message_id.as_str())
+        .or_else(|| {
+            saved
+                .active
+                .as_ref()
+                .map(|turn| turn.user_message_id.as_str())
+        })
+        .or_else(|| {
+            conv.messages
+                .iter()
+                .rev()
+                .find(|row| row.message.role == "user")
+                .map(|row| row.message.id.as_str())
+        })
+        .unwrap_or("");
+    let observed = status(scope, id, previous_turn)
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, serde_json::json!({"error":error})))?;
+    let plan = input_plan(&observed, request)?;
+    if plan.new_sitting()
+        && atomic_core::chat::dialogue_messages(&conv, None)
+            .iter()
+            .any(|row| row.message.role == "assistant")
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"This sitting already has dialogue. Keep its history; do not initialize a replacement native session."}),
+        ));
+    }
+    let (input, tokens) =
+        db.0.project_claude_chat_input(
+            id,
+            request,
+            profile.common_settings(),
+            tools_for(scope),
+            plan.new_sitting(),
+            plan.continuation.then_some(RETRY_CONTINUATION),
+        )
+        .await
+        .map_err(core_json_error)?;
+    Ok((plan.operation, input, tokens))
+}
+
+/// Choose input before admission replaces the saved attempt. A receipt from an
+/// older attempt may still prove this user row was recorded; a file cannot.
+fn input_plan(observed: &NativeStatus, request: &ChatRequest) -> Result<InputPlan, JsonError> {
+    let refused = |error: &str| (StatusCode::CONFLICT, serde_json::json!({"error":error}));
+    if observed.writer_idle != Some(true) {
+        return Err(refused("Native writer exit is not established. Keep this history and reload before continuing."));
+    }
+    let recap = matches!(request, ChatRequest::Recap { .. });
+    if observed.session_id.is_none() && observed.turn.is_none() && !recap {
+        return Ok(InputPlan {
+            operation: Operation::New,
+            continuation: false,
+        });
+    }
+    let receipt = observed.turn.as_ref().filter(|receipt| {
+        Some(&receipt.session_id) == observed.session_id.as_ref()
+    }).ok_or_else(|| refused("Native input evidence is missing. Keep this history; do not initialize a replacement sitting."))?;
+    if let ChatRequest::Retry { user_message_id } = request {
+        if receipt.turn_id != *user_message_id || receipt.purpose != "reply" {
+            return Err(refused(
+                "Retry has no matching saved native input evidence. Keep this history and reload.",
+            ));
+        }
+    }
+    let recorded = receipt.input_recorded || receipt.submission == Some(Submission::Recorded);
+    if receipt.initialized == Some(false)
+        && receipt.submission == Some(Submission::NotSubmitted)
+        && !recorded
+        && !recap
+        && receipt.status == "failed"
+    {
+        return Ok(InputPlan {
+            operation: Operation::New,
+            continuation: false,
+        });
+    }
+    if receipt.initialized != Some(true) {
+        return Err(refused("This sitting's native initialization is unconfirmed. Keep its history; do not create a replacement session."));
+    }
+    let retry = matches!(request, ChatRequest::Retry { .. });
+    if matches!(request, ChatRequest::New { .. }) && receipt.status != "complete" {
+        return Err(refused("The previous native turn is unfinished. Retry known failed work or close out from saved history."));
+    }
+    if retry
+        && (receipt.status != "failed"
+            || receipt.submission.is_none()
+            || receipt.submission == Some(Submission::Unknown))
+    {
+        return Err(refused("The saved input's submission is unknown. Close out from saved history; do not repeat it."));
+    }
+    Ok(InputPlan {
+        operation: if retry {
+            Operation::Retry
+        } else {
+            Operation::Continue
+        },
+        continuation: retry && recorded,
+    })
 }
 
 impl NativeStatus {
@@ -779,6 +936,64 @@ mod tests {
     }
 
     #[test]
+    fn input_evidence_distinguishes_initialization_replay_and_recorded_retry() {
+        let retry = ChatRequest::Retry {
+            user_message_id: "saved-user".into(),
+        };
+        let evidence = |submission: &str, initialized: bool, input_recorded: bool| {
+            serde_json::from_value::<NativeStatus>(serde_json::json!({
+                "session_id":"native", "writer_idle":true, "turn":{
+                    "session_id":"native", "turn_id":"saved-user", "attempt_id":"old-attempt",
+                    "purpose":"reply", "status":"failed", "submission":submission,
+                    "initialized":initialized, "input_recorded":input_recorded
+                }
+            }))
+            .unwrap()
+        };
+        let unused = input_plan(&evidence("not_submitted", false, false), &retry).unwrap();
+        assert_eq!(unused.operation, Operation::New);
+        assert!(!unused.continuation);
+        let unsubmitted = input_plan(&evidence("not_submitted", true, false), &retry).unwrap();
+        assert_eq!(unsubmitted.operation, Operation::Retry);
+        assert!(!unsubmitted.continuation);
+        for submission in ["recorded", "not_submitted"] {
+            let recorded = input_plan(&evidence(submission, true, true), &retry).unwrap();
+            assert_eq!(recorded.operation, Operation::Retry);
+            assert!(recorded.continuation);
+        }
+        assert!(input_plan(&evidence("unknown", true, false), &retry).is_err());
+        assert!(input_plan(&evidence("unknown", true, true), &retry).is_err());
+        assert!(input_plan(&evidence("recorded", false, true), &retry).is_err());
+        let mut mismatched = evidence("recorded", true, true);
+        mismatched.turn.as_mut().unwrap().turn_id = "different-user".into();
+        assert!(input_plan(&mismatched, &retry).is_err());
+        mismatched.turn.as_mut().unwrap().turn_id = "saved-user".into();
+        mismatched.turn.as_mut().unwrap().session_id = "different-native".into();
+        assert!(input_plan(&mismatched, &retry).is_err());
+        let recap = ChatRequest::Recap {
+            instruction: "Recap this sitting".into(),
+        };
+        let closeout = input_plan(&evidence("unknown", true, false), &recap).unwrap();
+        assert_eq!(closeout.operation, Operation::Continue);
+        assert!(!closeout.continuation);
+        for idle in [None, Some(false)] {
+            let mut running = evidence("recorded", true, true);
+            running.writer_idle = idle;
+            assert!(input_plan(&running, &retry).is_err());
+            assert!(input_plan(&running, &recap).is_err());
+        }
+        let empty: NativeStatus = serde_json::from_value(serde_json::json!({
+            "session_id":null,"turn":null,"writer_idle":true
+        }))
+        .unwrap();
+        assert_eq!(
+            input_plan(&empty, &retry).unwrap().operation,
+            Operation::New
+        );
+        assert!(input_plan(&empty, &recap).is_err());
+    }
+
+    #[test]
     fn snapshots_replace_blocks_and_usage_without_mixing_nested_messages() {
         let turn = NativeTurn {
             conversation_id: "conversation",
@@ -1142,7 +1357,7 @@ mod tests {
                 timeout_seconds: 1,
                 effort: "medium".into(),
                 fingerprint: "fingerprint".into(),
-                memu_response_sentences: 0,
+                memu_response_sentences: 5,
                 memu_log_prompts: false,
             };
             let lifecycle =
@@ -1337,6 +1552,34 @@ mod tests {
                 &state, &db, &scope, &profile, &bridge, &base_url, turn, session,
             )
             .await;
+            if mode == "failed" {
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                let retry = ChatRequest::Retry {
+                    user_message_id: input.id.clone(),
+                };
+                let before = serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap();
+                let (operation, projected, tokens) =
+                    prepare_input(&db, &scope, id, &retry, &profile, &work)
+                        .await
+                        .unwrap();
+                assert_eq!(operation, Operation::Retry);
+                assert!(projected.system_prompt.is_none());
+                assert!(projected.prompt.contains(RETRY_CONTINUATION));
+                assert!(!projected.prompt.contains("fictional input"));
+                assert!(projected
+                    .prompt
+                    .ends_with("**respond with 5 sentences or fewer**"));
+                assert!(tokens > atomic_core::chunking::count_tokens(&projected.prompt));
+                assert_eq!(
+                    serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap(),
+                    before
+                );
+                assert!(
+                    prepare_input(&db, &scope, "another-sitting", &retry, &profile, &work)
+                        .await
+                        .is_err()
+                );
+            }
             let saved = db.0.get_conversation(id).await.unwrap().unwrap();
             let lifecycle = saved.conversation.atomic_chat_state.unwrap();
             if matches!(mode, "refused" | "server_refused") {
