@@ -32,6 +32,38 @@ pub(super) struct NativeTurn<'a> {
     // A recorded-input Retry control, not every resumed native session.
     pub continuation: bool,
     pub input: ClaudeChatInput,
+    pub input_tokens: usize,
+}
+
+fn input_counts(input: &ClaudeChatInput, total: usize) -> (usize, usize, usize) {
+    let prompt = atomic_core::chunking::count_tokens(&input.prompt).saturating_add(8);
+    let system = input
+        .system_prompt
+        .as_deref()
+        .map(atomic_core::chunking::count_tokens)
+        .unwrap_or(0);
+    (
+        prompt,
+        system,
+        total.saturating_sub(prompt).saturating_sub(system),
+    )
+}
+
+#[derive(Deserialize)]
+pub(super) struct NativeContext {
+    estimated_tokens: usize,
+    overhead_tokens: usize,
+    system_tokens: usize,
+}
+
+impl NativeContext {
+    fn project(&self, input: &ClaudeChatInput, total: usize) -> usize {
+        let (prompt, system, overhead) = input_counts(input, total);
+        self.estimated_tokens
+            .saturating_add(prompt)
+            .saturating_add(system.saturating_sub(self.system_tokens))
+            .saturating_add(overhead.saturating_sub(self.overhead_tokens))
+    }
 }
 
 #[derive(Deserialize)]
@@ -77,6 +109,7 @@ pub(super) struct NativeStatus {
     pub session_id: Option<String>,
     pub writer_idle: Option<bool>,
     pub turn: Option<NativeReceipt>,
+    pub context: Option<NativeContext>,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +155,7 @@ pub(super) struct PreparedInput {
     pub continuation: bool,
     pub input: ClaudeChatInput,
     pub input_tokens: usize,
+    pub context_tokens: Option<usize>,
 }
 
 /// Read-only preparation under the same guard later used for admission/execution.
@@ -202,11 +236,16 @@ pub(super) async fn prepare_input(
         )
         .await
         .map_err(core_json_error)?;
+    let context_tokens = observed
+        .context
+        .as_ref()
+        .map(|context| context.project(&input, tokens));
     Ok(PreparedInput {
         operation,
         continuation,
         input,
         input_tokens: tokens,
+        context_tokens,
     })
 }
 
@@ -462,6 +501,12 @@ pub(super) async fn reconcile(
         attempt_id: attempt_id.into(),
         usage: None,
         input_recorded: None,
+        context_tokens: observed
+            .as_ref()
+            .ok()
+            .filter(|_| matched && idle)
+            .and_then(|status| status.context.as_ref())
+            .map(|context| context.estimated_tokens),
     };
     let mut receipt = if matched {
         observed.ok().and_then(|status| status.turn)
@@ -578,6 +623,7 @@ async fn reconcile_failure(
     };
     if unchanged
         && !changed_tools
+        && saved.native_context_tokens == native.context_tokens
         && native
             .usage
             .as_ref()
@@ -703,6 +749,8 @@ async fn read_reply(
         ))
         .build()
         .map_err(|e| e.to_string())?;
+    let (prompt_tokens, system_tokens, overhead_tokens) =
+        input_counts(&turn.input, turn.input_tokens);
     let mut request = client
         .post(format!("{}/integration/atomic/chat", scope.base_url))
         .json(&serde_json::json!({
@@ -712,6 +760,9 @@ async fn read_reply(
             "operation": turn.operation, "purpose": turn.purpose,
             "prompt": turn.input.prompt, "system_prompt": turn.input.system_prompt,
             "bridge_url": bridge_url, "profile_fingerprint": profile.fingerprint,
+            "prompt_tokens": prompt_tokens,
+            "system_tokens": system_tokens,
+            "overhead_tokens": overhead_tokens,
         }));
     if let Some(credential) = credential {
         request = request.bearer_auth(credential);
@@ -835,6 +886,11 @@ pub(super) async fn execute(
                     attempt_id: turn.attempt_id.into(),
                     usage: None,
                     input_recorded: Some(turn.continuation),
+                    context_tokens: read_chat(db, turn.conversation_id)
+                        .await?
+                        .conversation
+                        .atomic_chat_state
+                        .and_then(|state| state.native_context_tokens),
                 };
                 db.0.fail_chat_turn(
                     turn.conversation_id,
@@ -886,6 +942,21 @@ pub(super) async fn execute(
         Some(lease) => lease.finish().await,
         None => recap_records.expect("recap records"),
     };
+    let context_tokens = evidence
+        .as_ref()
+        .ok()
+        .filter(|status| {
+            status.writer_idle == Some(true)
+                && (stream.refused
+                    || status.matches_turn(
+                        turn.turn_id,
+                        turn.attempt_id,
+                        turn.purpose,
+                        stream.session_id.as_deref(),
+                    ))
+        })
+        .and_then(|status| status.context.as_ref())
+        .map(|context| context.estimated_tokens);
     let input_recorded = match evidence
         .as_ref()
         .ok()
@@ -932,6 +1003,7 @@ pub(super) async fn execute(
         attempt_id: turn.attempt_id.into(),
         usage: stream.usage,
         input_recorded,
+        context_tokens,
     };
     let text = match result {
         Ok(text) => text,
@@ -1010,6 +1082,38 @@ mod tests {
     }
 
     #[test]
+    fn context_projection_adds_only_uncovered_input_and_overhead_growth() {
+        let mut input = ClaudeChatInput {
+            prompt: "a new turn".into(),
+            system_prompt: None,
+        };
+        let prompt = atomic_core::chunking::count_tokens(&input.prompt) + 8;
+        let context = NativeContext {
+            estimated_tokens: 1000,
+            overhead_tokens: 100,
+            system_tokens: 25,
+        };
+        assert_eq!(context.project(&input, prompt + 100), 1000 + prompt);
+        assert_eq!(context.project(&input, prompt + 150), 1050 + prompt);
+        input.system_prompt = Some("original Presence".into());
+        let system = atomic_core::chunking::count_tokens(input.system_prompt.as_deref().unwrap());
+        let same = NativeContext {
+            system_tokens: system,
+            ..context
+        };
+        assert_eq!(same.project(&input, prompt + system + 100), 1000 + prompt);
+        let fresh = NativeContext {
+            estimated_tokens: 0,
+            overhead_tokens: 0,
+            system_tokens: 0,
+        };
+        assert_eq!(
+            fresh.project(&input, prompt + system + 100),
+            prompt + system + 100
+        );
+    }
+
+    #[test]
     fn input_evidence_distinguishes_initialization_replay_and_recorded_retry() {
         let retry = ChatRequest::Retry {
             user_message_id: "saved-user".into(),
@@ -1085,6 +1189,7 @@ mod tests {
                 prompt: "new input".into(),
                 system_prompt: None,
             },
+            input_tokens: 100,
         };
         let stream_events = Mutex::new(Vec::new());
         let on_event = |event| {
@@ -1230,14 +1335,17 @@ mod tests {
         request: HttpRequest,
     ) -> HttpResponse {
         if query["turn_id"].is_empty() {
-            return HttpResponse::Ok()
-                .json(serde_json::json!({"session_id":null,"writer_idle":true,"turn":null}));
+            return HttpResponse::Ok().json(
+                serde_json::json!({"session_id":null,"writer_idle":true,"turn":null,
+                    "context":{"estimated_tokens":0,"overhead_tokens":0,"system_tokens":0}}),
+            );
         }
         if matches!(mock.mode, "retry" | "continuation_refused")
             && mock.credential.lock().unwrap().is_empty()
         {
             return HttpResponse::Ok().json(serde_json::json!({
-                "session_id":"native-id", "writer_idle":true, "turn":{
+                "session_id":"native-id", "writer_idle":true,
+                "context":{"estimated_tokens":500,"overhead_tokens":50,"system_tokens":25}, "turn":{
                     "session_id":"native-id", "turn_id":query["turn_id"],
                     "attempt_id":mock.attempt_id.lock().unwrap().clone(),
                     "purpose":"reply", "status":"failed", "submission":"recorded",
@@ -1251,11 +1359,14 @@ mod tests {
         ) {
             return HttpResponse::Conflict().json(serde_json::json!({"detail":{
                 "code":"atomic_native_turn_missing", "session_id":"native-id", "turn":null, "writer_idle":true,
+                "context":{"estimated_tokens":500,"overhead_tokens":50,"system_tokens":25},
             }}));
         }
         if matches!(mock.mode, "refused" | "server_refused") {
-            return HttpResponse::Ok()
-                .json(serde_json::json!({"session_id":null,"writer_idle":true,"turn":null}));
+            return HttpResponse::Ok().json(
+                serde_json::json!({"session_id":null,"writer_idle":true,"turn":null,
+                    "context":{"estimated_tokens":0,"overhead_tokens":0,"system_tokens":0}}),
+            );
         }
         let first = mock.status_reads.fetch_add(1, Ordering::Relaxed) == 0;
         let active = mock.mode == "active" && first;
@@ -1289,6 +1400,7 @@ mod tests {
         let mut receipt_counts = counts();
         receipt_counts["cache_read_input_tokens"] = serde_json::json!(321);
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id","writer_idle":!active,
+            "context":{"estimated_tokens":500,"overhead_tokens":50,"system_tokens":25},
             "turn":{"session_id":"native-id","turn_id":query["turn_id"],"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode.starts_with("recap") { "recap" } else { "reply" },
                 "status":status,"submission":"recorded","initialized":true,
                 "usage":{"message_id":"message","usage":receipt_counts},
@@ -1419,6 +1531,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(first.operation, Operation::New);
                 assert!(!first.continuation);
+                assert_eq!(first.context_tokens, Some(first.input_tokens));
                 assert!(first
                     .input
                     .system_prompt
@@ -1498,6 +1611,7 @@ mod tests {
                     attempt_id: previous_attempt.clone(),
                     usage: None,
                     input_recorded: Some(true),
+                    context_tokens: Some(500),
                 };
                 db.0.fail_chat_turn(
                     id,
@@ -1607,6 +1721,7 @@ mod tests {
                         attempt_id: mock.attempt_id.lock().unwrap().clone(),
                         usage: None,
                         input_recorded: Some(false),
+                        context_tokens: Some(500),
                     };
                     db.0.fail_chat_turn(
                         id,
@@ -1762,11 +1877,13 @@ mod tests {
                         && !matches!(mode, "retry" | "continuation_refused"))
                     .then(|| "saved presence".into()),
                 },
+                input_tokens: 100,
             };
             if let Some(prepared) = prepared {
                 turn.operation = prepared.operation;
                 turn.continuation = prepared.continuation;
                 turn.input = prepared.input;
+                turn.input_tokens = prepared.input_tokens;
             }
             if mode == "recover" {
                 *mock.attempt_id.lock().unwrap() = attempt.clone();
@@ -1793,6 +1910,7 @@ mod tests {
                     continuation,
                     input: projected,
                     input_tokens: tokens,
+                    ..
                 } = prepare_input(&db, &scope, id, &retry, &profile, &work)
                     .await
                     .unwrap();
@@ -1817,6 +1935,14 @@ mod tests {
             }
             let saved = db.0.get_conversation(id).await.unwrap().unwrap();
             let lifecycle = saved.conversation.atomic_chat_state.unwrap();
+            assert_eq!(
+                lifecycle.native_context_tokens,
+                Some(if matches!(mode, "refused" | "server_refused") {
+                    0
+                } else {
+                    500
+                })
+            );
             if matches!(mode, "refused" | "server_refused") {
                 assert!(lifecycle.native_usage.is_none());
                 assert_eq!(

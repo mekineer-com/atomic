@@ -864,6 +864,7 @@ pub struct AtomicChatNativeOutcome {
     pub attempt_id: String,
     pub usage: Option<AtomicChatUsage>,
     pub input_recorded: Option<bool>,
+    pub context_tokens: Option<usize>,
 }
 
 /// Durable admission, not a process-local claim that a native writer is idle.
@@ -879,6 +880,9 @@ pub struct AtomicChatState {
     pub context_window_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_usage: Option<AtomicChatUsage>,
+    /// Estimated native occupancy; unknown is not the last raw usage or zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_context_tokens: Option<usize>,
 }
 
 /// Chat conversation
