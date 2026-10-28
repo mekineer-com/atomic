@@ -4480,10 +4480,11 @@ mod tests {
             input_tokens: 12, cache_creation_input_tokens: 30,
             cache_read_input_tokens: 100, output_tokens: 8,
         };
-        let outcome = |usage: &crate::AtomicChatUsage, attempt: &str| crate::AtomicChatNativeOutcome { attempt_id: attempt.into(), usage: Some(usage.clone()) };
+        let outcome = |usage: &crate::AtomicChatUsage, attempt: &str| crate::AtomicChatNativeOutcome { attempt_id: attempt.into(), usage: Some(usage.clone()), input_recorded: Some(true) };
         reopened.fail_chat_turn(cid, &user.id, "Recorded native failure", false, Some(&outcome(&usage, &first_attempt)))
             .await.unwrap();
         let failed = reopened.get_conversation(cid).await.unwrap().unwrap();
+        assert_eq!(failed.conversation.atomic_chat_state.as_ref().unwrap().active.as_ref().unwrap().native_input_recorded, Some(true));
         assert_eq!(failed.conversation.atomic_chat_state.unwrap().native_usage, Some(usage.clone()));
         let before = serde_json::to_value(reopened.get_conversation(cid).await.unwrap()).unwrap();
         let retry = crate::AtomicChatRequest::Retry { user_message_id: user.id.clone() };
@@ -4596,7 +4597,8 @@ mod tests {
             .execute_batch("DROP TRIGGER fail_completion;")
             .unwrap();
         reopened.fail_chat_turn(cid, &user.id, "Lost delivery; native result recoverable", true,
-            Some(&crate::AtomicChatNativeOutcome { attempt_id: retry_attempt.clone(), usage: None })).await.unwrap();
+            Some(&crate::AtomicChatNativeOutcome { attempt_id: retry_attempt.clone(), usage: None, input_recorded: Some(false) })).await.unwrap();
+        assert_eq!(reopened.get_conversation(cid).await.unwrap().unwrap().conversation.atomic_chat_state.unwrap().active.unwrap().native_input_recorded, Some(true));
         reopened
             .save_chat_reply(cid, Some(&user.id), "Retained reply", &records, Some(&outcome(&final_usage, &retry_attempt)))
             .await

@@ -816,6 +816,9 @@ pub struct AtomicChatTurn {
     pub user_message_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_attempt_id: Option<String>,
+    /// Original logical input: unknown, proven unsubmitted, or recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_input_recorded: Option<bool>,
     pub status: AtomicChatTurnStatus,
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -860,6 +863,7 @@ pub struct AtomicChatUsage {
 pub struct AtomicChatNativeOutcome {
     pub attempt_id: String,
     pub usage: Option<AtomicChatUsage>,
+    pub input_recorded: Option<bool>,
 }
 
 /// Durable admission, not a process-local claim that a native writer is idle.

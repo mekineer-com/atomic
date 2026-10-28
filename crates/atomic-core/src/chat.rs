@@ -523,6 +523,9 @@ pub(crate) fn failed_chat_state(
             }
         };
     } else if let Some(turn) = &mut state.active {
+        if state.backend == AtomicChatBackend::ClaudeCode && turn.native_input_recorded != Some(true) {
+            turn.native_input_recorded = native_outcome.and_then(|outcome| outcome.input_recorded);
+        }
         turn.status = if uncertain {
             AtomicChatTurnStatus::Uncertain
         } else {
@@ -757,6 +760,7 @@ pub(crate) fn admitted_chat_message(
             state.active = Some(AtomicChatTurn {
                 user_message_id: message_id.to_string(),
                 native_attempt_id,
+                native_input_recorded: None,
                 status: AtomicChatTurnStatus::Running,
                 error: None,
                 page_context: page_context.clone(),
@@ -767,6 +771,7 @@ pub(crate) fn admitted_chat_message(
             let turn = state.active.get_or_insert(AtomicChatTurn {
                 user_message_id: message_id.to_string(),
                 native_attempt_id: None,
+                native_input_recorded: None,
                 status: AtomicChatTurnStatus::Running,
                 error: None,
                 page_context: None,
@@ -1667,7 +1672,18 @@ mod tests {
                 "user_message_id":"turn", "native_attempt_id":"attempt", "status":"uncertain", "error":"lost delivery"
             }
         })).unwrap();
-        let native = AtomicChatNativeOutcome { attempt_id:"attempt".into(), usage:None };
+        let native = AtomicChatNativeOutcome { attempt_id:"attempt".into(), usage:None, input_recorded:Some(true) };
+        failed_chat_state(&mut state, "turn", "recorded failure", false, Some(&native)).unwrap();
+        assert_eq!(state.active.as_ref().unwrap().native_input_recorded, Some(true));
+        let refused = AtomicChatNativeOutcome { input_recorded:Some(false), ..native.clone() };
+        failed_chat_state(&mut state, "turn", "retry refused", false, Some(&refused)).unwrap();
+        assert_eq!(state.active.as_ref().unwrap().native_input_recorded, Some(true));
+        state.active.as_mut().unwrap().native_input_recorded = None;
+        failed_chat_state(&mut state, "turn", "input not delivered", false, Some(&refused)).unwrap();
+        assert_eq!(state.active.as_ref().unwrap().native_input_recorded, Some(false));
+        let unknown = AtomicChatNativeOutcome { input_recorded:None, ..native.clone() };
+        failed_chat_state(&mut state, "turn", "delivery unknown", true, Some(&unknown)).unwrap();
+        assert_eq!(state.active.as_ref().unwrap().native_input_recorded, None);
         assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).unwrap().unwrap().active.is_none());
         state.phase = AtomicChatPhase::Closed;
         assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).is_err());
@@ -1676,7 +1692,7 @@ mod tests {
             outcome:AtomicChatRecapOutcome::Running });
         assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).is_err());
         state.recap.as_mut().unwrap().outcome = AtomicChatRecapOutcome::Complete { reply_message_id:"saved-recap".into() };
-        let recap = AtomicChatNativeOutcome { attempt_id:"recap-attempt".into(), usage:None };
+        let recap = AtomicChatNativeOutcome { attempt_id:"recap-attempt".into(), usage:None, input_recorded:Some(true) };
         assert!(completed_chat_state(Some(state.clone()), Some("recap"), "duplicate", Some(&recap)).is_err());
         assert!(completed_chat_state(Some(state), Some("turn"), "late ordinary", Some(&native)).is_err());
     }
