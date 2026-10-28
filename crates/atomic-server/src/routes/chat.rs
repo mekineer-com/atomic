@@ -22,6 +22,7 @@ use std::{
 use utoipa::{IntoParams, ToSchema};
 
 type ConversationKey = (String, String);
+const LEGACY_CONTEXT_ERROR: &str = "This chat exceeds the context limit and cannot be closed out. Your saved history is unchanged. Start a new sitting, or contact help@openalma.org for assistance.";
 static CONVERSATION_WORK: LazyLock<
     tokio::sync::Mutex<HashMap<ConversationKey, Arc<tokio::sync::Mutex<()>>>>,
 > = LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
@@ -923,6 +924,12 @@ async fn api_chat_work(
                 serde_json::json!({"error":"This message is too long even for a fresh sitting with this model. Shorten it or choose a larger usable context window; the sitting stays open."}),
             ));
         }
+        if conv.conversation.atomic_chat_state.is_none() {
+            return Err((
+                StatusCode::CONFLICT,
+                serde_json::json!({"error":LEGACY_CONTEXT_ERROR}),
+            ));
+        }
         change_phase(&state, &db, &scope, &id, Phase::Closing).await?;
         schedule_close_out(state, db, scope, id);
         return Err((
@@ -1194,7 +1201,9 @@ async fn finish_memu_session(
         {
             return Err((
                 StatusCode::CONFLICT,
-                serde_json::json!({"error":"The recap needs a model/provider with a larger usable context window. Increase llm.context_window_tokens with a compatible model; saved history is unchanged."}),
+                serde_json::json!({"error":if conv.conversation.atomic_chat_state.is_none() {
+                    LEGACY_CONTEXT_ERROR
+                } else { "The recap needs a model/provider with a larger usable context window. Increase llm.context_window_tokens with a compatible model; saved history is unchanged." }}),
             ));
         }
     }

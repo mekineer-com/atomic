@@ -1332,6 +1332,8 @@ async fn test_capacity_refusal_distinguishes_oversized_draft_from_full_sitting()
     assert!(saved.conversation.atomic_chat_state.is_none(), "an oversized draft must not close an otherwise open sitting");
     assert_eq!(model.request_count.load(Ordering::SeqCst), 0);
     assert_eq!(end.published.lock().unwrap().len(), 0);
+    core.set_chat_phase(&id, "TestOwner", "TestSoul", &atomic_core::AtomicChatBackend::Api,
+        &atomic_core::AtomicChatPhase::Open).await.unwrap();
     core.save_message(&id, "user", &"old evidence ".repeat(2000)).await.unwrap();
     core.save_message(&id, "assistant", "Older answer").await.unwrap();
     let settings = [("provider", "openai_compat"), ("openai_compat_base_url", model_url.as_str()),
@@ -1350,6 +1352,41 @@ async fn test_capacity_refusal_distinguishes_oversized_draft_from_full_sitting()
     assert_eq!(closed.conversation.atomic_chat_state.unwrap().phase, atomic_core::AtomicChatPhase::Closed);
     assert!(!closed.messages.iter().any(|row| row.message.content == "Short retained draft"));
     assert_eq!(model.request_count.load(Ordering::SeqCst), 1, "only the old sitting's recap should run");
+    memu_handle.stop(true).await;
+    model_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_oversized_legacy_api_chat_refuses_send_and_end_without_closeout() {
+    let (model_url, model_handle, model) = start_tool_model(usize::MAX, json!([]), None);
+    let (memu_url, memu_handle, end) = start_memu_stub_with_model(model_url);
+    end.capacity.store(25_000, Ordering::SeqCst);
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let conv = core.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
+    let id = &conv.conversation.id;
+    core.save_message(id, "system", "Fictional original Presence").await.unwrap();
+    core.save_message(id, "user", &"old evidence ".repeat(30_000)).await.unwrap();
+    core.save_message(id, "assistant", "Older answer").await.unwrap();
+    for (uri, body) in [
+        (format!("/api/conversations/{id}/messages"), json!({"content":"New unsaved draft"})),
+        ("/api/memu/session/end".into(), json!({"conversation_id":id})),
+    ] {
+        let request = actix_test::TestRequest::post().uri(&uri)
+            .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+            .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(body).to_request();
+        let response = actix_test::call_service(&app, request).await;
+        assert_eq!(response.status(), 409);
+        let error: Value = actix_test::read_body_json(response).await;
+        assert!(error["error"].as_str().unwrap().contains("help@openalma.org"));
+    }
+    tokio::time::timeout(Duration::from_secs(10), atomic_core::executor::wait_idle()).await.unwrap();
+    let saved = core.get_conversation(id).await.unwrap().unwrap();
+    assert!(saved.conversation.atomic_chat_state.is_none());
+    assert_eq!(saved.messages.len(), 3);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 0);
+    assert!(end.published.lock().unwrap().is_empty());
     memu_handle.stop(true).await;
     model_handle.stop(true).await;
 }
