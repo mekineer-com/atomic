@@ -1592,8 +1592,9 @@ pub(crate) async fn estimate_chat_request_tokens(
     request: &crate::AtomicChatRequest,
     settings: HashMap<String, String>,
     scope: MemuToolConfig,
+    fresh_sitting: bool,
 ) -> Result<usize, String> {
-    let conversation = storage
+    let mut conversation = storage
         .get_conversation_sync(conversation_id)
         .await
         .map_err(|e| e.to_string())?
@@ -1602,6 +1603,9 @@ pub(crate) async fn estimate_chat_request_tokens(
         || conversation.conversation.soul_id.as_deref() != Some(scope.soul_id.as_str())
     {
         return Err("Chat owner/Soul does not match".to_string());
+    }
+    if fresh_sitting {
+        conversation.messages.retain(|row| row.message.role == "system");
     }
     let last = conversation
         .messages
@@ -2596,7 +2600,7 @@ where
     };
     let (user_message_id, expected_user_message_id, page_context, canvas_context) = match input {
         ApiChatInput::New(content) => {
-            if conversation.conversation.atomic_chat_state.is_some() {
+            if memu_tool_config.is_some() || conversation.conversation.atomic_chat_state.is_some() {
                 return Err(
                     "This sitting requires saved-turn admission before API execution".to_string(),
                 );
@@ -2725,6 +2729,9 @@ where
 
     // Run agent loop with canvas context
     let (content, mut records) = run_agent_loop(provider_config, model, ctx).await?;
+    if recap_instruction.is_some() && content.trim().is_empty() {
+        return Err("The recap was empty. Retry close-out to generate it again.".to_string());
+    }
 
     // Publish text, records and citation numbering together before emitting completion.
     let saved_msg = storage

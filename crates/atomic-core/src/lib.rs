@@ -2850,36 +2850,6 @@ impl AtomicCore {
         .map_err(|e| AtomicCoreError::DatabaseOperation(e))
     }
 
-    /// Send a chat message with caller-provided provider settings layered over Atomic defaults.
-    pub async fn send_chat_message_with_external_settings<F>(
-        &self,
-        conversation_id: &str,
-        content: &str,
-        on_event: F,
-        external_settings: HashMap<String, String>,
-        memu_tool_config: Option<agent::MemuToolConfig>,
-        canvas_context: Option<CanvasContext>,
-        page_context: Option<PageContext>,
-    ) -> Result<ChatMessageWithContext, AtomicCoreError>
-    where
-        F: Fn(ChatEvent) + Send + Sync + 'static,
-    {
-        let settings = self.settings_with_overrides(external_settings).await?;
-        agent::send_chat_message_with_canvas(
-            self.storage.clone(),
-            conversation_id,
-            agent::ApiChatInput::New(content),
-            on_event,
-            Some(settings),
-            memu_tool_config,
-            canvas_context,
-            page_context,
-            Some(self.canvas_cache.clone()),
-        )
-        .await
-        .map_err(|e| AtomicCoreError::DatabaseOperation(e))
-    }
-
     /// Project a scoped API request without writing input, state or tool records.
     /// Caller holds the sitting lock across projection and admission.
     pub async fn estimate_chat_request_tokens(
@@ -2896,6 +2866,29 @@ impl AtomicCore {
             request,
             settings,
             scope,
+            false,
+        )
+        .await
+        .map_err(AtomicCoreError::DatabaseOperation)
+    }
+
+    /// Size this draft against only the saved original Presence, not the current
+    /// dialogue. Projection only: never trim or change the actual sitting.
+    pub async fn estimate_fresh_chat_request_tokens(
+        &self,
+        conversation_id: &str,
+        request: &AtomicChatRequest,
+        external_settings: HashMap<String, String>,
+        scope: agent::MemuToolConfig,
+    ) -> Result<usize, AtomicCoreError> {
+        let settings = self.settings_with_overrides(external_settings).await?;
+        agent::estimate_chat_request_tokens(
+            self.storage.clone(),
+            conversation_id,
+            request,
+            settings,
+            scope,
+            true,
         )
         .await
         .map_err(AtomicCoreError::DatabaseOperation)
