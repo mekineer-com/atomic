@@ -1741,42 +1741,94 @@ pub struct ClaudeChatInput {
 
 /// Build native input without admission, tool binding or checkpoint writes.
 pub(crate) async fn project_claude_chat_input(
-    storage: StorageBackend, conversation_id: &str, request: &crate::AtomicChatRequest,
-    settings: HashMap<String, String>, scope: MemuToolConfig,
-    new_sitting: bool, continuation: Option<&str>,
+    storage: StorageBackend,
+    conversation_id: &str,
+    request: &crate::AtomicChatRequest,
+    settings: HashMap<String, String>,
+    scope: MemuToolConfig,
+    new_sitting: bool,
+    continuation: Option<&str>,
 ) -> Result<(ClaudeChatInput, usize), String> {
-    let conversation = storage.get_conversation_sync(conversation_id).await
-        .map_err(|error| error.to_string())?.ok_or("Conversation not found")?;
+    let conversation = storage
+        .get_conversation_sync(conversation_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("Conversation not found")?;
     if conversation.conversation.user_id.as_deref() != Some(scope.user_id.as_str())
         || conversation.conversation.soul_id.as_deref() != Some(scope.soul_id.as_str())
     {
         return Err("Chat owner/Soul does not match".into());
     }
     let (content, page, canvas) = match request {
-        crate::AtomicChatRequest::New { content, page_context, canvas_context } =>
-            (content.as_str(), page_context.clone(), canvas_context.clone()),
+        crate::AtomicChatRequest::New {
+            content,
+            page_context,
+            canvas_context,
+        } => (
+            content.as_str(),
+            page_context.clone(),
+            canvas_context.clone(),
+        ),
         crate::AtomicChatRequest::Retry { user_message_id } => {
-            let saved = conversation.conversation.atomic_chat_state.as_ref()
+            let saved = conversation
+                .conversation
+                .atomic_chat_state
+                .as_ref()
                 .and_then(|state| state.active.as_ref())
                 .filter(|turn| turn.user_message_id == *user_message_id)
                 .ok_or("Retry requires its matching saved turn")?;
-            let user = conversation.messages.iter().find(|row| row.message.id == *user_message_id
-                && row.message.role == "user").ok_or("Saved user turn not found")?;
-            (continuation.unwrap_or(&user.message.content), saved.page_context.clone(), saved.canvas_context.clone())
+            let user = conversation
+                .messages
+                .iter()
+                .find(|row| row.message.id == *user_message_id && row.message.role == "user")
+                .ok_or("Saved user turn not found")?;
+            (
+                continuation.unwrap_or(&user.message.content),
+                saved.page_context.clone(),
+                saved.canvas_context.clone(),
+            )
         }
         crate::AtomicChatRequest::Recap { instruction } => {
-            if new_sitting { return Err("Recap must resume the existing native sitting".into()); }
-            return Ok((ClaudeChatInput { system_prompt: None, prompt: instruction.clone() },
-                count_tokens(instruction) + 8));
+            if new_sitting {
+                return Err("Recap must resume the existing native sitting".into());
+            }
+            return Ok((
+                ClaudeChatInput {
+                    system_prompt: None,
+                    prompt: instruction.clone(),
+                },
+                count_tokens(instruction) + 8,
+            ));
         }
     };
-    let tags = storage.get_scope_tag_ids_sync(conversation_id).await.map_err(|e| e.to_string())?;
-    let session = ChatToolSession::new(storage, conversation_id.into(), tags, settings,
-        Some(scope), page, canvas, None, Arc::new(|_| {}));
-    let input = session.claude_input_for(&conversation, new_sitting, content).await?;
+    let tags = storage
+        .get_scope_tag_ids_sync(conversation_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let session = ChatToolSession::new(
+        storage,
+        conversation_id.into(),
+        tags,
+        settings,
+        Some(scope),
+        page,
+        canvas,
+        None,
+        Arc::new(|_| {}),
+    );
+    let input = session
+        .claude_input_for(&conversation, new_sitting, content)
+        .await?;
     let schemas = serde_json::to_string(session.tools()).map_err(|e| e.to_string())?;
-    let tokens = count_tokens(&input.prompt) + input.system_prompt.as_deref().map(count_tokens).unwrap_or(0)
-        + count_tokens(&schemas) + session.tools().len() * 16 + 16;
+    let tokens = count_tokens(&input.prompt)
+        + input
+            .system_prompt
+            .as_deref()
+            .map(count_tokens)
+            .unwrap_or(0)
+        + count_tokens(&schemas)
+        + session.tools().len() * 16
+        + 16;
     Ok((input, tokens))
 }
 
@@ -1850,29 +1902,11 @@ impl ChatToolSession {
         }
     }
 
-    /// Caller holds the sitting lock; `new_sitting` comes from its native binding,
-    /// not from the number of saved messages. Retry controls belong to C2.
-    pub async fn claude_input(&self, new_sitting: bool) -> Result<ClaudeChatInput, String> {
-        let user_message_id = self
-            .durable_message_id
-            .as_deref()
-            .ok_or_else(|| "Claude input requires a scoped, saved user turn".to_string())?;
-        let conversation = self
-            .storage
-            .get_conversation_sync(&self.conversation_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Conversation not found".to_string())?;
-        let user = conversation
-            .messages
-            .iter()
-            .find(|row| row.message.id == user_message_id && row.message.role == "user")
-            .ok_or_else(|| "Saved user turn not found".to_string())?;
-        self.claude_input_for(&conversation, new_sitting, &user.message.content).await
-    }
-
     async fn claude_input_for(
-        &self, conversation: &crate::ConversationWithMessages, new_sitting: bool, content: &str,
+        &self,
+        conversation: &crate::ConversationWithMessages,
+        new_sitting: bool,
+        content: &str,
     ) -> Result<ClaudeChatInput, String> {
         let system_prompt = if new_sitting {
             let presence = conversation
@@ -1906,10 +1940,8 @@ impl ChatToolSession {
         if let Some(canvas) = &self.canvas_context {
             context.push_str(&get_canvas_system_prompt(canvas));
         }
-        let mut prompt = format!(
-            "<atomic_turn_context>\n{context}\n</atomic_turn_context>\n\n{}",
-            content
-        );
+        let mut prompt =
+            format!("<atomic_turn_context>\n{context}\n</atomic_turn_context>\n\n{content}");
         if let Some(limit) = memu_response_sentence_limit(&self.external_settings) {
             prompt.push_str(&format!("\n\n{}", memu_response_limit_instruction(limit)));
         }
@@ -4943,46 +4975,40 @@ mod tests {
             user_id: "TestOwner".to_string(),
             soul_id: "TestSoul".to_string(),
         };
-        let session = core
-            .chat_tool_session(
-                cid,
-                &user.id,
-                settings.clone(),
-                scope.clone(),
-                Some(PageContext {
-                    view: Some("atom".to_string()),
-                    atom_id: None,
-                    atom_title: None,
-                    atom_snippet: Some("Hidden page contents".to_string()),
-                    wiki_tag_id: None,
-                    wiki_tag_name: None,
-                    selected_tag_id: None,
-                }),
-                Some(CanvasContext {
-                    clusters: vec![CanvasClusterSummary {
-                        label: "Fictional astronomy".to_string(),
-                        atom_count: 12,
-                    }],
-                }),
-                |_| {},
-            )
-            .await
-            .unwrap();
-        let initial = session.claude_input(true).await.unwrap();
         let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
         let draft = crate::AtomicChatRequest::New {
-            content: user.content.clone(), page_context: session.page_context.clone(),
-            canvas_context: session.canvas_context.clone(),
+            content: user.content.clone(),
+            page_context: Some(PageContext {
+                view: Some("atom".to_string()),
+                atom_id: None,
+                atom_title: None,
+                atom_snippet: Some("Hidden page contents".to_string()),
+                wiki_tag_id: None,
+                wiki_tag_name: None,
+                selected_tag_id: None,
+            }),
+            canvas_context: Some(CanvasContext {
+                clusters: vec![CanvasClusterSummary {
+                    label: "Fictional astronomy".to_string(),
+                    atom_count: 12,
+                }],
+            }),
         };
-        let (projected, tokens) = core.project_claude_chat_input(cid, &draft,
-            settings.clone(), scope.clone(), true, None).await.unwrap();
-        assert_eq!(projected.system_prompt, initial.system_prompt);
-        assert_eq!(projected.prompt, initial.prompt);
-        assert!(tokens > count_tokens(&projected.prompt));
+        let (initial, tokens) = core
+            .project_claude_chat_input(cid, &draft, settings.clone(), scope.clone(), true, None)
+            .await
+            .unwrap();
+        assert!(tokens > count_tokens(&initial.prompt));
         let mut other = scope.clone();
         other.soul_id = "OtherSoul".into();
-        assert!(core.project_claude_chat_input(cid, &draft, settings.clone(), other, true, None).await.is_err());
-        assert_eq!(serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(), before);
+        assert!(core
+            .project_claude_chat_input(cid, &draft, settings.clone(), other, true, None)
+            .await
+            .is_err());
+        assert_eq!(
+            serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
+            before
+        );
         let system = initial.system_prompt.unwrap();
         assert!(system.starts_with("Custom Atomic prefix\n\n"));
         assert!(system.ends_with(presence));
@@ -4991,11 +5017,9 @@ mod tests {
         assert!(!system.contains("4 sentences"));
         assert!(initial.prompt.contains("Fictional astronomy"));
         assert!(initial.prompt.contains("get_current_page_context"));
-        assert!(
-            initial
-                .prompt
-                .ends_with("Discuss this chart\n\n**respond with 4 sentences or fewer**")
-        );
+        assert!(initial
+            .prompt
+            .ends_with("Discuss this chart\n\n**respond with 4 sentences or fewer**"));
         for omitted in [
             presence,
             "Custom Atomic prefix",
@@ -5005,43 +5029,37 @@ mod tests {
         ] {
             assert!(!initial.prompt.contains(omitted));
         }
-        let resumed = session.claude_input(false).await.unwrap();
+        let (resumed, _) = core
+            .project_claude_chat_input(cid, &draft, settings.clone(), scope.clone(), false, None)
+            .await
+            .unwrap();
         assert!(resumed.system_prompt.is_none());
         assert_eq!(resumed.prompt, initial.prompt);
-        assert_eq!(
-            session.external_settings, settings,
-            "input assembly must not replace tool settings"
-        );
-        assert!(
-            !session
-                .tools()
-                .iter()
-                .any(|tool| tool.name == "create_atom")
-        );
 
         let next = core
             .save_message(cid, "user", "Next saved turn")
             .await
             .unwrap();
-        let next_session = core
-            .chat_tool_session(
+        let next_request = crate::AtomicChatRequest::New {
+            content: next.content,
+            page_context: None,
+            canvas_context: None,
+        };
+        let (next_input, _) = core
+            .project_claude_chat_input(
                 cid,
-                &next.id,
+                &next_request,
                 HashMap::from([(MEMU_RESPONSE_SENTENCES_SETTING.to_string(), "2".to_string())]),
                 scope.clone(),
+                false,
                 None,
-                None,
-                |_| {},
             )
             .await
             .unwrap();
-        let next_input = next_session.claude_input(false).await.unwrap();
         assert!(next_input.system_prompt.is_none());
-        assert!(
-            next_input
-                .prompt
-                .ends_with("Next saved turn\n\n**respond with 2 sentences or fewer**")
-        );
+        assert!(next_input
+            .prompt
+            .ends_with("Next saved turn\n\n**respond with 2 sentences or fewer**"));
         assert!(!next_input.prompt.contains("Fictional astronomy"));
         assert!(!next_input.prompt.contains("get_current_page_context"));
         assert!(!next_input.prompt.contains("Discuss this chart"));
@@ -5054,29 +5072,27 @@ mod tests {
             .save_message(&other.conversation.id, "user", "Other turn")
             .await
             .unwrap();
-        let other_session = core
-            .chat_tool_session(
+        let other_request = crate::AtomicChatRequest::New {
+            content: other_user.content,
+            page_context: None,
+            canvas_context: None,
+        };
+        assert!(core
+            .project_claude_chat_input(
                 &other.conversation.id,
-                &other_user.id,
+                &other_request,
                 HashMap::new(),
                 MemuToolConfig {
-                    soul_id: "OtherSoul".to_string(),
+                    soul_id: "OtherSoul".into(),
                     ..scope
                 },
-                None,
-                None,
-                |_| {},
+                true,
+                None
             )
             .await
-            .unwrap();
-        assert!(
-            other_session
-                .claude_input(true)
-                .await
-                .err()
-                .unwrap()
-                .contains("no saved Soul Presence")
-        );
+            .err()
+            .unwrap()
+            .contains("no saved Soul Presence"));
         assert_eq!(
             core.get_conversation(cid)
                 .await

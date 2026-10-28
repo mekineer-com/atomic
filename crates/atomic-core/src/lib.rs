@@ -2874,14 +2874,26 @@ impl AtomicCore {
 
     /// Project native input without writing input, state or tool records.
     pub async fn project_claude_chat_input(
-        &self, conversation_id: &str, request: &AtomicChatRequest,
-        settings: HashMap<String, String>, scope: agent::MemuToolConfig,
-        new_sitting: bool, continuation: Option<&str>,
+        &self,
+        conversation_id: &str,
+        request: &AtomicChatRequest,
+        settings: HashMap<String, String>,
+        scope: agent::MemuToolConfig,
+        new_sitting: bool,
+        continuation: Option<&str>,
     ) -> Result<(agent::ClaudeChatInput, usize), AtomicCoreError> {
         // Native input uses only captured MCP settings, never local API overrides.
-        agent::project_claude_chat_input(self.storage.clone(), conversation_id, request,
-            settings, scope, new_sitting, continuation).await
-            .map_err(AtomicCoreError::Validation)
+        agent::project_claude_chat_input(
+            self.storage.clone(),
+            conversation_id,
+            request,
+            settings,
+            scope,
+            new_sitting,
+            continuation,
+        )
+        .await
+        .map_err(AtomicCoreError::Validation)
     }
 
     /// Project a scoped API request without writing input, state or tool records.

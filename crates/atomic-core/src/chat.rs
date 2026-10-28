@@ -523,8 +523,11 @@ pub(crate) fn failed_chat_state(
             }
         };
     } else if let Some(turn) = &mut state.active {
-        if state.backend == AtomicChatBackend::ClaudeCode && turn.native_input_recorded != Some(true) {
-            turn.native_input_recorded = native_outcome.and_then(|outcome| outcome.input_recorded);
+        if state.backend == AtomicChatBackend::ClaudeCode && turn.native_input_recorded != Some(true)
+        {
+            turn.native_input_recorded = native_outcome
+                .and_then(|outcome| outcome.input_recorded)
+                .filter(|recorded| *recorded || !uncertain);
         }
         turn.status = if uncertain {
             AtomicChatTurnStatus::Uncertain
@@ -1681,6 +1684,8 @@ mod tests {
         state.active.as_mut().unwrap().native_input_recorded = None;
         failed_chat_state(&mut state, "turn", "input not delivered", false, Some(&refused)).unwrap();
         assert_eq!(state.active.as_ref().unwrap().native_input_recorded, Some(false));
+        failed_chat_state(&mut state, "turn", "writer may still submit", true, Some(&refused)).unwrap();
+        assert_eq!(state.active.as_ref().unwrap().native_input_recorded, None);
         let unknown = AtomicChatNativeOutcome { input_recorded:None, ..native.clone() };
         failed_chat_state(&mut state, "turn", "delivery unknown", true, Some(&unknown)).unwrap();
         assert_eq!(state.active.as_ref().unwrap().native_input_recorded, None);

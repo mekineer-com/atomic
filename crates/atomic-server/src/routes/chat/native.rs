@@ -115,17 +115,6 @@ pub(super) enum Submission {
     Unknown,
 }
 
-struct InputPlan {
-    operation: Operation,
-    continuation: bool,
-}
-
-impl InputPlan {
-    fn new_sitting(&self) -> bool {
-        self.operation == Operation::New
-    }
-}
-
 const RETRY_CONTINUATION: &str = "Continue the recorded unfinished turn from its saved native context. The user's message is already recorded; do not repeat it or repeat completed actions.";
 
 pub(super) struct PreparedInput {
@@ -191,8 +180,8 @@ pub(super) async fn prepare_input(
             if *user_message_id == turn.user_message_id)
         })
         .and_then(|turn| turn.native_input_recorded);
-    let plan = input_plan(&observed, request, recorded)?;
-    if plan.new_sitting()
+    let (operation, continuation) = input_plan(&observed, request, recorded)?;
+    if operation == Operation::New
         && atomic_core::chat::dialogue_messages(&conv, None)
             .iter()
             .any(|row| row.message.role == "assistant")
@@ -208,14 +197,14 @@ pub(super) async fn prepare_input(
             request,
             profile.common_settings(),
             tools_for(scope),
-            plan.new_sitting(),
-            plan.continuation.then_some(RETRY_CONTINUATION),
+            operation == Operation::New,
+            continuation.then_some(RETRY_CONTINUATION),
         )
         .await
         .map_err(core_json_error)?;
     Ok(PreparedInput {
-        operation: plan.operation,
-        continuation: plan.continuation,
+        operation,
+        continuation,
         input,
         input_tokens: tokens,
     })
@@ -227,7 +216,7 @@ fn input_plan(
     observed: &NativeStatus,
     request: &ChatRequest,
     recorded: Option<bool>,
-) -> Result<InputPlan, JsonError> {
+) -> Result<(Operation, bool), JsonError> {
     let refused = |error: &str| (StatusCode::CONFLICT, serde_json::json!({"error":error}));
     if observed.writer_idle != Some(true) {
         return Err(refused("Native writer exit is not established. Keep this history and reload before continuing."));
@@ -239,20 +228,17 @@ fn input_plan(
         // evidence on a Failed turn permits Retry; never replace recorded input.
         if observed.session_id.is_none() {
             if matches!(request, ChatRequest::New { .. }) || (retry && recorded == Some(false)) {
-                return Ok(InputPlan {
-                    operation: Operation::New,
-                    continuation: false,
-                });
+                return Ok((Operation::New, false));
             }
         } else if (retry && recorded.is_some()) || recap {
-            return Ok(InputPlan {
-                operation: if retry {
+            return Ok((
+                if retry {
                     Operation::Retry
                 } else {
                     Operation::Continue
                 },
-                continuation: retry && recorded == Some(true),
-            });
+                retry && recorded == Some(true),
+            ));
         }
         return Err(refused("Native input evidence is missing. Keep this history; do not initialize a replacement sitting."));
     }
@@ -273,10 +259,7 @@ fn input_plan(
         && !recap
         && receipt.status == "failed"
     {
-        return Ok(InputPlan {
-            operation: Operation::New,
-            continuation: false,
-        });
+        return Ok((Operation::New, false));
     }
     if receipt.initialized != Some(true) {
         return Err(refused("This sitting's native initialization is unconfirmed. Keep its history; do not create a replacement session."));
@@ -292,14 +275,14 @@ fn input_plan(
     {
         return Err(refused("The saved input's submission is unknown. Close out from saved history; do not repeat it."));
     }
-    Ok(InputPlan {
-        operation: if retry {
+    Ok((
+        if retry {
             Operation::Retry
         } else {
             Operation::Continue
         },
-        continuation: retry && recorded,
-    })
+        retry && recorded,
+    ))
 }
 
 impl NativeStatus {
@@ -587,7 +570,10 @@ async fn reconcile_failure(
                 }
                 && turn.error.as_deref() == Some(error)
                 && (turn.native_input_recorded == Some(true)
-                    || turn.native_input_recorded == native.input_recorded)
+                    || turn.native_input_recorded
+                        == native
+                            .input_recorded
+                            .filter(|recorded| *recorded || !uncertain))
         })
     };
     if unchanged
@@ -1039,16 +1025,13 @@ mod tests {
             .unwrap()
         };
         let unused = input_plan(&evidence("not_submitted", false, false), &retry, None).unwrap();
-        assert_eq!(unused.operation, Operation::New);
-        assert!(!unused.continuation);
+        assert_eq!(unused, (Operation::New, false));
         let unsubmitted =
             input_plan(&evidence("not_submitted", true, false), &retry, None).unwrap();
-        assert_eq!(unsubmitted.operation, Operation::Retry);
-        assert!(!unsubmitted.continuation);
+        assert_eq!(unsubmitted, (Operation::Retry, false));
         for submission in ["recorded", "not_submitted"] {
             let recorded = input_plan(&evidence(submission, true, true), &retry, None).unwrap();
-            assert_eq!(recorded.operation, Operation::Retry);
-            assert!(recorded.continuation);
+            assert_eq!(recorded, (Operation::Retry, true));
         }
         assert!(input_plan(&evidence("unknown", true, false), &retry, None).is_err());
         assert!(input_plan(&evidence("unknown", true, true), &retry, Some(true)).is_err());
@@ -1063,8 +1046,7 @@ mod tests {
             instruction: "Recap this sitting".into(),
         };
         let closeout = input_plan(&evidence("unknown", true, false), &recap, None).unwrap();
-        assert_eq!(closeout.operation, Operation::Continue);
-        assert!(!closeout.continuation);
+        assert_eq!(closeout, (Operation::Continue, false));
         for idle in [None, Some(false)] {
             let mut running = evidence("recorded", true, true);
             running.writer_idle = idle;
@@ -1076,8 +1058,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            input_plan(&empty, &retry, Some(false)).unwrap().operation,
-            Operation::New
+            input_plan(&empty, &retry, Some(false)).unwrap(),
+            (Operation::New, false)
         );
         assert!(input_plan(&empty, &retry, None).is_err());
         assert!(input_plan(&empty, &retry, Some(true)).is_err());
@@ -1085,8 +1067,7 @@ mod tests {
         empty.session_id = Some("native".into());
         for recorded in [false, true] {
             let plan = input_plan(&empty, &retry, Some(recorded)).unwrap();
-            assert_eq!(plan.operation, Operation::Retry);
-            assert_eq!(plan.continuation, recorded);
+            assert_eq!(plan, (Operation::Retry, recorded));
         }
         assert!(input_plan(&empty, &retry, None).is_err());
     }
@@ -1195,7 +1176,10 @@ mod tests {
                 assert!(body["system_prompt"].is_null());
             } else {
                 assert_eq!(body["operation"], "new");
-                assert_eq!(body["system_prompt"], "saved presence");
+                assert!(body["system_prompt"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("saved presence"));
             }
             assert!(body["bridge_url"]
                 .as_str()
@@ -1245,6 +1229,22 @@ mod tests {
         query: web::Query<HashMap<String, String>>,
         request: HttpRequest,
     ) -> HttpResponse {
+        if query["turn_id"].is_empty() {
+            return HttpResponse::Ok()
+                .json(serde_json::json!({"session_id":null,"writer_idle":true,"turn":null}));
+        }
+        if matches!(mock.mode, "retry" | "continuation_refused")
+            && mock.credential.lock().unwrap().is_empty()
+        {
+            return HttpResponse::Ok().json(serde_json::json!({
+                "session_id":"native-id", "writer_idle":true, "turn":{
+                    "session_id":"native-id", "turn_id":query["turn_id"],
+                    "attempt_id":mock.attempt_id.lock().unwrap().clone(),
+                    "purpose":"reply", "status":"failed", "submission":"recorded",
+                    "initialized":true, "input_recorded":true
+                }
+            }));
+        }
         if matches!(
             mock.mode,
             "refused_later" | "recap_refused" | "continuation_refused"
@@ -1376,17 +1376,76 @@ mod tests {
                     .await
                     .unwrap();
             let id = &conv.conversation.id;
+            let profile = ClaudeChatProfile {
+                model: "fictional".into(),
+                context_window_tokens: 128000,
+                timeout_seconds: 1,
+                effort: "medium".into(),
+                fingerprint: "fingerprint".into(),
+                memu_response_sentences: 5,
+                memu_log_prompts: false,
+            };
+            let request = ChatRequest::New {
+                content: "fictional input".into(),
+                page_context: None,
+                canvas_context: None,
+            };
+            let mut prepared = None;
+            let mut _prepared_work = None;
+            if mode == "success" {
+                // Native creation must bind its backend before first Send (remaining route work).
+                db.0.set_chat_phase(
+                    id,
+                    &scope.user_id,
+                    &scope.soul_id,
+                    &Backend::ClaudeCode,
+                    &Phase::Open,
+                )
+                .await
+                .unwrap();
+                db.0.save_message(id, "system", "saved presence")
+                    .await
+                    .unwrap();
+                db.0.set_setting(
+                    "chat_prompt",
+                    "Local override must not leak into native input",
+                )
+                .await
+                .unwrap();
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                let before = serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap();
+                let first = prepare_input(&db, &scope, id, &request, &profile, &work)
+                    .await
+                    .unwrap();
+                assert_eq!(first.operation, Operation::New);
+                assert!(!first.continuation);
+                assert!(first
+                    .input
+                    .system_prompt
+                    .as_deref()
+                    .unwrap()
+                    .ends_with("saved presence"));
+                assert!(!first
+                    .input
+                    .system_prompt
+                    .as_deref()
+                    .unwrap()
+                    .contains("Local override"));
+                assert!(first.input.prompt.contains("fictional input"));
+                assert_eq!(
+                    serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap(),
+                    before
+                );
+                prepared = Some(first);
+                _prepared_work = Some(work);
+            }
             let mut input =
                 db.0.admit_chat_turn(
                     id,
                     &scope.user_id,
                     &scope.soul_id,
                     &Backend::ClaudeCode,
-                    &ChatRequest::New {
-                        content: "fictional input".into(),
-                        page_context: None,
-                        canvas_context: None,
-                    },
+                    &request,
                     128000,
                 )
                 .await
@@ -1425,18 +1484,61 @@ mod tests {
                     .unwrap();
             }
             if matches!(mode, "retry" | "continuation_refused") {
-                db.0.fail_chat_turn(id, &input.id, "Previous attempt failed", false, None)
+                let previous_attempt = read_chat(&db, id)
                     .await
+                    .unwrap()
+                    .conversation
+                    .atomic_chat_state
+                    .unwrap()
+                    .active
+                    .unwrap()
+                    .native_attempt_id
                     .unwrap();
+                let previous = AtomicChatNativeOutcome {
+                    attempt_id: previous_attempt.clone(),
+                    usage: None,
+                    input_recorded: Some(true),
+                };
+                db.0.fail_chat_turn(
+                    id,
+                    &input.id,
+                    "Previous attempt failed",
+                    false,
+                    Some(&previous),
+                )
+                .await
+                .unwrap();
+                *mock.attempt_id.lock().unwrap() = previous_attempt;
+                let retry = ChatRequest::Retry {
+                    user_message_id: input.id.clone(),
+                };
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                prepared = Some(
+                    prepare_input(&db, &scope, id, &retry, &profile, &work)
+                        .await
+                        .unwrap(),
+                );
+                assert!(prepared.as_ref().unwrap().continuation);
+                assert!(prepared
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .prompt
+                    .contains(RETRY_CONTINUATION));
+                assert!(!prepared
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .prompt
+                    .contains("fictional input"));
+                _prepared_work = Some(work);
                 input =
                     db.0.admit_chat_turn(
                         id,
                         &scope.user_id,
                         &scope.soul_id,
                         &Backend::ClaudeCode,
-                        &ChatRequest::Retry {
-                            user_message_id: input.id.clone(),
-                        },
+                        &retry,
                         128000,
                     )
                     .await
@@ -1454,15 +1556,6 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let profile = ClaudeChatProfile {
-                model: "fictional".into(),
-                context_window_tokens: 128000,
-                timeout_seconds: 1,
-                effort: "medium".into(),
-                fingerprint: "fingerprint".into(),
-                memu_response_sentences: 5,
-                memu_log_prompts: false,
-            };
             let lifecycle =
                 db.0.get_conversation(id)
                     .await
@@ -1646,7 +1739,7 @@ mod tests {
                 handle.stop(true).await;
                 continue;
             }
-            let turn = NativeTurn {
+            let mut turn = NativeTurn {
                 conversation_id: id,
                 turn_id: &input.id,
                 attempt_id: &attempt,
@@ -1667,9 +1760,14 @@ mod tests {
                     prompt: input.content.clone(),
                     system_prompt: (!mode.starts_with("recap")
                         && !matches!(mode, "retry" | "continuation_refused"))
-                        .then(|| "saved presence".into()),
+                    .then(|| "saved presence".into()),
                 },
             };
+            if let Some(prepared) = prepared {
+                turn.operation = prepared.operation;
+                turn.continuation = prepared.continuation;
+                turn.input = prepared.input;
+            }
             if mode == "recover" {
                 *mock.attempt_id.lock().unwrap() = attempt.clone();
                 let mut expired_stream = NativeStream::default();
