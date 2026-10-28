@@ -886,11 +886,7 @@ pub(super) async fn execute(
                     attempt_id: turn.attempt_id.into(),
                     usage: None,
                     input_recorded: Some(turn.continuation),
-                    context_tokens: read_chat(db, turn.conversation_id)
-                        .await?
-                        .conversation
-                        .atomic_chat_state
-                        .and_then(|state| state.native_context_tokens),
+                    context_tokens: None,
                 };
                 db.0.fail_chat_turn(
                     turn.conversation_id,
@@ -1083,34 +1079,35 @@ mod tests {
 
     #[test]
     fn context_projection_adds_only_uncovered_input_and_overhead_growth() {
-        let mut input = ClaudeChatInput {
-            prompt: "a new turn".into(),
-            system_prompt: None,
-        };
-        let prompt = atomic_core::chunking::count_tokens(&input.prompt) + 8;
-        let context = NativeContext {
-            estimated_tokens: 1000,
-            overhead_tokens: 100,
-            system_tokens: 25,
-        };
-        assert_eq!(context.project(&input, prompt + 100), 1000 + prompt);
-        assert_eq!(context.project(&input, prompt + 150), 1050 + prompt);
-        input.system_prompt = Some("original Presence".into());
-        let system = atomic_core::chunking::count_tokens(input.system_prompt.as_deref().unwrap());
-        let same = NativeContext {
-            system_tokens: system,
-            ..context
-        };
-        assert_eq!(same.project(&input, prompt + system + 100), 1000 + prompt);
-        let fresh = NativeContext {
-            estimated_tokens: 0,
-            overhead_tokens: 0,
-            system_tokens: 0,
-        };
-        assert_eq!(
-            fresh.project(&input, prompt + system + 100),
-            prompt + system + 100
-        );
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../../../tests/fixtures/native_context.json"))
+                .unwrap();
+        for case in cases {
+            let input = ClaudeChatInput {
+                prompt: case["prompt"].as_str().unwrap().into(),
+                system_prompt: case["system_prompt"].as_str().map(str::to_owned),
+            };
+            let total = case["input_tokens"].as_u64().unwrap() as usize;
+            assert_eq!(
+                input_counts(&input, total),
+                (
+                    case["prompt_tokens"].as_u64().unwrap() as usize,
+                    case["system_tokens"].as_u64().unwrap() as usize,
+                    case["overhead_tokens"].as_u64().unwrap() as usize,
+                )
+            );
+            let context: Option<NativeContext> =
+                serde_json::from_value(case["before"].clone()).unwrap();
+            let projected = context
+                .as_ref()
+                .map(|context| context.project(&input, total));
+            assert_eq!(
+                serde_json::to_value(projected).unwrap(),
+                case["projected"],
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[test]
@@ -1400,7 +1397,7 @@ mod tests {
         let mut receipt_counts = counts();
         receipt_counts["cache_read_input_tokens"] = serde_json::json!(321);
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id","writer_idle":!active,
-            "context":{"estimated_tokens":500,"overhead_tokens":50,"system_tokens":25},
+            "context":{"estimated_tokens":if active || older_attempt { 9000 } else { 700 },"overhead_tokens":50,"system_tokens":25},
             "turn":{"session_id":"native-id","turn_id":query["turn_id"],"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode.starts_with("recap") { "recap" } else { "reply" },
                 "status":status,"submission":"recorded","initialized":true,
                 "usage":{"message_id":"message","usage":receipt_counts},
@@ -1721,7 +1718,7 @@ mod tests {
                         attempt_id: mock.attempt_id.lock().unwrap().clone(),
                         usage: None,
                         input_recorded: Some(false),
-                        context_tokens: Some(500),
+                        context_tokens: Some(123),
                     };
                     db.0.fail_chat_turn(
                         id,
@@ -1773,6 +1770,14 @@ mod tests {
                 }
                 let recovered = db.0.get_conversation(id).await.unwrap().unwrap();
                 let saved = recovered.conversation.atomic_chat_state.unwrap();
+                assert_eq!(
+                    saved.native_context_tokens,
+                    Some(if matches!(mode, "refused_later" | "recap_refused") {
+                        123
+                    } else {
+                        700
+                    })
+                );
                 if mode == "reload" {
                     assert!(saved.active.is_none());
                     assert_eq!(recovered.messages.len(), 2);
@@ -1939,8 +1944,10 @@ mod tests {
                 lifecycle.native_context_tokens,
                 Some(if matches!(mode, "refused" | "server_refused") {
                     0
-                } else {
+                } else if mode == "continuation_refused" {
                     500
+                } else {
+                    700
                 })
             );
             if matches!(mode, "refused" | "server_refused") {

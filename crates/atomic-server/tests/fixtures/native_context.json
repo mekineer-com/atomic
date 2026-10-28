@@ -1,0 +1,9 @@
+[
+  {"name":"fresh", "before":{"estimated_tokens":0,"overhead_tokens":0,"system_tokens":0}, "prompt":"hello", "system_prompt":"hello", "input_tokens":110, "prompt_tokens":9,"system_tokens":1,"overhead_tokens":100,"projected":110},
+  {"name":"initialized-before-input", "before":{"estimated_tokens":1,"overhead_tokens":0,"system_tokens":1}, "prompt":"hello", "system_prompt":null, "input_tokens":109, "prompt_tokens":9,"system_tokens":0,"overhead_tokens":100,"projected":110},
+  {"name":"bootstrap-already-counted", "before":{"estimated_tokens":1,"overhead_tokens":0,"system_tokens":1}, "prompt":"hello", "system_prompt":"hello", "input_tokens":110, "prompt_tokens":9,"system_tokens":1,"overhead_tokens":100,"projected":110},
+  {"name":"unchanged-schema", "before":{"estimated_tokens":1000,"overhead_tokens":100,"system_tokens":1}, "prompt":"hello", "system_prompt":null, "input_tokens":109, "prompt_tokens":9,"system_tokens":0,"overhead_tokens":100,"projected":1009},
+  {"name":"larger-schema", "before":{"estimated_tokens":1000,"overhead_tokens":100,"system_tokens":1}, "prompt":"hello", "system_prompt":null, "input_tokens":159, "prompt_tokens":9,"system_tokens":0,"overhead_tokens":150,"projected":1059},
+  {"name":"smaller-schema", "before":{"estimated_tokens":1000,"overhead_tokens":100,"system_tokens":1}, "prompt":"hello", "system_prompt":null, "input_tokens":59, "prompt_tokens":9,"system_tokens":0,"overhead_tokens":50,"projected":1009},
+  {"name":"unknown", "before":null, "prompt":"hello", "system_prompt":null, "input_tokens":109, "prompt_tokens":9,"system_tokens":0,"overhead_tokens":100,"projected":null}
+]
