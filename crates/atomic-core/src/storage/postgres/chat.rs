@@ -508,6 +508,7 @@ impl ChatStore for PostgresStorage {
         user_message_id: &str,
         error: &str,
         uncertain: bool,
+        native_usage: Option<&AtomicChatUsage>,
     ) -> StorageResult<()> {
         let mut tx = self
             .pool
@@ -517,7 +518,7 @@ impl ChatStore for PostgresStorage {
         let mut state = locked_chat_state(&mut tx, &self.db_id, conversation_id)
             .await?
             .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
-        crate::chat::failed_chat_state(&mut state, user_message_id, error, uncertain)?;
+        crate::chat::failed_chat_state(&mut state, user_message_id, error, uncertain, native_usage)?;
         write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
         tx.commit()
             .await
@@ -1136,6 +1137,7 @@ impl ChatStore for PostgresStorage {
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],
         citation_index: i32,
+        native_usage: Option<&AtomicChatUsage>,
     ) -> StorageResult<ChatMessage> {
         let mut tx = self
             .pool
@@ -1146,7 +1148,7 @@ impl ChatStore for PostgresStorage {
         let message =
             write_message(&mut tx, &self.db_id, conversation_id, "assistant", content).await?;
         let state =
-            crate::chat::completed_chat_state(current, expected_user_message_id, &message.id)?;
+            crate::chat::completed_chat_state(current, expected_user_message_id, &message.id, native_usage)?;
         write_chat_tool_state(
             &mut tx,
             &self.db_id,

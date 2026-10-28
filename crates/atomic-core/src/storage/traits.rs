@@ -637,6 +637,7 @@ pub trait ChatStore: Send + Sync {
         user_message_id: &str,
         error: &str,
         uncertain: bool,
+        native_usage: Option<&AtomicChatUsage>,
     ) -> StorageResult<()>;
     async fn set_chat_phase(
         &self,
@@ -719,6 +720,7 @@ pub trait ChatStore: Send + Sync {
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],
         citation_index: i32,
+        native_usage: Option<&AtomicChatUsage>,
     ) -> StorageResult<ChatMessage>;
 
     /// Highest citation number issued, including mappings removed by cleanup.

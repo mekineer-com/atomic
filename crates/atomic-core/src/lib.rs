@@ -2645,6 +2645,7 @@ impl AtomicCore {
         expected_user_message_id: Option<&str>,
         content: &str,
         records: &agent::ChatToolRecords,
+        native_usage: Option<&AtomicChatUsage>,
     ) -> Result<ChatMessage, AtomicCoreError> {
         self.storage
             .save_chat_reply_sync(
@@ -2654,6 +2655,7 @@ impl AtomicCore {
                 &records.tool_calls,
                 &records.citations,
                 records.citation_index,
+                native_usage,
             )
             .await
     }
@@ -2719,9 +2721,10 @@ impl AtomicCore {
         user_message_id: &str,
         error: &str,
         uncertain: bool,
+        native_usage: Option<&AtomicChatUsage>,
     ) -> Result<(), AtomicCoreError> {
         self.storage
-            .fail_chat_turn_sync(conversation_id, user_message_id, error, uncertain)
+            .fail_chat_turn_sync(conversation_id, user_message_id, error, uncertain, native_usage)
             .await
     }
     pub async fn set_chat_phase(

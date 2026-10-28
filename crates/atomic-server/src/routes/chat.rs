@@ -1,5 +1,7 @@
 //! Chat / Conversation routes
 
+mod native;
+
 use crate::db_extractor::Db;
 use crate::error::{
     core_json_error, json_error_response, ok_or_error, ApiErrorResponse, JsonError,
@@ -334,7 +336,7 @@ async fn reconcile_api(state: &AppState, db: &Db, id: &str) -> Result<(), JsonEr
             chat_changed(state, db, id);
         }
         if running.is_some() {
-            db.0.fail_chat_turn(id, &user.message.id, "Previous API worker ended before recording completion. Retry known work or close out from saved history.", unknown_tools(user))
+            db.0.fail_chat_turn(id, &user.message.id, "Previous API worker ended before recording completion. Retry known work or close out from saved history.", unknown_tools(user), None)
                 .await.map_err(core_json_error)?;
             chat_changed(state, db, id);
         }
@@ -347,7 +349,7 @@ async fn reconcile_api(state: &AppState, db: &Db, id: &str) -> Result<(), JsonEr
             id,
             &recap.request_message_id,
             "Previous recap worker ended before recording completion. Retry close-out.",
-            false,
+            false, None,
         )
         .await
         .map_err(core_json_error)?;
@@ -377,7 +379,7 @@ async fn fail_execution(
             .iter()
             .find(|row| row.message.id == input_id)
             .is_some_and(unknown_tools);
-    db.0.fail_chat_turn(id, input_id, &error.to_string(), uncertain)
+    db.0.fail_chat_turn(id, input_id, &error.to_string(), uncertain, None)
         .await
         .map_err(core_json_error)?;
     chat_changed(state, db, id);

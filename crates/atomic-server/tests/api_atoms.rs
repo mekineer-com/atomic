@@ -1465,7 +1465,7 @@ async fn test_retry_does_not_return_a_recap_for_a_failed_ordinary_turn() {
     core.save_message(id, "assistant", "Older answer").await.unwrap();
     let user = core.admit_chat_turn(id, "TestOwner", "TestSoul", &Backend::Api,
         &Request::New { content:"Fictional failed ordinary request".into(), page_context:None, canvas_context:None }, 200_000).await.unwrap();
-    core.fail_chat_turn(id, &user.id, "Fictional ordinary failure", false).await.unwrap();
+    core.fail_chat_turn(id, &user.id, "Fictional ordinary failure", false, None).await.unwrap();
     let end = actix_test::TestRequest::post().uri("/api/memu/session/end")
         .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
         .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"conversation_id":id})).to_request();

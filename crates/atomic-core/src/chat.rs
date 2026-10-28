@@ -6,7 +6,7 @@
 use crate::error::AtomicCoreError;
 use crate::models::{
     AtomicChatBackend, AtomicChatPhase, AtomicChatRecap, AtomicChatRecapOutcome, AtomicChatRequest,
-    AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus, ChatCitation, ChatMessage,
+    AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus, AtomicChatUsage, ChatCitation, ChatMessage,
     ChatMessageWithContext, ChatToolCall, Conversation, ConversationWithMessages,
     ConversationWithTags, Tag,
 };
@@ -490,8 +490,10 @@ pub(crate) fn failed_chat_state(
     message_id: &str,
     error: &str,
     uncertain: bool,
+    native_usage: Option<&AtomicChatUsage>,
 ) -> Result<(), AtomicCoreError> {
     matching_chat_turn(state, message_id)?;
+    apply_native_usage(state, message_id, native_usage)?;
     if let Some(recap) = state
         .recap
         .as_mut()
@@ -521,11 +523,13 @@ pub(crate) fn completed_chat_state(
     state: Option<AtomicChatState>,
     expected_user_message_id: Option<&str>,
     reply_message_id: &str,
+    native_usage: Option<&AtomicChatUsage>,
 ) -> Result<Option<AtomicChatState>, AtomicCoreError> {
     match (state, expected_user_message_id) {
-        (None, None) => Ok(None), // Existing API/standalone path, not lifecycle-managed yet.
+        (None, None) if native_usage.is_none() => Ok(None), // Standalone.
         (Some(mut state), Some(expected)) => {
             matching_chat_turn(&state, expected)?;
+            apply_native_usage(&mut state, expected, native_usage)?;
             if let Some(recap) = state
                 .recap
                 .as_mut()
@@ -543,6 +547,22 @@ pub(crate) fn completed_chat_state(
             "Reply has no matching admitted chat turn".to_string(),
         )),
     }
+}
+
+fn apply_native_usage(
+    state: &mut AtomicChatState,
+    turn_id: &str,
+    usage: Option<&AtomicChatUsage>,
+) -> Result<(), AtomicCoreError> {
+    if let Some(usage) = usage {
+        if state.backend != AtomicChatBackend::ClaudeCode
+            || usage.turn_id != turn_id || usage.message_id.is_empty()
+        {
+            return Err(AtomicCoreError::Conflict("Native usage does not match this Claude turn".into()));
+        }
+        state.native_usage = Some(usage.clone());
+    }
+    Ok(())
 }
 
 pub(crate) fn changed_chat_phase(
@@ -864,11 +884,12 @@ pub fn fail_chat_turn(
     user_message_id: &str,
     error: &str,
     uncertain: bool,
+    native_usage: Option<&AtomicChatUsage>,
 ) -> Result<(), AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
     let mut state = stored_chat_state(&tx, conversation_id)?
         .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
-    failed_chat_state(&mut state, user_message_id, error, uncertain)?;
+    failed_chat_state(&mut state, user_message_id, error, uncertain, native_usage)?;
     write_chat_state(&tx, conversation_id, Some(&state))?;
     tx.commit()?;
     Ok(())
@@ -1480,6 +1501,7 @@ pub fn save_chat_reply(
     tool_calls: &[ChatToolCall],
     citations: &[ChatCitation],
     citation_index: i32,
+    native_usage: Option<&AtomicChatUsage>,
 ) -> Result<ChatMessage, AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
     let message = save_message(&tx, conversation_id, "assistant", content)?;
@@ -1487,6 +1509,7 @@ pub fn save_chat_reply(
         stored_chat_state(&tx, conversation_id)?,
         expected_user_message_id,
         &message.id,
+        native_usage,
     )?;
     write_chat_tool_state(
         &tx,

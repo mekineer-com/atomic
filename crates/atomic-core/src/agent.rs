@@ -2742,6 +2742,7 @@ where
             &records.tool_calls,
             &records.citations,
             0, // API citations are per reply, not a native sitting high-water mark.
+            None,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -2892,7 +2893,7 @@ mod tests {
             )
             .await
             .unwrap();
-        core.fail_chat_turn(cid, &user.id, "Fictional failure before model use", false)
+        core.fail_chat_turn(cid, &user.id, "Fictional failure before model use", false, None)
             .await
             .unwrap();
         let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
@@ -3107,7 +3108,7 @@ mod tests {
         let settings = api_test_settings("http://127.0.0.1:9");
         let ordinary = core.admit_chat_turn(cid, "TestOwner", "TestSoul", &Backend::Api,
             &new_chat_request("This Atomic session is ending. Write a recap of your activity is wording I want to discuss, not a control"), 200_000).await.unwrap();
-        core.fail_chat_turn(cid, &ordinary.id, "Fictional ordinary failure", false)
+        core.fail_chat_turn(cid, &ordinary.id, "Fictional ordinary failure", false, None)
             .await
             .unwrap();
         core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closing)
@@ -3280,7 +3281,7 @@ mod tests {
             .await
             .is_err()
         );
-        core.fail_chat_turn(cid, &control.id, "Fictional provider failure", false)
+        core.fail_chat_turn(cid, &control.id, "Fictional provider failure", false, None)
             .await
             .unwrap();
         let retried = core
@@ -3525,7 +3526,7 @@ mod tests {
         assert_eq!(turn.tool_calls.len(), 1);
         assert_eq!(turn.tool_calls[0].status, "complete");
         let output = saved_tool_output(&turn.tool_calls[0]).unwrap();
-        core.fail_chat_turn(cid, &user.id, "Fictional model failure", false)
+        core.fail_chat_turn(cid, &user.id, "Fictional model failure", false, None)
             .await
             .unwrap();
         core.admit_chat_turn(
@@ -3700,7 +3701,7 @@ mod tests {
         assert_eq!(call.status, "failed");
         assert_eq!(call.tool_output.as_ref().unwrap()["outcome_unknown"], true);
         // Prove the saved tool flag blocks Retry even if the caller misses uncertainty.
-        core.fail_chat_turn(cid, &user.id, "Unknown edit outcome", false)
+        core.fail_chat_turn(cid, &user.id, "Unknown edit outcome", false, None)
             .await
             .unwrap();
         assert!(
@@ -3937,7 +3938,7 @@ mod tests {
             )
             .await
             .unwrap();
-        core.fail_chat_turn(cid, &user.id, "Fictional network failure", false)
+        core.fail_chat_turn(cid, &user.id, "Fictional network failure", false, None)
             .await
             .unwrap();
         let before = core
@@ -4028,7 +4029,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        core.fail_chat_turn(cid, &user.id, "Fictional unknown outcome", true)
+        core.fail_chat_turn(cid, &user.id, "Fictional unknown outcome", true, None)
             .await
             .unwrap();
         let ordinary = core
@@ -4066,7 +4067,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        core.fail_chat_turn(cid, &control.id, "Fictional recap failure", true)
+        core.fail_chat_turn(cid, &control.id, "Fictional recap failure", true, None)
             .await
             .unwrap();
         assert!(
@@ -4086,7 +4087,7 @@ mod tests {
             prior_citations: vec![],
         };
         assert!(
-            core.save_chat_reply(cid, Some(&user.id), "Not the recap result", &records)
+            core.save_chat_reply(cid, Some(&user.id), "Not the recap result", &records, None)
                 .await
                 .is_err()
         );
@@ -4094,7 +4095,7 @@ mod tests {
             "CREATE TRIGGER fail_recap BEFORE UPDATE OF atomic_chat_state ON conversations BEGIN SELECT RAISE(ABORT, 'fictional save failure'); END;"
         ).unwrap();
         assert!(
-            core.save_chat_reply(cid, Some(&control.id), "Fictional summary", &records)
+            core.save_chat_reply(cid, Some(&control.id), "Fictional summary", &records, None)
                 .await
                 .is_err()
         );
@@ -4118,7 +4119,7 @@ mod tests {
             .execute_batch("DROP TRIGGER fail_recap;")
             .unwrap();
         let reply = core
-            .save_chat_reply(cid, Some(&control.id), "Fictional summary", &records)
+            .save_chat_reply(cid, Some(&control.id), "Fictional summary", &records, None)
             .await
             .unwrap();
         let saved = core.get_conversation(cid).await.unwrap().unwrap();
@@ -4185,7 +4186,7 @@ mod tests {
                 .admit_chat_turn(cid, "TestOwner", "TestSoul", &backend, &request, 200_000)
                 .await
                 .unwrap();
-            core.fail_chat_turn(cid, &control.id, "Fictional lost result", true)
+            core.fail_chat_turn(cid, &control.id, "Fictional lost result", true, None)
                 .await
                 .unwrap();
             let before = core
@@ -4434,21 +4435,39 @@ mod tests {
             citation_index: 0,
             prior_citations: Vec::new(),
         };
+        let usage = crate::AtomicChatUsage {
+            turn_id: user.id.clone(), message_id: "native-message".into(),
+            input_tokens: 12, cache_creation_input_tokens: 30,
+            cache_read_input_tokens: 100, output_tokens: 8,
+        };
+        reopened.fail_chat_turn(cid, &user.id, "Recorded native failure", false, Some(&usage))
+            .await.unwrap();
+        let failed = reopened.get_conversation(cid).await.unwrap().unwrap();
+        assert_eq!(failed.conversation.atomic_chat_state.unwrap().native_usage, Some(usage.clone()));
+        assert!(reopened.fail_chat_turn(cid, &user.id, "Late failure", false, Some(&usage))
+            .await.is_err());
+        reopened.admit_chat_turn(cid, "TestOwner", "TestSoul", &backend,
+            &crate::AtomicChatRequest::Retry { user_message_id: user.id.clone() }, 200_000)
+            .await.unwrap();
+        let final_usage = crate::AtomicChatUsage { input_tokens: 20, ..usage.clone() };
+        let wrong_usage = crate::AtomicChatUsage { turn_id: "other-turn".into(), ..final_usage.clone() };
+        assert!(reopened.save_chat_reply(cid, Some(&user.id), "Wrong usage", &records, Some(&wrong_usage))
+            .await.is_err());
         assert!(
             reopened
-                .save_chat_reply(cid, Some("other-turn"), "Wrong result", &records)
+                .save_chat_reply(cid, Some("other-turn"), "Wrong result", &records, None)
                 .await
                 .is_err()
         );
         assert!(
             reopened
-                .save_chat_reply(cid, None, "Unbound result", &records)
+                .save_chat_reply(cid, None, "Unbound result", &records, None)
                 .await
                 .is_err()
         );
         assert!(
             reopened
-                .fail_chat_turn(cid, "other-turn", "Stale error", true)
+                .fail_chat_turn(cid, "other-turn", "Stale error", true, None)
                 .await
                 .is_err()
         );
@@ -4487,12 +4506,13 @@ mod tests {
             .unwrap();
         assert!(
             reopened
-                .save_chat_reply(cid, Some(&user.id), "Retained reply", &records)
+                .save_chat_reply(cid, Some(&user.id), "Retained reply", &records, Some(&final_usage))
                 .await
                 .is_err()
         );
         let retained = reopened.get_conversation(cid).await.unwrap().unwrap();
         assert_eq!(retained.messages.len(), 1);
+        assert_eq!(retained.conversation.atomic_chat_state.as_ref().unwrap().native_usage, Some(usage));
         assert_eq!(
             retained
                 .conversation
@@ -4512,16 +4532,17 @@ mod tests {
             .execute_batch("DROP TRIGGER fail_completion;")
             .unwrap();
         reopened
-            .save_chat_reply(cid, Some(&user.id), "Retained reply", &records)
+            .save_chat_reply(cid, Some(&user.id), "Retained reply", &records, Some(&final_usage))
             .await
             .unwrap();
         let completed = reopened.get_conversation(cid).await.unwrap().unwrap();
         let state = completed.conversation.atomic_chat_state.unwrap();
         assert_eq!(state.phase, AtomicChatPhase::Closing);
         assert!(state.active.is_none());
+        assert_eq!(state.native_usage, Some(final_usage));
         assert!(
             reopened
-                .save_chat_reply(cid, Some(&user.id), "Duplicate reply", &records)
+                .save_chat_reply(cid, Some(&user.id), "Duplicate reply", &records, None)
                 .await
                 .is_err()
         );
@@ -4608,7 +4629,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            core.fail_chat_turn(cid, &user.id, "Fictional failure", uncertain)
+            core.fail_chat_turn(cid, &user.id, "Fictional failure", uncertain, None)
                 .await
                 .unwrap();
             let reopened = AtomicCore::open_or_create(&db_path).unwrap();
@@ -5184,7 +5205,7 @@ mod tests {
                 .unwrap();
             assert!(
                 reopened
-                    .save_chat_reply(cid, None, reply_text, &records)
+                    .save_chat_reply(cid, None, reply_text, &records, None)
                     .await
                     .is_err()
             );
@@ -5218,7 +5239,7 @@ mod tests {
                 .unwrap();
         }
         let reply = reopened
-            .save_chat_reply(cid, None, reply_text, &records)
+            .save_chat_reply(cid, None, reply_text, &records, None)
             .await
             .unwrap();
         let saved = reopened.get_conversation(cid).await.unwrap().unwrap();
@@ -5355,7 +5376,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            core.save_chat_reply(other_id, None, "Must not publish across sittings", &attempt)
+            core.save_chat_reply(other_id, None, "Must not publish across sittings", &attempt, None)
                 .await
                 .is_err()
         );
@@ -5585,6 +5606,7 @@ mod tests {
                         relevance_score: None,
                     }],
                     0,
+                    None,
                 )
                 .await
                 .unwrap();
