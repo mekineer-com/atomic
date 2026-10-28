@@ -855,6 +855,13 @@ pub struct AtomicChatUsage {
     pub output_tokens: usize,
 }
 
+/// Captured native attempt and its latest finalized usage, when known.
+#[derive(Debug, Clone)]
+pub struct AtomicChatNativeOutcome {
+    pub attempt_id: String,
+    pub usage: Option<AtomicChatUsage>,
+}
+
 /// Durable admission, not a process-local claim that a native writer is idle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

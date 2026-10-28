@@ -1892,6 +1892,7 @@ impl ChatToolSession {
         prior: Vec<ChatCitation>,
         mut calls: Vec<ChatToolCall>,
         citations: Vec<ChatCitation>,
+        recovering: bool,
     ) -> Result<(), String> {
         let mut catalog = BTreeMap::<i32, ChatCitation>::new();
         for citation in prior.iter().chain(citations.iter()) {
@@ -1930,7 +1931,7 @@ impl ChatToolSession {
         if interrupted {
             self.checkpoint().await?;
         }
-        self.require_known_outcomes()
+        if recovering { Ok(()) } else { self.require_known_outcomes() }
     }
 
     fn require_known_outcomes(&self) -> Result<(), String> {
@@ -1994,6 +1995,12 @@ impl ChatToolSession {
 
     pub fn tools(&self) -> &[ToolDefinition] {
         &self.tools
+    }
+
+    pub fn binding(&self) -> Option<(&str, &str, &str, &str)> {
+        let scope = self.memu_tool_config.as_ref()?;
+        Some((&scope.user_id, &scope.soul_id, &self.conversation_id,
+            self.durable_message_id.as_deref()?))
     }
 
     pub async fn execute(
@@ -2698,7 +2705,7 @@ where
                 None,
                 vec![],
                 turn.tool_calls.clone(),
-                turn.citations.clone(),
+                turn.citations.clone(), false,
             )
             .await?;
     }
@@ -3675,7 +3682,7 @@ mod tests {
             Arc::new(|_| {}),
         );
         tools
-            .bind_user_turn(&user.id, None, vec![], vec![], vec![])
+            .bind_user_turn(&user.id, None, vec![], vec![], vec![], false)
             .await
             .unwrap();
         let args = json!({"atom_id":"category:fictional", "edits":[{"operation":"append", "text":"\naddition"}]});
@@ -3700,6 +3707,12 @@ mod tests {
         let call = &saved.messages.last().unwrap().tool_calls[0];
         assert_eq!(call.status, "failed");
         assert_eq!(call.tool_output.as_ref().unwrap()["outcome_unknown"], true);
+        let recovered = core.saved_chat_tool_records(cid, &user.id, MemuToolConfig {
+            base_url: server.uri(), user_id: "TestOwner".into(), soul_id: "TestSoul".into(),
+        }).await.unwrap();
+        assert_eq!(recovered.tool_calls.len(), 1);
+        assert_eq!(recovered.tool_calls[0].tool_output.as_ref().unwrap()["outcome_unknown"], true);
+        assert_eq!(*summary.lock().unwrap(), "Base text\naddition");
         // Prove the saved tool flag blocks Retry even if the caller misses uncertainty.
         core.fail_chat_turn(cid, &user.id, "Unknown edit outcome", false, None)
             .await
@@ -4441,20 +4454,23 @@ mod tests {
             input_tokens: 12, cache_creation_input_tokens: 30,
             cache_read_input_tokens: 100, output_tokens: 8,
         };
-        reopened.fail_chat_turn(cid, &user.id, "Recorded native failure", false, Some(&usage))
+        let outcome = |usage: &crate::AtomicChatUsage, attempt: &str| crate::AtomicChatNativeOutcome { attempt_id: attempt.into(), usage: Some(usage.clone()) };
+        reopened.fail_chat_turn(cid, &user.id, "Recorded native failure", false, Some(&outcome(&usage, &first_attempt)))
             .await.unwrap();
         let failed = reopened.get_conversation(cid).await.unwrap().unwrap();
         assert_eq!(failed.conversation.atomic_chat_state.unwrap().native_usage, Some(usage.clone()));
-        assert!(reopened.fail_chat_turn(cid, &user.id, "Late failure", false, Some(&usage))
+        assert!(reopened.fail_chat_turn(cid, &user.id, "Late failure", false, None)
             .await.is_err());
         reopened.admit_chat_turn(cid, "TestOwner", "TestSoul", &backend,
             &crate::AtomicChatRequest::Retry { user_message_id: user.id.clone() }, 200_000)
             .await.unwrap();
         let retry_state = reopened.get_conversation(cid).await.unwrap().unwrap().conversation.atomic_chat_state.unwrap();
-        assert_ne!(retry_state.active.unwrap().native_attempt_id.unwrap(), first_attempt);
+        let retry_attempt = retry_state.active.unwrap().native_attempt_id.unwrap();
+        assert_ne!(retry_attempt, first_attempt);
+        assert!(reopened.fail_chat_turn(cid, &user.id, "Stale native attempt", true, Some(&outcome(&usage, &first_attempt))).await.is_err());
         let final_usage = crate::AtomicChatUsage { input_tokens: 20, ..usage.clone() };
         let wrong_usage = crate::AtomicChatUsage { turn_id: "other-turn".into(), ..final_usage.clone() };
-        assert!(reopened.save_chat_reply(cid, Some(&user.id), "Wrong usage", &records, Some(&wrong_usage))
+        assert!(reopened.save_chat_reply(cid, Some(&user.id), "Wrong usage", &records, Some(&outcome(&wrong_usage, &retry_attempt)))
             .await.is_err());
         assert!(
             reopened
@@ -4509,7 +4525,7 @@ mod tests {
             .unwrap();
         assert!(
             reopened
-                .save_chat_reply(cid, Some(&user.id), "Retained reply", &records, Some(&final_usage))
+                .save_chat_reply(cid, Some(&user.id), "Retained reply", &records, Some(&outcome(&final_usage, &retry_attempt)))
                 .await
                 .is_err()
         );
@@ -4534,8 +4550,10 @@ mod tests {
             .unwrap()
             .execute_batch("DROP TRIGGER fail_completion;")
             .unwrap();
+        reopened.fail_chat_turn(cid, &user.id, "Lost delivery; native result recoverable", true,
+            Some(&crate::AtomicChatNativeOutcome { attempt_id: retry_attempt.clone(), usage: None })).await.unwrap();
         reopened
-            .save_chat_reply(cid, Some(&user.id), "Retained reply", &records, Some(&final_usage))
+            .save_chat_reply(cid, Some(&user.id), "Retained reply", &records, Some(&outcome(&final_usage, &retry_attempt)))
             .await
             .unwrap();
         let completed = reopened.get_conversation(cid).await.unwrap().unwrap();

@@ -26,7 +26,7 @@ pub const CHAT_TOOLS_PATH: &str = "/openalma/chat-tools/mcp";
 
 #[derive(Clone, Default)]
 pub struct ChatToolBridge {
-    turns: Arc<Mutex<HashMap<String, AtomicMcpTransport<ChatMcpServer>>>>,
+    turns: Arc<Mutex<HashMap<String, (AtomicMcpTransport<ChatMcpServer>, Arc<ChatTurn>)>>>,
 }
 
 /// Finish the lease before publishing its tool state. Drop is abandonment cleanup.
@@ -39,6 +39,7 @@ pub struct ChatToolLease {
 }
 
 struct ChatTurn {
+    binding: (String, String, String, String),
     accepting: Mutex<bool>,
     work: WorkTracker,
     state: AsyncMutex<Option<ChatToolSession>>,
@@ -50,6 +51,9 @@ struct ChatMcpServer(Arc<ChatTurn>);
 
 impl ChatToolBridge {
     pub fn register(&self, session: ChatToolSession) -> Result<ChatToolLease, String> {
+        let (owner, soul, conversation, message) = session.binding()
+            .ok_or("Scoped tools require a saved owner/Soul/user turn")?;
+        let binding = (owner.into(), soul.into(), conversation.into(), message.into());
         let tools = session
             .tools()
             .iter()
@@ -67,6 +71,7 @@ impl ChatToolBridge {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let server = ChatMcpServer(Arc::new(ChatTurn {
+            binding,
             accepting: Mutex::new(true),
             work: WorkTracker::default(),
             state: AsyncMutex::new(Some(session)),
@@ -77,7 +82,7 @@ impl ChatToolBridge {
         self.turns
             .lock()
             .expect("chat tool registry poisoned")
-            .insert(credential.clone(), transport.clone());
+            .insert(credential.clone(), (transport.clone(), Arc::clone(&server.0)));
         Ok(ChatToolLease {
             credential,
             bridge: self.clone(),
@@ -85,6 +90,25 @@ impl ChatToolBridge {
             transport,
             finished: false,
         })
+    }
+
+    /// Caller owns the sitting lock and has proved native writer exit. Drop's
+    /// orphan cleanup can still be draining after that worker released its lock.
+    pub async fn drain_sitting(&self, owner: &str, soul: &str, conversation: &str)
+        -> Vec<(String, ChatToolRecords)> {
+        let turns: Vec<_> = self.turns.lock().expect("chat tool registry poisoned").iter()
+            .filter(|(_, (_, turn))| turn.binding.0 == owner && turn.binding.1 == soul && turn.binding.2 == conversation)
+            .map(|(credential, (transport, turn))| (credential.clone(), transport.clone(), Arc::clone(turn)))
+            .collect();
+        let mut records = Vec::new();
+        for (credential, transport, turn) in turns {
+            *turn.accepting.lock().expect("chat tool admission poisoned") = false;
+            drain_turn(self.clone(), credential, Arc::clone(&turn), transport).await;
+            if let Some(session) = turn.state.lock().await.take() {
+                records.push((turn.binding.3.clone(), session.finish()));
+            }
+        }
+        records
     }
 }
 
@@ -263,7 +287,7 @@ pub async fn chat_tools(
                 .lock()
                 .expect("chat tool registry poisoned")
                 .get(token)
-                .cloned()
+            .map(|(transport, _)| transport.clone())
         });
     let Some(transport) = transport else {
         return Ok(HttpResponse::Unauthorized().finish());
@@ -580,6 +604,7 @@ mod tests {
             .register(session(&core, events.clone()).await)
             .unwrap();
         let server = lease.server.clone();
+        let binding = server.0.binding.clone();
         let held = server.0.state.lock().await;
         let mut call = Box::pin(server.execute(
             "toolu-detached".to_string(),
@@ -593,12 +618,19 @@ mod tests {
         );
         drop(call);
         drop(lease);
+        assert!(bridge.drain_sitting("TestOwner", "OtherSoul", &binding.2).await.is_empty());
+        let mut drain = Box::pin(bridge.drain_sitting(&binding.0, &binding.1, &binding.2));
+        assert!(tokio::time::timeout(Duration::from_millis(10), drain.as_mut()).await.is_err());
         assert!(
             tokio::time::timeout(Duration::from_millis(10), server.0.work.wait_idle())
                 .await
                 .is_err()
         );
         drop(held);
+        let recovered = tokio::time::timeout(Duration::from_secs(5), drain).await.unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].0, binding.3);
+        assert_eq!(recovered[0].1.tool_calls[0].id, "toolu-detached");
         tokio::time::timeout(Duration::from_secs(5), executor::wait_idle())
             .await
             .unwrap();

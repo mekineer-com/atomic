@@ -36,14 +36,14 @@ impl SqliteStorage {
         user_message_id: &str,
         error: &str,
         uncertain: bool,
-        native_usage: Option<&AtomicChatUsage>,
+        native_outcome: Option<&AtomicChatNativeOutcome>,
     ) -> StorageResult<()> {
         let conn = self
             .db
             .conn
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        crate::chat::fail_chat_turn(&conn, conversation_id, user_message_id, error, uncertain, native_usage)
+        crate::chat::fail_chat_turn(&conn, conversation_id, user_message_id, error, uncertain, native_outcome)
     }
     pub(crate) fn set_chat_phase_sync(
         &self,
@@ -181,7 +181,7 @@ impl SqliteStorage {
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],
         citation_index: i32,
-        native_usage: Option<&AtomicChatUsage>,
+        native_outcome: Option<&AtomicChatNativeOutcome>,
     ) -> StorageResult<ChatMessage> {
         let conn = self
             .db
@@ -196,7 +196,7 @@ impl SqliteStorage {
             tool_calls,
             citations,
             citation_index,
-            native_usage,
+            native_outcome,
         )
     }
 
@@ -292,7 +292,7 @@ impl ChatStore for SqliteStorage {
         user_message_id: &str,
         error: &str,
         uncertain: bool,
-        native_usage: Option<&AtomicChatUsage>,
+        native_outcome: Option<&AtomicChatNativeOutcome>,
     ) -> StorageResult<()> {
         let (storage, conversation_id, user_message_id, error) = (
             self.clone(),
@@ -300,9 +300,9 @@ impl ChatStore for SqliteStorage {
             user_message_id.to_string(),
             error.to_string(),
         );
-        let native_usage = native_usage.cloned();
+        let native_outcome = native_outcome.cloned();
         tokio::task::spawn_blocking(move || {
-            storage.fail_chat_turn_sync(&conversation_id, &user_message_id, &error, uncertain, native_usage.as_ref())
+            storage.fail_chat_turn_sync(&conversation_id, &user_message_id, &error, uncertain, native_outcome.as_ref())
         })
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
@@ -337,7 +337,7 @@ impl ChatStore for SqliteStorage {
         tool_calls: &[ChatToolCall],
         citations: &[ChatCitation],
         citation_index: i32,
-        native_usage: Option<&AtomicChatUsage>,
+        native_outcome: Option<&AtomicChatNativeOutcome>,
     ) -> StorageResult<ChatMessage> {
         let storage = self.clone();
         let conversation_id = conversation_id.to_string();
@@ -345,7 +345,7 @@ impl ChatStore for SqliteStorage {
         let content = content.to_string();
         let tool_calls = tool_calls.to_vec();
         let citations = citations.to_vec();
-        let native_usage = native_usage.cloned();
+        let native_outcome = native_outcome.cloned();
         tokio::task::spawn_blocking(move || {
             storage.save_chat_reply_sync(
                 &conversation_id,
@@ -354,7 +354,7 @@ impl ChatStore for SqliteStorage {
                 &tool_calls,
                 &citations,
                 citation_index,
-                native_usage.as_ref(),
+                native_outcome.as_ref(),
             )
         })
         .await

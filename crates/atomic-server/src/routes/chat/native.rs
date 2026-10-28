@@ -4,7 +4,7 @@ use super::*;
 use crate::mcp::chat::{ChatToolBridge, CHAT_TOOLS_PATH};
 use atomic_core::{
     agent::{ChatToolSession, ClaudeChatInput},
-    AtomicChatUsage, ChatEvent, ChatMessageWithContext,
+    AtomicChatNativeOutcome, AtomicChatUsage, ChatEvent, ChatMessageWithContext,
 };
 use serde_json::Value;
 
@@ -90,14 +90,20 @@ pub(super) struct NativeReceipt {
 }
 
 impl NativeStatus {
-    fn matches_turn(&self, turn: &NativeTurn<'_>, observed_session: Option<&str>) -> bool {
+    fn matches_turn(
+        &self,
+        turn_id: &str,
+        attempt_id: &str,
+        purpose: Purpose,
+        observed_session: Option<&str>,
+    ) -> bool {
         self.turn.as_ref().is_some_and(|receipt| {
-            receipt.turn_id == turn.turn_id
-                && receipt.attempt_id == turn.attempt_id
+            receipt.turn_id == turn_id
+                && receipt.attempt_id == attempt_id
                 && Some(&receipt.session_id) == self.session_id.as_ref()
                 && observed_session.is_none_or(|id| id == receipt.session_id)
                 && receipt.purpose
-                    == if turn.purpose == Purpose::Reply {
+                    == if purpose == Purpose::Reply {
                         "reply"
                     } else {
                         "recap"
@@ -130,6 +136,221 @@ pub(super) async fn status(
         .json()
         .await
         .map_err(|e| format!("Invalid native status: {e}"))
+}
+
+/// Caller holds the scoped sitting lock. Native exit and orphan Rust tool
+/// cleanup still need their independent proofs before reading final records.
+/// Dormant until N2c route wiring; no model request or new admission here.
+pub(super) async fn reconcile(
+    state: &AppState,
+    db: &Db,
+    scope: &MemuScope,
+    bridge: &ChatToolBridge,
+    id: &str,
+) -> Result<(), JsonError> {
+    let conv = read_chat(db, id).await?;
+    if !conversation_matches(&conv, scope) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error":"Conversation not found"}),
+        ));
+    }
+    let saved = conv
+        .conversation
+        .atomic_chat_state
+        .as_ref()
+        .ok_or_else(|| {
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error":"This sitting has no native admission"}),
+            )
+        })?;
+    if saved.backend != Backend::ClaudeCode {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"Restore claude_code=false for this API sitting"}),
+        ));
+    }
+    if saved.phase == Phase::Closed
+        || saved
+            .recap
+            .as_ref()
+            .is_some_and(|recap| matches!(recap.outcome, RecapOutcome::Complete { .. }))
+    {
+        return Ok(());
+    }
+    let (turn_id, attempt_id, purpose, was_failed) = if let Some(recap) = &saved.recap {
+        (
+            &recap.request_message_id,
+            recap.native_attempt_id.as_deref(),
+            Purpose::Recap,
+            matches!(recap.outcome, RecapOutcome::Failed { .. }),
+        )
+    } else if let Some(active) = &saved.active {
+        (
+            &active.user_message_id,
+            active.native_attempt_id.as_deref(),
+            Purpose::Reply,
+            active.status == TurnStatus::Failed,
+        )
+    } else {
+        return Ok(());
+    };
+    let attempt_id = attempt_id.ok_or_else(|| (StatusCode::CONFLICT,
+        serde_json::json!({"error":"Native attempt identity is missing; keep this history and start a new sitting"})))?;
+    let observed = status(scope, id, turn_id).await;
+    let matched = observed
+        .as_ref()
+        .is_ok_and(|status| status.matches_turn(turn_id, attempt_id, purpose, None));
+    let idle = observed
+        .as_ref()
+        .is_ok_and(|status| status.writer_idle == Some(true));
+    // An explicit pre-submission refusal can have no matching MCP receipt.
+    if was_failed && !matched && idle {
+        return Ok(());
+    }
+    if observed
+        .as_ref()
+        .is_ok_and(|status| status.writer_idle == Some(false))
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"Native work is still running. Wait, or open a new independent sitting; this history is retained."}),
+        ));
+    }
+    let mut native = AtomicChatNativeOutcome {
+        attempt_id: attempt_id.into(),
+        usage: None,
+    };
+    let receipt = if matched {
+        observed.ok().and_then(|status| status.turn)
+    } else {
+        None
+    };
+    let mut receipt = receipt;
+    if let Some(usage) = receipt.as_mut().and_then(|receipt| receipt.usage.take()) {
+        native.usage = Some(usage.snapshot(turn_id));
+    }
+    if idle && matched {
+        for (message_id, records) in bridge
+            .drain_sitting(&scope.user_id, &scope.soul_id, id)
+            .await
+        {
+            db.0.save_chat_tool_records(id, &message_id, &records)
+                .await
+                .map_err(core_json_error)?;
+        }
+        let records =
+            db.0.saved_chat_tool_records(id, turn_id, tools_for(scope))
+                .await
+                .map_err(core_json_error)?;
+        let receipt = receipt.expect("matching receipt");
+        if receipt.status == "complete" {
+            let text = receipt.text.ok_or_else(|| (StatusCode::BAD_GATEWAY,
+                serde_json::json!({"error":"Native completion has no saved result; history is retained"})))?;
+            let records = records.for_reply(&text);
+            db.0.save_chat_reply(id, Some(turn_id), &text, &records, Some(&native))
+                .await
+                .map_err(core_json_error)?;
+            chat_changed(state, db, id);
+            return Ok(());
+        }
+        let unknown_tools = records.tool_calls.iter().any(|call| {
+            call.status == "running"
+                || call
+                    .tool_output
+                    .as_ref()
+                    .and_then(|output| output.get("outcome_unknown"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        });
+        // A same-session recap is tool-free: after exit proof its unknown result
+        // may be retried. Keep any uncertain ordinary turn separate and untouched.
+        let uncertain = purpose == Purpose::Reply && (receipt.status != "failed" || unknown_tools);
+        let error = if purpose == Purpose::Recap && receipt.status != "failed" {
+            "The tool-free recap result was not recorded. Writer exit is confirmed; Retry close-out in this sitting.".into()
+        } else {
+            receipt.error.unwrap_or_else(|| {
+                if uncertain {
+                    "Native completion was not recorded. Close out from saved history; do not replay this turn.".into()
+                } else {
+                    "The native attempt failed. Retry the saved turn or close out.".into()
+                }
+            })
+        };
+        return reconcile_failure(
+            state,
+            db,
+            id,
+            turn_id,
+            saved,
+            &native,
+            purpose,
+            &error,
+            uncertain,
+            conv.messages
+                .iter()
+                .find(|row| row.message.id == *turn_id)
+                .is_some_and(|row| row.tool_calls.iter().any(|call| call.status == "running")),
+        )
+        .await;
+    }
+    let error = "Native completion or writer exit cannot be established. Keep this history and start a new independent sitting, or reload after the memory server recovers.";
+    if !was_failed {
+        reconcile_failure(
+            state, db, id, turn_id, saved, &native, purpose, error, true, false,
+        )
+        .await?;
+    }
+    Err((StatusCode::CONFLICT, serde_json::json!({"error":error})))
+}
+
+async fn reconcile_failure(
+    state: &AppState,
+    db: &Db,
+    id: &str,
+    turn_id: &str,
+    saved: &atomic_core::AtomicChatState,
+    native: &AtomicChatNativeOutcome,
+    purpose: Purpose,
+    error: &str,
+    uncertain: bool,
+    changed_tools: bool,
+) -> Result<(), JsonError> {
+    let unchanged = if purpose == Purpose::Recap {
+        saved
+            .recap
+            .as_ref()
+            .is_some_and(|recap| match &recap.outcome {
+                RecapOutcome::Failed { error: old } => !uncertain && old == error,
+                RecapOutcome::Uncertain { error: old } => uncertain && old == error,
+                _ => false,
+            })
+    } else {
+        saved.active.as_ref().is_some_and(|turn| {
+            turn.status
+                == if uncertain {
+                    TurnStatus::Uncertain
+                } else {
+                    TurnStatus::Failed
+                }
+                && turn.error.as_deref() == Some(error)
+        })
+    };
+    if unchanged
+        && !changed_tools
+        && native
+            .usage
+            .as_ref()
+            .is_none_or(|usage| saved.native_usage.as_ref() == Some(usage))
+    {
+        return Ok(());
+    }
+    db.0.fail_chat_turn(id, turn_id, error, uncertain, Some(native))
+        .await
+        .map_err(core_json_error)?;
+    chat_changed(state, db, id);
+    Ok(())
 }
 
 // These are MCP-normalized observations. Only the bridge executes/checkpoints tools.
@@ -313,7 +534,12 @@ async fn observe(
                 .await
                 .unwrap_or_else(|_| Err("Native status observation timed out".into()));
         if let Ok(evidence) = &mut evidence {
-            if evidence.matches_turn(turn, stream.session_id.as_deref()) {
+            if evidence.matches_turn(
+                turn.turn_id,
+                turn.attempt_id,
+                turn.purpose,
+                stream.session_id.as_deref(),
+            ) {
                 if let Some(usage) = evidence.turn.as_mut().and_then(|turn| turn.usage.take()) {
                     stream.usage = Some(usage.snapshot(turn.turn_id));
                 }
@@ -321,7 +547,13 @@ async fn observe(
         }
         if stream.refused
             || evidence.as_ref().is_ok_and(|e| {
-                e.writer_idle == Some(true) && e.matches_turn(turn, stream.session_id.as_deref())
+                e.writer_idle == Some(true)
+                    && e.matches_turn(
+                        turn.turn_id,
+                        turn.attempt_id,
+                        turn.purpose,
+                        stream.session_id.as_deref(),
+                    )
             })
         {
             break evidence;
@@ -412,7 +644,14 @@ pub(super) async fn execute(
         // Stream loss/overflow can leave the native producer running. Never infer
         // writer exit from this Rust worker or its drained tool lease.
         match evidence {
-            Ok(status) if status.matches_turn(&turn, stream.session_id.as_deref()) => {
+            Ok(status)
+                if status.matches_turn(
+                    turn.turn_id,
+                    turn.attempt_id,
+                    turn.purpose,
+                    stream.session_id.as_deref(),
+                ) =>
+            {
                 let receipt = status.turn.expect("matched native receipt");
                 if status.writer_idle == Some(true) && receipt.status == "complete" {
                     // Prefer the persisted terminal result on stream recovery;
@@ -431,6 +670,10 @@ pub(super) async fn execute(
             }
             _ => Err((error, !stream.refused)),
         }
+    };
+    let native_outcome = AtomicChatNativeOutcome {
+        attempt_id: turn.attempt_id.into(),
+        usage: stream.usage,
     };
     let text = match result {
         Ok(text) => text,
@@ -454,7 +697,7 @@ pub(super) async fn execute(
                 turn.turn_id,
                 &error,
                 uncertain,
-                stream.usage.as_ref(),
+                Some(&native_outcome),
             )
             .await
             .map_err(core_json_error)?;
@@ -469,7 +712,7 @@ pub(super) async fn execute(
             Some(turn.turn_id),
             &text,
             &records,
-            stream.usage.as_ref(),
+            Some(&native_outcome),
         )
         .await
         .map_err(core_json_error)?;
@@ -570,13 +813,18 @@ mod tests {
                 "status":"complete","submission":"recorded","initialized":true,"text":"exact"}
         }))
         .unwrap();
-        assert!(status.matches_turn(&turn, Some("native")));
-        assert!(!status.matches_turn(&turn, Some("other-session")));
+        assert!(status.matches_turn(turn.turn_id, turn.attempt_id, turn.purpose, Some("native")));
+        assert!(!status.matches_turn(
+            turn.turn_id,
+            turn.attempt_id,
+            turn.purpose,
+            Some("other-session")
+        ));
         status.turn.as_mut().unwrap().attempt_id = "older-attempt".into();
-        assert!(!status.matches_turn(&turn, Some("native")));
+        assert!(!status.matches_turn(turn.turn_id, turn.attempt_id, turn.purpose, Some("native")));
         status.turn.as_mut().unwrap().attempt_id = "attempt".into();
         status.turn.as_mut().unwrap().turn_id = "other-turn".into();
-        assert!(!status.matches_turn(&turn, Some("native")));
+        assert!(!status.matches_turn(turn.turn_id, turn.attempt_id, turn.purpose, Some("native")));
         assert!(serde_json::from_value::<NativeUsage>(serde_json::json!({
             "message_id":"", "usage":counts()
         }))
@@ -594,7 +842,7 @@ mod tests {
     ) -> HttpResponse {
         assert_eq!(body["profile_fingerprint"], "fingerprint");
         *mock.attempt_id.lock().unwrap() = body["attempt_id"].as_str().unwrap().into();
-        if mock.mode == "recap" {
+        if mock.mode.starts_with("recap") {
             assert_eq!(body["operation"], "continue");
             assert!(body["system_prompt"].is_null() && body["bridge_url"].is_null());
             assert!(!request.headers().contains_key("authorization"));
@@ -688,7 +936,7 @@ mod tests {
             );
         }
         let status = match mock.mode {
-            "success" | "recover" | "recap" | "mismatch" => "complete",
+            "success" | "recover" | "recap" | "mismatch" | "reload" => "complete",
             "retry" if !older_attempt => "complete",
             "active" if !active => "complete",
             "failed" | "retry" => "failed",
@@ -697,11 +945,11 @@ mod tests {
         let mut receipt_counts = counts();
         receipt_counts["cache_read_input_tokens"] = serde_json::json!(321);
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id","writer_idle":!active,
-            "turn":{"session_id":"native-id","turn_id":query["turn_id"],"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode == "recap" { "recap" } else { "reply" },
+            "turn":{"session_id":"native-id","turn_id":query["turn_id"],"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode.starts_with("recap") { "recap" } else { "reply" },
                 "status":status,"submission":"recorded","initialized":true,
                 "usage":{"message_id":"message","usage":receipt_counts},
                 "error":if status == "failed" { Some("Saved native failure") } else { None },
-                "text":if mock.mode == "recap" { Some("Exact recap") }
+                "text":if mock.mode.starts_with("recap") { Some("Exact recap") }
                     else if mock.mode == "success" { Some("Exact terminal response") }
                     else if status == "complete" { Some("Recovered terminal response") } else { None }}}))
     }
@@ -719,6 +967,9 @@ mod tests {
             "recap",
             "retry",
             "mismatch",
+            "reload",
+            "lost",
+            "recap_lost",
         ] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
@@ -791,10 +1042,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            if mode == "recap" {
-                db.0.fail_chat_turn(id, &input.id, "Recorded failure", false, None)
-                    .await
-                    .unwrap();
+            if mode.starts_with("recap") {
+                db.0.fail_chat_turn(
+                    id,
+                    &input.id,
+                    "Recorded failure",
+                    mode == "recap_lost",
+                    None,
+                )
+                .await
+                .unwrap();
                 db.0.set_chat_phase(
                     id,
                     &scope.user_id,
@@ -865,23 +1122,87 @@ mod tests {
                     .conversation
                     .atomic_chat_state
                     .unwrap();
-            let attempt = if mode == "recap" {
+            let attempt = if mode.starts_with("recap") {
                 lifecycle.recap.unwrap().native_attempt_id.unwrap()
             } else {
                 lifecycle.active.unwrap().native_attempt_id.unwrap()
             };
+            if matches!(mode, "reload" | "lost" | "recap_lost") {
+                *mock.attempt_id.lock().unwrap() = attempt;
+                let _ = session.finish();
+                let mut events = state.event_tx.subscribe();
+                let mut foreign = scope.clone();
+                foreign.soul_id = "OtherSoul".into();
+                assert!(reconcile(&state, &db, &foreign, &bridge, id).await.is_err());
+                reconcile(&state, &db, &scope, &bridge, id).await.unwrap();
+                let recovered = db.0.get_conversation(id).await.unwrap().unwrap();
+                let saved = recovered.conversation.atomic_chat_state.unwrap();
+                if mode == "reload" {
+                    assert!(saved.active.is_none());
+                    assert_eq!(recovered.messages.len(), 2);
+                    assert_eq!(
+                        recovered.messages[1].message.content,
+                        "Recovered terminal response"
+                    );
+                } else if mode == "recap_lost" {
+                    assert!(matches!(
+                        saved.recap.unwrap().outcome,
+                        RecapOutcome::Failed { .. }
+                    ));
+                    assert_eq!(saved.active.unwrap().status, TurnStatus::Uncertain);
+                    assert_eq!(recovered.messages.len(), 2);
+                    assert!(db
+                        .0
+                        .validate_chat_request(
+                            id,
+                            &scope.user_id,
+                            &scope.soul_id,
+                            &Backend::ClaudeCode,
+                            &ChatRequest::Recap {
+                                instruction: "Retry the recap".into()
+                            },
+                            128000
+                        )
+                        .await
+                        .is_ok());
+                } else {
+                    assert_eq!(saved.active.unwrap().status, TurnStatus::Uncertain);
+                    assert_eq!(recovered.messages.len(), 1);
+                }
+                assert!(
+                    mock.credential.lock().unwrap().is_empty(),
+                    "reconciliation must not call the native producer"
+                );
+                while events.try_recv().is_ok() {}
+                reconcile(&state, &db, &scope, &bridge, id).await.unwrap();
+                assert!(
+                    events.try_recv().is_err(),
+                    "reload reconciliation must not create an event loop"
+                );
+                assert_eq!(
+                    db.0.get_conversation(id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .messages
+                        .len(),
+                    recovered.messages.len()
+                );
+                handle.stop(true).await;
+                continue;
+            }
             let turn = NativeTurn {
                 conversation_id: id,
                 turn_id: &input.id,
                 attempt_id: &attempt,
-                operation: if mode == "recap" {
+                operation: if mode.starts_with("recap") {
                     Operation::Continue
                 } else if mode == "retry" {
                     Operation::Retry
                 } else {
                     Operation::New
                 },
-                purpose: if mode == "recap" {
+                purpose: if mode.starts_with("recap") {
                     Purpose::Recap
                 } else {
                     Purpose::Reply
@@ -895,7 +1216,9 @@ mod tests {
             if mode == "recover" {
                 *mock.attempt_id.lock().unwrap() = attempt.clone();
                 let mut expired_stream = NativeStream::default();
-                let recovered = observe(&scope, &turn, &mut expired_stream, Duration::ZERO).await.unwrap();
+                let recovered = observe(&scope, &turn, &mut expired_stream, Duration::ZERO)
+                    .await
+                    .unwrap();
                 assert_eq!(recovered.turn.unwrap().status, "complete");
                 assert_eq!(expired_stream.usage.unwrap().cache_read_input_tokens, 321);
             }

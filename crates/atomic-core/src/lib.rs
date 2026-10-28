@@ -2564,6 +2564,27 @@ impl AtomicCore {
     where
         F: Fn(agent::ChatEvent) + Send + Sync + 'static,
     {
+        self.chat_tool_session_inner(conversation_id, user_message_id, settings, scope,
+            page_context, canvas_context, on_event, false).await
+    }
+
+    /// Read/checkpoint saved tool outcomes without executing or admitting any tool.
+    pub async fn saved_chat_tool_records(
+        &self, conversation_id: &str, user_message_id: &str, scope: agent::MemuToolConfig,
+    ) -> Result<agent::ChatToolRecords, AtomicCoreError> {
+        Ok(self.chat_tool_session_inner(conversation_id, user_message_id, HashMap::new(), scope,
+            None, None, |_| {}, true).await?.finish())
+    }
+
+    async fn chat_tool_session_inner<F>(
+        &self, conversation_id: &str, user_message_id: &str,
+        settings: HashMap<String, String>, scope: agent::MemuToolConfig,
+        page_context: Option<agent::PageContext>, canvas_context: Option<agent::CanvasContext>,
+        on_event: F, recovering: bool,
+    ) -> Result<agent::ChatToolSession, AtomicCoreError>
+    where
+        F: Fn(agent::ChatEvent) + Send + Sync + 'static,
+    {
         let conversation = self
             .get_conversation(conversation_id)
             .await?
@@ -2613,6 +2634,7 @@ impl AtomicCore {
                 prior,
                 user_turn.tool_calls.clone(),
                 user_turn.citations.clone(),
+                recovering,
             )
             .await
             .map_err(AtomicCoreError::Validation)?;
@@ -2645,7 +2667,7 @@ impl AtomicCore {
         expected_user_message_id: Option<&str>,
         content: &str,
         records: &agent::ChatToolRecords,
-        native_usage: Option<&AtomicChatUsage>,
+        native_outcome: Option<&AtomicChatNativeOutcome>,
     ) -> Result<ChatMessage, AtomicCoreError> {
         self.storage
             .save_chat_reply_sync(
@@ -2655,7 +2677,7 @@ impl AtomicCore {
                 &records.tool_calls,
                 &records.citations,
                 records.citation_index,
-                native_usage,
+                native_outcome,
             )
             .await
     }
@@ -2721,10 +2743,10 @@ impl AtomicCore {
         user_message_id: &str,
         error: &str,
         uncertain: bool,
-        native_usage: Option<&AtomicChatUsage>,
+        native_outcome: Option<&AtomicChatNativeOutcome>,
     ) -> Result<(), AtomicCoreError> {
         self.storage
-            .fail_chat_turn_sync(conversation_id, user_message_id, error, uncertain, native_usage)
+            .fail_chat_turn_sync(conversation_id, user_message_id, error, uncertain, native_outcome)
             .await
     }
     pub async fn set_chat_phase(

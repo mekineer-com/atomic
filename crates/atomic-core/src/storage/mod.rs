@@ -194,15 +194,15 @@ impl SpawnArg for Option<&str> {
     }
 }
 
-impl SpawnArg for Option<&AtomicChatUsage> {
-    type Owned = Option<AtomicChatUsage>;
+impl SpawnArg for Option<&AtomicChatNativeOutcome> {
+    type Owned = Option<AtomicChatNativeOutcome>;
     fn into_spawn_arg(self) -> Self::Owned {
         self.cloned()
     }
 }
 
-impl<'a> ReborrowArg<'a> for Option<AtomicChatUsage> {
-    type Out = Option<&'a AtomicChatUsage>;
+impl<'a> ReborrowArg<'a> for Option<AtomicChatNativeOutcome> {
+    type Out = Option<&'a AtomicChatNativeOutcome>;
     fn reborrow_arg(&'a self) -> Self::Out {
         self.as_ref()
     }
@@ -571,7 +571,7 @@ dispatch! {
         => sqlite: remove_tag_from_scope_sync, pg_trait: ChatStore, pg_method: remove_tag_from_scope;
     fn save_message_sync(&self, conversation_id: &str, role: &str, content: &str) -> Result<ChatMessage, AtomicCoreError>
         => sqlite: save_message_sync, pg_trait: ChatStore, pg_method: save_message;
-    fn save_chat_reply_sync(&self, conversation_id: &str, expected_user_message_id: Option<&str>, content: &str, tool_calls: &[ChatToolCall], citations: &[ChatCitation], citation_index: i32, native_usage: Option<&AtomicChatUsage>) -> Result<ChatMessage, AtomicCoreError>
+    fn save_chat_reply_sync(&self, conversation_id: &str, expected_user_message_id: Option<&str>, content: &str, tool_calls: &[ChatToolCall], citations: &[ChatCitation], citation_index: i32, native_outcome: Option<&AtomicChatNativeOutcome>) -> Result<ChatMessage, AtomicCoreError>
         => sqlite: save_chat_reply_sync, pg_trait: ChatStore, pg_method: save_chat_reply;
     fn get_scope_tag_ids_sync(&self, conversation_id: &str) -> Result<Vec<String>, AtomicCoreError>
         => sqlite: get_scope_tag_ids_sync, pg_trait: ChatStore, pg_method: get_scope_tag_ids;
@@ -584,7 +584,7 @@ dispatch! {
 
     fn admit_chat_turn_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, backend: &AtomicChatBackend, request: &AtomicChatRequest, context_window_tokens: usize) -> Result<ChatMessage, AtomicCoreError>
         => sqlite: admit_chat_turn_sync, pg_trait: ChatStore, pg_method: admit_chat_turn;
-    fn fail_chat_turn_sync(&self, conversation_id: &str, user_message_id: &str, error: &str, uncertain: bool, native_usage: Option<&AtomicChatUsage>) -> Result<(), AtomicCoreError>
+    fn fail_chat_turn_sync(&self, conversation_id: &str, user_message_id: &str, error: &str, uncertain: bool, native_outcome: Option<&AtomicChatNativeOutcome>) -> Result<(), AtomicCoreError>
         => sqlite: fail_chat_turn_sync, pg_trait: ChatStore, pg_method: fail_chat_turn;
     fn set_chat_phase_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, backend: &AtomicChatBackend, phase: &AtomicChatPhase) -> Result<(), AtomicCoreError>
         => sqlite: set_chat_phase_sync, pg_trait: ChatStore, pg_method: set_chat_phase;

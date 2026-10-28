@@ -6,7 +6,7 @@
 use crate::error::AtomicCoreError;
 use crate::models::{
     AtomicChatBackend, AtomicChatPhase, AtomicChatRecap, AtomicChatRecapOutcome, AtomicChatRequest,
-    AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus, AtomicChatUsage, ChatCitation, ChatMessage,
+    AtomicChatState, AtomicChatTurn, AtomicChatTurnStatus, AtomicChatNativeOutcome, ChatCitation, ChatMessage,
     ChatMessageWithContext, ChatToolCall, Conversation, ConversationWithMessages,
     ConversationWithTags, Tag,
 };
@@ -467,20 +467,33 @@ pub(crate) fn admitted_chat_state(
 pub(crate) fn matching_chat_turn(
     state: &AtomicChatState,
     expected_user_message_id: &str,
+    native: Option<&AtomicChatNativeOutcome>,
 ) -> Result<(), AtomicCoreError> {
-    let running = if let Some(recap) = state
+    // Delivery failure may precede native completion. Recovery resolves only
+    // that persisted attempt; API/standalone still require a Running turn.
+    let matching_native = |attempt: Option<&str>| native.is_some_and(|native| {
+        state.backend == AtomicChatBackend::ClaudeCode
+            && state.phase != AtomicChatPhase::Closed
+            && attempt == Some(native.attempt_id.as_str())
+    });
+    let matching = if let Some(recap) = state
         .recap
         .as_ref()
         .filter(|recap| recap.request_message_id == expected_user_message_id)
     {
-        matches!(recap.outcome, AtomicChatRecapOutcome::Running)
+        match recap.outcome {
+            AtomicChatRecapOutcome::Complete { .. } => false,
+            _ if native.is_some() => matching_native(recap.native_attempt_id.as_deref()),
+            _ => matches!(recap.outcome, AtomicChatRecapOutcome::Running),
+        }
     } else {
         state.active.as_ref().is_some_and(|turn| {
             turn.user_message_id == expected_user_message_id
-                && turn.status == AtomicChatTurnStatus::Running
+                && if native.is_some() { matching_native(turn.native_attempt_id.as_deref()) }
+                    else { turn.status == AtomicChatTurnStatus::Running }
         })
     };
-    running.then_some(()).ok_or_else(|| {
+    matching.then_some(()).ok_or_else(|| {
         AtomicCoreError::Conflict("The active chat turn no longer matches this result".to_string())
     })
 }
@@ -490,10 +503,10 @@ pub(crate) fn failed_chat_state(
     message_id: &str,
     error: &str,
     uncertain: bool,
-    native_usage: Option<&AtomicChatUsage>,
+    native_outcome: Option<&AtomicChatNativeOutcome>,
 ) -> Result<(), AtomicCoreError> {
-    matching_chat_turn(state, message_id)?;
-    apply_native_usage(state, message_id, native_usage)?;
+    matching_chat_turn(state, message_id, native_outcome)?;
+    apply_native_usage(state, message_id, native_outcome)?;
     if let Some(recap) = state
         .recap
         .as_mut()
@@ -523,13 +536,13 @@ pub(crate) fn completed_chat_state(
     state: Option<AtomicChatState>,
     expected_user_message_id: Option<&str>,
     reply_message_id: &str,
-    native_usage: Option<&AtomicChatUsage>,
+    native_outcome: Option<&AtomicChatNativeOutcome>,
 ) -> Result<Option<AtomicChatState>, AtomicCoreError> {
     match (state, expected_user_message_id) {
-        (None, None) if native_usage.is_none() => Ok(None), // Standalone.
+        (None, None) if native_outcome.is_none() => Ok(None), // Standalone.
         (Some(mut state), Some(expected)) => {
-            matching_chat_turn(&state, expected)?;
-            apply_native_usage(&mut state, expected, native_usage)?;
+            matching_chat_turn(&state, expected, native_outcome)?;
+            apply_native_usage(&mut state, expected, native_outcome)?;
             if let Some(recap) = state
                 .recap
                 .as_mut()
@@ -552,9 +565,9 @@ pub(crate) fn completed_chat_state(
 fn apply_native_usage(
     state: &mut AtomicChatState,
     turn_id: &str,
-    usage: Option<&AtomicChatUsage>,
+    outcome: Option<&AtomicChatNativeOutcome>,
 ) -> Result<(), AtomicCoreError> {
-    if let Some(usage) = usage {
+    if let Some(usage) = outcome.and_then(|outcome| outcome.usage.as_ref()) {
         if state.backend != AtomicChatBackend::ClaudeCode
             || usage.turn_id != turn_id || usage.message_id.is_empty()
         {
@@ -890,12 +903,12 @@ pub fn fail_chat_turn(
     user_message_id: &str,
     error: &str,
     uncertain: bool,
-    native_usage: Option<&AtomicChatUsage>,
+    native_outcome: Option<&AtomicChatNativeOutcome>,
 ) -> Result<(), AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
     let mut state = stored_chat_state(&tx, conversation_id)?
         .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
-    failed_chat_state(&mut state, user_message_id, error, uncertain, native_usage)?;
+    failed_chat_state(&mut state, user_message_id, error, uncertain, native_outcome)?;
     write_chat_state(&tx, conversation_id, Some(&state))?;
     tx.commit()?;
     Ok(())
@@ -1507,7 +1520,7 @@ pub fn save_chat_reply(
     tool_calls: &[ChatToolCall],
     citations: &[ChatCitation],
     citation_index: i32,
-    native_usage: Option<&AtomicChatUsage>,
+    native_outcome: Option<&AtomicChatNativeOutcome>,
 ) -> Result<ChatMessage, AtomicCoreError> {
     let tx = conn.unchecked_transaction()?;
     let message = save_message(&tx, conversation_id, "assistant", content)?;
@@ -1515,7 +1528,7 @@ pub fn save_chat_reply(
         stored_chat_state(&tx, conversation_id)?,
         expected_user_message_id,
         &message.id,
-        native_usage,
+        native_outcome,
     )?;
     write_chat_tool_state(
         &tx,
@@ -1643,7 +1656,7 @@ mod tests {
         let old: AtomicChatState = serde_json::from_value(serde_json::json!({
             "backend":"api", "phase":"open", "active":null
         })).unwrap();
-        assert!(old.native_usage.is_none());
+        assert!(old.native_outcome.is_none());
     }
 
     #[test]
