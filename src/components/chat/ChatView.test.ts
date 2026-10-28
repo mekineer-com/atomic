@@ -76,6 +76,11 @@ it('renders a reopened saved recap as a summary in a read-only sitting', async (
     expect(container.textContent).not.toContain('Retry reply');
     await act(async () => useChatStore.setState({ isStreaming: false }));
     expect(container.textContent).toContain('Retry reply');
+    await act(async () => useChatStore.setState({ currentConversation: { ...current, user_id: 'TestOwner', soul_id: 'TestSoul', atomic_chat_state: null },
+      messages: [{ id: 'legacy-user', conversation_id: current.id, role: 'user', content: 'Legacy unanswered input',
+        created_at: '', message_index: 0, tool_calls: [], citations: [] }] }));
+    expect(container.textContent).toContain('Retry reply');
+    expect(input.props!.disabled).toBe(true);
   } finally {
     await act(async () => root.unmount());
     useChatStore.setState(previous);

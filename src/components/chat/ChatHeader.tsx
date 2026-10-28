@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeft, Info } from 'lucide-react';
 import { getTransport } from '../../lib/transport';
 import { ConversationWithTags, useChatStore } from '../../stores/chat';
 import { ScopeEditor } from './ScopeEditor';
@@ -99,6 +99,17 @@ export function ChatHeader({ conversation, onBack }: ChatHeaderProps) {
       </div>
 
       {/* Scope editor row */}
+      {(conversation.context_meter || conversation.atomic_chat_state) && (
+        <div className="px-4 pb-3 text-xs text-[var(--color-text-secondary)]">
+          {conversation.atomic_chat_state && <span className="inline-flex items-center gap-1 mr-3">
+            {conversation.atomic_chat_state.backend === 'api' ? 'API mode' : 'Claude Code mode'}
+            <span title="Required source for this chat's AI responses."><Info className="w-3 h-3" aria-label="Required source for this chat's AI responses." /></span>
+          </span>}
+          {conversation.context_meter && <span>Estimated context: {conversation.context_meter.estimated_tokens.toLocaleString()} / {conversation.context_meter.limit_tokens.toLocaleString()} tokens
+          <meter className="block w-full mt-1" min={0} max={conversation.context_meter.limit_tokens}
+            value={conversation.context_meter.estimated_tokens} aria-label="Estimated chat context" /></span>}
+        </div>
+      )}
       <div className="px-4 pb-3">
         <ScopeEditor conversation={conversation} />
       </div>

@@ -22,7 +22,7 @@ export function chatDisplayMessages(conversation: Conversation, messages: ChatMe
   let legacyRecap = false;
   return messages.flatMap(message => {
     if (message.id === recap?.request_message_id
-      || (message.role === 'user'
+      || (message.id !== conversation.atomic_chat_state?.active?.user_message_id && message.role === 'user'
         && message.content.trim().startsWith('This Atomic session is ending. Write a recap of your activity')
         && message.content.split('\n').includes('Full Atomic transcript:'))) {
       legacyRecap = true;
@@ -53,6 +53,7 @@ export function ChatView() {
     if (currentConversation) setDraft(currentConversation.id, value);
   };
   const lifecycle = currentConversation?.atomic_chat_state;
+  const integrated = Boolean(lifecycle || (currentConversation?.user_id && currentConversation?.soul_id));
   const retryMessageId = currentConversation ? chatRetryMessageId(currentConversation, messages) : null;
   const turnError = lifecycle?.phase === 'closed' ? null : lifecycle?.active?.error;
   const displayMessages = useMemo(() => currentConversation ? chatDisplayMessages(currentConversation, messages) : [], [currentConversation, messages]);
@@ -65,7 +66,7 @@ export function ChatView() {
   });
 
   const [isSending, setIsSending] = useState(false);
-  const inputBlocked = isStreaming || isSending || Boolean(lifecycle && (lifecycle.phase !== 'open' || lifecycle.active || retryMessageId));
+  const inputBlocked = isStreaming || isSending || Boolean(lifecycle && (lifecycle.phase !== 'open' || lifecycle.active)) || Boolean(integrated && retryMessageId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -263,15 +264,15 @@ export function ChatView() {
           <p className="text-sm text-[var(--color-text-secondary)]">This turn's outcome is unknown. Use End Session to close out from saved history.</p>
         )}
 
-        {lifecycle && retryMessageId && !isStreaming && (
+        {integrated && retryMessageId && !isStreaming && (
           <button disabled={isSending} className="text-sm text-[var(--color-accent)] disabled:opacity-50"
             onClick={() => retryMessage(retryMessageId)}>Retry reply</button>
         )}
 
         {/* Error message */}
-        {(error || turnError) && (
+        {(error || currentConversation.context_error || turnError) && (
           <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
-            {error ?? turnError}
+            {error ?? currentConversation.context_error ?? turnError}
           </div>
         )}
 

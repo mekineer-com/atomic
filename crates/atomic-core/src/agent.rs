@@ -29,6 +29,7 @@ use std::{
 use uuid::Uuid;
 
 type ChatEventCallback = Arc<dyn Fn(ChatEvent) + Send + Sync + 'static>;
+pub const CHAT_RESPONSE_MAX_TOKENS: u32 = 4000;
 
 #[derive(Clone, Debug)]
 pub struct MemuToolConfig {
@@ -1366,11 +1367,11 @@ fn truncate_messages_to_context(
 // ==================== Helper: Convert stored messages to provider format ====================
 
 /// Convert ChatMessage models from storage into provider Message format for the API.
-fn chat_messages_to_provider_messages(
-    messages: &[crate::models::ChatMessageWithContext],
+fn chat_messages_to_provider_messages<'a>(
+    messages: impl IntoIterator<Item = &'a crate::models::ChatMessageWithContext>,
 ) -> Vec<Message> {
     messages
-        .iter()
+        .into_iter()
         .map(|m| {
             let role = match m.message.role.as_str() {
                 "system" => MessageRole::System,
@@ -1397,6 +1398,14 @@ pub struct ChatToolRecords {
 }
 
 impl ChatToolRecords {
+    pub fn from_saved_message(message: &ChatMessageWithContext) -> Self {
+        Self {
+            tool_calls: message.tool_calls.clone(),
+            citations: message.citations.clone(),
+            citation_index: 0,
+            prior_citations: vec![],
+        }
+    }
     pub fn for_reply(mut self, content: &str) -> Self {
         static REFERENCES: LazyLock<regex::Regex> =
             LazyLock::new(|| regex::Regex::new(r"\[(\d+)\]").expect("citation regex"));
@@ -1447,21 +1456,13 @@ fn recap_messages(
     control_id: &str,
     instruction: &str,
 ) -> Vec<Message> {
-    let mut messages = Vec::new();
+    let mut messages = chat_messages_to_provider_messages(
+        crate::chat::dialogue_messages(conversation, Some(control_id))
+            .into_iter()
+            .filter(|row| !row.message.content.trim().is_empty()),
+    );
     let mut actions = Vec::new();
-    let mut skip_recap_reply = false;
     for row in &conversation.messages {
-        // Old End controls embedded transcripts; quoted instruction prose alone is dialogue.
-        let is_control = row.message.id == control_id
-            || (row.message.role == "user"
-                && crate::chat::is_atomic_recap_prompt(&row.message.content)
-                && row
-                    .message
-                    .content
-                    .lines()
-                    .any(|line| line == "Full Atomic transcript:"));
-        let omit_text = is_control || (skip_recap_reply && row.message.role == "assistant");
-        skip_recap_reply = is_control;
         for call in &row.tool_calls {
             let mut input = serde_json::Map::new();
             for key in ["atom_id", "query", "cluster_label"] {
@@ -1519,14 +1520,6 @@ fn recap_messages(
                 "outcome": outcome,
             }));
         }
-        if !omit_text
-            && matches!(row.message.role.as_str(), "system" | "user" | "assistant")
-            && !row.message.content.trim().is_empty()
-        {
-            messages.extend(chat_messages_to_provider_messages(std::slice::from_ref(
-                row,
-            )));
-        }
     }
     messages.push(Message::user(format!(
         "{instruction}\n\nRecorded actions (status is authoritative; unknown outcomes are not successes):\n{}",
@@ -1569,7 +1562,12 @@ fn api_request_messages(
     if let Some((control_id, instruction)) = recap {
         messages.extend(recap_messages(conversation, control_id, instruction));
     } else {
-        messages.extend(chat_messages_to_provider_messages(&conversation.messages));
+        let dialogue = if tools.memu_tool_config.is_some() {
+            crate::chat::dialogue_messages(conversation, None)
+        } else {
+            conversation.messages.iter().collect()
+        };
+        messages.extend(chat_messages_to_provider_messages(dialogue));
         if let Some(content) = new_content {
             messages.push(Message::user(content));
         }
@@ -1620,10 +1618,22 @@ pub(crate) async fn estimate_chat_request_tokens(
     let (saved_input, admission_content) = crate::chat::chat_admission_input(&state, last, request);
     let (page, canvas) = match request {
         crate::AtomicChatRequest::New {
+            content,
             page_context,
             canvas_context,
             ..
-        } => (page_context.clone(), canvas_context.clone()),
+        } => {
+            if content.is_empty() && page_context.is_none() && canvas_context.is_none() {
+                state
+                    .active
+                    .as_ref()
+                    .filter(|_| state.phase == crate::AtomicChatPhase::Open)
+                    .map(|turn| (turn.page_context.clone(), turn.canvas_context.clone()))
+                    .unwrap_or_default()
+            } else {
+                (page_context.clone(), canvas_context.clone())
+            }
+        }
         crate::AtomicChatRequest::Retry { user_message_id } => {
             let active = state.active.as_ref();
             if active.is_some_and(|turn| turn.user_message_id != *user_message_id) {
@@ -1657,7 +1667,48 @@ pub(crate) async fn estimate_chat_request_tokens(
     let mut recap = None;
     let mut content = None;
     match request {
-        crate::AtomicChatRequest::New { .. } => content = Some(admission_content),
+        crate::AtomicChatRequest::New { .. } => {
+            content = Some(admission_content);
+            // Standing-context projection includes already-known results from the
+            // unfinished turn, never inventing an output for an in-flight tool.
+            if admission_content.is_empty() && state.phase == crate::AtomicChatPhase::Open {
+                let user = state
+                    .active
+                    .as_ref()
+                    .and_then(|turn| {
+                        conversation
+                            .messages
+                            .iter()
+                            .find(|row| row.message.id == turn.user_message_id)
+                    })
+                    .or_else(|| {
+                        last.filter(|message| message.role == "user")
+                            .and_then(|message| {
+                                conversation
+                                    .messages
+                                    .iter()
+                                    .find(|row| row.message.id == message.id)
+                            })
+                    });
+                if let Some(user) = user {
+                    tools.tool_calls_record = user
+                        .tool_calls
+                        .iter()
+                        .filter(|call| {
+                            call.status != "running"
+                                && call.tool_output.is_some()
+                                && call
+                                    .tool_output
+                                    .as_ref()
+                                    .and_then(|output| output.get("outcome_unknown"))
+                                    .and_then(|value| value.as_bool())
+                                    != Some(true)
+                        })
+                        .cloned()
+                        .collect();
+                }
+            }
+        }
         crate::AtomicChatRequest::Retry { user_message_id } => {
             let user = conversation
                 .messages
@@ -2333,7 +2384,7 @@ async fn run_agent_loop(
         let config = LlmConfig::new(&model).with_params(
             GenerationParams::new()
                 .with_temperature(0.7)
-                .with_max_tokens(4000),
+                .with_max_tokens(CHAT_RESPONSE_MAX_TOKENS),
         );
 
         // Accumulate streaming content. The Box callback captures an Arc<Mutex<String>>
@@ -2350,7 +2401,7 @@ async fn run_agent_loop(
         });
 
         // Truncate messages if they've grown beyond context window (from tool results)
-        let mut call_messages = if ctx.recap {
+        let mut call_messages = if ctx.tools.memu_tool_config.is_some() {
             ctx.messages.clone()
         } else {
             truncate_messages_to_context(
@@ -2656,7 +2707,7 @@ where
     )?;
 
     // Truncate to fit context window for providers with limited context
-    let api_messages = if recap_instruction.is_some() {
+    let api_messages = if tools.memu_tool_config.is_some() {
         api_messages
     } else {
         truncate_messages_to_context(
@@ -2745,7 +2796,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_projection_is_read_only_and_matches_captured_retry_context() {
-        use crate::{AtomicChatBackend as Backend, AtomicChatRequest as Request};
+        use crate::{
+            AtomicChatBackend as Backend, AtomicChatPhase as Phase, AtomicChatRequest as Request,
+        };
         let dir = TempDir::new().unwrap();
         let core = AtomicCore::open_or_create(dir.path().join("projection.db")).unwrap();
         let conv = core
@@ -2895,7 +2948,7 @@ mod tests {
             .unwrap();
         let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
         assert!(
-            core.estimate_chat_request_tokens(cid, &retry, settings, scope)
+            core.estimate_chat_request_tokens(cid, &retry, settings.clone(), scope.clone())
                 .await
                 .unwrap()
                 > captured
@@ -2903,6 +2956,28 @@ mod tests {
         assert_eq!(
             serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap(),
             before
+        );
+        core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closing)
+            .await
+            .unwrap();
+        core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closed)
+            .await
+            .unwrap();
+        let standing = new_chat_request("");
+        let closed_estimate = core
+            .estimate_chat_request_tokens(cid, &standing, settings.clone(), scope.clone())
+            .await
+            .unwrap();
+        records.tool_calls[0].tool_output =
+            Some(json!("Historical failed tool output ".repeat(5_000)));
+        core.save_chat_tool_records(cid, &user.id, &records)
+            .await
+            .unwrap();
+        assert_eq!(
+            core.estimate_chat_request_tokens(cid, &standing, settings, scope)
+                .await
+                .unwrap(),
+            closed_estimate
         );
     }
 
@@ -2933,20 +3008,37 @@ mod tests {
             .estimate_chat_request_tokens(cid, &recap, settings.clone(), scope.clone())
             .await
             .unwrap();
+        let standing = new_chat_request("");
+        let standing_before = core
+            .estimate_chat_request_tokens(cid, &standing, settings.clone(), scope.clone())
+            .await
+            .unwrap();
         core.save_chat_tool_records(
             cid,
             &user.id,
             &ChatToolRecords {
-                tool_calls: vec![ChatToolCall {
-                    id: "unfinished-read".into(),
-                    message_id: user.id.clone(),
-                    tool_name: "get_atom".into(),
-                    tool_input: json!({"atom_id":"memory:fictional"}),
-                    tool_output: None,
-                    status: "running".into(),
-                    created_at: Utc::now().to_rfc3339(),
-                    completed_at: None,
-                }],
+                tool_calls: vec![
+                    ChatToolCall {
+                        id: "unfinished-read".into(),
+                        message_id: user.id.clone(),
+                        tool_name: "get_atom".into(),
+                        tool_input: json!({"atom_id":"memory:fictional"}),
+                        tool_output: None,
+                        status: "running".into(),
+                        created_at: Utc::now().to_rfc3339(),
+                        completed_at: None,
+                    },
+                    ChatToolCall {
+                        id: "known-read".into(),
+                        message_id: user.id.clone(),
+                        tool_name: "get_atom".into(),
+                        tool_input: json!({"atom_id":"memory:known"}),
+                        tool_output: Some(json!("Known saved read output ".repeat(500))),
+                        status: "complete".into(),
+                        created_at: Utc::now().to_rfc3339(),
+                        completed_at: None,
+                    },
+                ],
                 citations: vec![],
                 prior_citations: vec![],
                 citation_index: 0,
@@ -2955,6 +3047,12 @@ mod tests {
         .await
         .unwrap();
         let before = serde_json::to_value(core.get_conversation(cid).await.unwrap()).unwrap();
+        assert!(
+            core.estimate_chat_request_tokens(cid, &standing, settings.clone(), scope.clone())
+                .await
+                .unwrap()
+                > standing_before
+        );
         let error = core
             .estimate_chat_request_tokens(
                 cid,

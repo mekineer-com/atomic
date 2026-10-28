@@ -582,6 +582,44 @@ pub fn is_atomic_recap_prompt(content: &str) -> bool {
         .starts_with("This Atomic session is ending. Write a recap of your activity")
 }
 
+/// Saved controls are not dialogue. Wording is only for old nested-transcript rows.
+pub fn dialogue_messages<'a>(
+    conversation: &'a ConversationWithMessages,
+    extra_control_id: Option<&str>,
+) -> Vec<&'a crate::ChatMessageWithContext> {
+    let state = conversation.conversation.atomic_chat_state.as_ref();
+    let recap = state.and_then(|state| state.recap.as_ref());
+    let reply_id = recap.and_then(|recap| match &recap.outcome {
+        AtomicChatRecapOutcome::Complete { reply_message_id } => Some(reply_message_id.as_str()),
+        _ => None,
+    });
+    let ordinary_id = state
+        .and_then(|state| state.active.as_ref())
+        .map(|turn| turn.user_message_id.as_str());
+    let mut skip_reply = false;
+    conversation
+        .messages
+        .iter()
+        .filter(|row| {
+            let id = row.message.id.as_str();
+            let control = extra_control_id == Some(id)
+                || recap.is_some_and(|recap| recap.request_message_id == id)
+                || (ordinary_id != Some(id)
+                    && row.message.role == "user"
+                    && is_atomic_recap_prompt(&row.message.content)
+                    && row
+                        .message
+                        .content
+                        .lines()
+                        .any(|line| line == "Full Atomic transcript:"));
+            let omitted =
+                control || reply_id == Some(id) || (skip_reply && row.message.role == "assistant");
+            skip_reply = control;
+            !omitted && matches!(row.message.role.as_str(), "system" | "user" | "assistant")
+        })
+        .collect()
+}
+
 pub(crate) fn prepared_chat_state(
     current: Option<AtomicChatState>,
     backend: &AtomicChatBackend,

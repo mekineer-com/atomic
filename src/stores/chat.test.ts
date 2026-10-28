@@ -163,6 +163,22 @@ it('refreshes after Retry without sending another user input', async () => {
   expect(useChatStore.getState().isStreaming).toBe(false);
 });
 
+it('does not let a successful Send reload overwrite a newer durable state read', async () => {
+  const current = useChatStore.getState().currentConversation!;
+  const send: ChatMessageWithContext = { id: 'temp-send', conversation_id: current.id, role: 'user', content: 'Test',
+    created_at: '', message_index: 0, tool_calls: [], citations: [] };
+  useChatStore.setState({ lastSend: send });
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = useChatStore.getState().openConversation(current.id, send);
+  invoke.mockResolvedValueOnce({ ...current, messages: [], atomic_chat_state: { backend: 'api', phase: 'closed', active: null } });
+  await useChatStore.getState().refreshConversation();
+  finish({ ...current, messages: [] });
+  await pending;
+  expect(useChatStore.getState().currentConversation?.atomic_chat_state?.phase).toBe('closed');
+  expect(useChatStore.getState().isLoading).toBe(false);
+});
+
 it.each(['completion', 'retry'])('ignores a pre-%s refresh after newer work begins', async (transition) => {
   const current = { ...useChatStore.getState().currentConversation!, atomic_chat_state: {
     backend: 'api' as const, phase: 'open' as const,

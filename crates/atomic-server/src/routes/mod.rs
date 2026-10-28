@@ -304,6 +304,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(chat::send_chat_message),
     );
     cfg.route("/memu/session/end", web::post().to(chat::end_memu_session));
+    cfg.route("/conversations/{id}/retry", web::post().to(chat::retry_chat_message));
     cfg.route("/memu/owner", web::get().to(memu_proxy::owner_get));
     cfg.route("/memu/owner", web::post().to(memu_proxy::owner_create));
     cfg.route("/memu/souls", web::get().to(memu_proxy::souls_get));

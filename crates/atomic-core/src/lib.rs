@@ -2658,6 +2658,40 @@ impl AtomicCore {
             .await
     }
 
+    /// Read-only admission validation; the same pure rules run in the write transaction.
+    pub async fn validate_chat_request(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        backend: &AtomicChatBackend,
+        request: &AtomicChatRequest,
+        context_window_tokens: usize,
+    ) -> Result<AtomicChatState, AtomicCoreError> {
+        let conversation = self.get_conversation(conversation_id).await?
+            .ok_or_else(|| AtomicCoreError::Validation("Conversation not found".into()))?;
+        if conversation.conversation.user_id.as_deref() != Some(user_id)
+            || conversation.conversation.soul_id.as_deref() != Some(soul_id)
+        {
+            return Err(AtomicCoreError::Validation("Chat owner/Soul does not match".into()));
+        }
+        let last = conversation.messages.iter().rev()
+            .find(|row| matches!(row.message.role.as_str(), "user" | "assistant"));
+        let unknown = if let AtomicChatRequest::Retry { user_message_id } = request {
+            conversation.messages.iter().find(|row| row.message.id == *user_message_id)
+                .is_some_and(|row| row.tool_calls.iter().any(|call| {
+                    call.status == "running" || call.tool_output.as_ref()
+                        .and_then(|v| v.get("outcome_unknown")).and_then(|v| v.as_bool()) == Some(true)
+                }))
+        } else {
+            false
+        };
+        chat::prepared_chat_state(
+            conversation.conversation.atomic_chat_state, backend,
+            last.map(|row| &row.message), request, context_window_tokens, unknown,
+        )
+    }
+
     /// Lifecycle-managed admission. Caller holds the scoped sitting lock.
     pub async fn admit_chat_turn(
         &self,

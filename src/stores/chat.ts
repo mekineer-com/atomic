@@ -21,6 +21,8 @@ export interface Conversation {
   user_id?: string | null;
   soul_id?: string | null;
   atomic_chat_state?: AtomicChatState | null;
+  context_meter?: { estimated_tokens: number; limit_tokens: number; usable_tokens: number };
+  context_error?: string | null;
 }
 
 export interface AtomicChatState {
@@ -252,8 +254,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   openConversation: async (id: string, send?: ChatMessageWithContext) => {
-    const stale = () => send && (get().currentConversation?.id !== id || get().lastSend !== send);
+    let version = refreshVersion;
+    const stale = () => send && (version !== refreshVersion || get().currentConversation?.id !== id || get().lastSend !== send);
     if (stale()) return;
+    if (send) version = ++refreshVersion;
     set({ isLoading: true, error: null });
     try {
       const result = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', {
@@ -451,7 +455,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       const saved = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', { conversationId: current.id });
       if (!saved || version !== refreshVersion || get().currentConversation !== current) return false;
-      set({ currentConversation: conversationSummary(saved), messages: saved.messages,
+      set({ currentConversation: conversationSummary(saved), messages: saved.messages, isLoading: false,
         ...(saved.atomic_chat_state && !chatIsRunning(saved.atomic_chat_state) ? { isStreaming: false, streamingContent: '', streamingToolCalls: [] } : {}),
         ...(saved.atomic_chat_state?.phase === 'closed' ? { error: null } : {}),
       });

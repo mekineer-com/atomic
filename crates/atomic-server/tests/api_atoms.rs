@@ -95,11 +95,13 @@ async fn atomic_session_start_fail() -> HttpResponse {
 
 async fn atomic_chat_profile_ok() -> HttpResponse {
     HttpResponse::Ok().json(json!({
+        "backend": "api",
         "settings": {
             "provider": "openai_compat",
             "openai_compat_base_url": "http://127.0.0.1:9",
             "openai_compat_api_key": "test-key",
-            "openai_compat_llm_model": "mock-llm"
+            "openai_compat_llm_model": "mock-llm",
+            "openai_compat_context_length": "200000"
         }
     }))
 }
@@ -198,12 +200,15 @@ struct ToolModelState {
     pause_on: Option<usize>,
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    requests: Mutex<Vec<Value>>,
+    answer: Mutex<String>,
 }
 
 async fn fake_tool_completion(
     state: web::Data<ToolModelState>,
-    _body: web::Json<Value>,
+    body: web::Json<Value>,
 ) -> HttpResponse {
+    state.requests.lock().unwrap().push(body.into_inner());
     let request_number = state.request_count.fetch_add(1, Ordering::SeqCst);
     if state.pause_on == Some(request_number) {
         state.started.notify_one();
@@ -212,7 +217,7 @@ async fn fake_tool_completion(
     let delta = if request_number == state.tool_call_on {
         json!({"tool_calls": state.tool_calls})
     } else {
-        json!({"content": "fake answer"})
+        json!({"content": state.answer.lock().unwrap().clone()})
     };
     HttpResponse::Ok()
         .content_type("text/event-stream")
@@ -238,6 +243,8 @@ fn start_tool_model(
         pause_on,
         started: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
+        requests: Mutex::new(Vec::new()),
+        answer: Mutex::new("fake answer".into()),
     });
     let server = HttpServer::new({
         let state = state.clone();
@@ -266,12 +273,18 @@ struct MemuEndState {
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
     published: Mutex<Vec<Value>>,
+    fail_next: AtomicBool,
+    capacity: AtomicUsize,
+    cli: AtomicBool,
 }
 
 async fn memu_session_end(state: web::Data<MemuEndState>, body: web::Json<Value>) -> HttpResponse {
     state.started.notify_one();
     if state.hold.load(Ordering::SeqCst) {
         state.release.notified().await;
+    }
+    if state.fail_next.swap(false, Ordering::SeqCst) {
+        return HttpResponse::InternalServerError().json(json!({"error":"Fictional publication failure"}));
     }
     state.published.lock().unwrap().push(body.into_inner());
     HttpResponse::Ok().json(json!({"status": "ok"}))
@@ -337,10 +350,14 @@ fn start_memu_stub_with_model(
         started: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
         published: Mutex::new(Vec::new()),
+        fail_next: AtomicBool::new(false),
+        capacity: AtomicUsize::new(200_000),
+        cli: AtomicBool::new(false),
     });
     let captured_end = end_state.clone();
     let server = HttpServer::new(move || {
         let model_url = model_url.clone();
+        let profile_state = captured_end.clone();
         App::new()
             .app_data(captured_end.clone())
             .route("/owner", web::get().to(memu_owner))
@@ -357,14 +374,18 @@ fn start_memu_stub_with_model(
                 "/integration/atomic/chat_profile",
                 web::get().to(move |request: HttpRequest| {
                     let model_url = model_url.clone();
+                    let capacity = profile_state.capacity.load(Ordering::SeqCst);
+                    let backend = if profile_state.cli.load(Ordering::SeqCst) { "claude_code" } else { "api" };
                     async move {
                         assert_eq!(request.query_string(), "user_id=TestOwner&soul_id=TestSoul");
                         HttpResponse::Ok().json(json!({
+                            "backend": backend,
                             "settings": {
                                 "provider": "openai_compat",
                                 "openai_compat_base_url": model_url,
                                 "openai_compat_api_key": "test-key",
-                                "openai_compat_llm_model": "mock-llm"
+                                "openai_compat_llm_model": "mock-llm",
+                                "openai_compat_context_length": capacity.to_string()
                             }
                         }))
                     }
@@ -1120,17 +1141,10 @@ async fn test_paused_chat_preserves_structured_error_without_saving_message() {
     actix_web::rt::spawn(server);
     let ctx = TestCtx::new_with_memu(Some(url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
-    let request = actix_test::TestRequest::post()
-        .uri("/api/conversations")
-        .insert_header(ctx.auth_header())
-        .insert_header(("X-OpenAlma-User", "TestOwner"))
-        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
-        .set_json(json!({"tag_ids": [], "title": null}))
-        .to_request();
-    let response = actix_test::call_service(&app, request).await;
-    assert_eq!(response.status(), 201);
-    let conversation: Value = actix_test::read_body_json(response).await;
-    let id = conversation["id"].as_str().unwrap();
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let conversation = core.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
+    let id = &conversation.conversation.id;
+    core.save_message(id, "system", "Fictional existing Soul Presence").await.unwrap();
     let request = actix_test::TestRequest::post()
         .uri(&format!("/api/conversations/{id}/messages"))
         .insert_header(ctx.auth_header())
@@ -1155,8 +1169,8 @@ async fn test_paused_chat_preserves_structured_error_without_saving_message() {
 
 #[actix_web::test]
 async fn test_send_message_uses_memu_chat_profile() {
-    let (model_url, model_handle) = start_fake_model();
-    let (memu_url, memu_handle, _) = start_memu_stub_with_model(model_url);
+    let (model_url, model_handle, model) = start_tool_model(usize::MAX, json!([]), None);
+    let (memu_url, memu_handle, end) = start_memu_stub_with_model(model_url);
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
 
@@ -1177,7 +1191,7 @@ async fn test_send_message_uses_memu_chat_profile() {
         .insert_header(ctx.auth_header())
         .insert_header(("X-OpenAlma-User", "TestOwner"))
         .insert_header(("X-OpenAlma-Soul", "TestSoul"))
-        .set_json(json!({"content": "hello"}))
+        .set_json(json!({"content": "This Atomic session is ending. Write a recap of your activity is wording I want to discuss."}))
         .to_request();
     let resp = actix_test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -1196,7 +1210,214 @@ async fn test_send_message_uses_memu_chat_profile() {
         .map(|m| m.message.role.as_str())
         .collect();
     assert_eq!(roles, vec!["system", "user", "assistant"]);
+    let saved_state = raw.conversation.atomic_chat_state.as_ref().unwrap();
+    assert_eq!(saved_state.phase, atomic_core::AtomicChatPhase::Open);
+    assert!(saved_state.active.is_none());
+    assert_eq!(saved_state.context_window_tokens, Some(200_000));
+    let user_id = raw.messages[1].message.id.clone();
 
+    let send_again = || actix_test::TestRequest::post()
+        .uri(&format!("/api/conversations/{conversation_id}/messages"))
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"content":"Preserved refused draft"})).to_request();
+    for (capacity, cli) in [(20_100, false), (0, false), (200_000, true)] {
+        end.capacity.store(capacity, Ordering::SeqCst);
+        end.cli.store(cli, Ordering::SeqCst);
+        assert_eq!(actix_test::call_service(&app, send_again()).await.status(), 409);
+        let retained = core.get_conversation(conversation_id).await.unwrap().unwrap();
+        assert_eq!(retained.messages.len(), 3);
+        assert_eq!(retained.conversation.atomic_chat_state.unwrap().phase, atomic_core::AtomicChatPhase::Open);
+    }
+    end.capacity.store(200_000, Ordering::SeqCst);
+    end.cli.store(false, Ordering::SeqCst);
+    let retry = actix_test::TestRequest::post().uri(&format!("/api/conversations/{conversation_id}/retry"))
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"user_message_id":user_id})).to_request();
+    assert_eq!(actix_test::call_service(&app, retry).await.status(), 200);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 1, "completed Retry must not call the model");
+    let get = actix_test::TestRequest::get().uri(&format!("/api/conversations/{conversation_id}"))
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul")) .to_request();
+    let response = actix_test::call_service(&app, get).await;
+    let view: Value = actix_test::read_body_json(response).await;
+    assert_eq!(view["context_meter"]["limit_tokens"], 180_000);
+    assert!(view["context_meter"]["estimated_tokens"].as_u64().unwrap() > 0);
+
+    let end_request = || actix_test::TestRequest::post().uri("/api/memu/session/end")
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"conversation_id":conversation_id})).to_request();
+    end.fail_next.store(true, Ordering::SeqCst);
+    assert_eq!(actix_test::call_service(&app, end_request()).await.status(), 500);
+    let closing = core.get_conversation(conversation_id).await.unwrap().unwrap();
+    assert_eq!(closing.conversation.atomic_chat_state.unwrap().phase, atomic_core::AtomicChatPhase::Closing);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 2);
+    assert_eq!(actix_test::call_service(&app, end_request()).await.status(), 200);
+    assert_eq!(actix_test::call_service(&app, end_request()).await.status(), 200);
+    let closed = core.get_conversation(conversation_id).await.unwrap().unwrap();
+    assert_eq!(closed.messages.len(), 5);
+    assert_eq!(closed.conversation.atomic_chat_state.unwrap().phase, atomic_core::AtomicChatPhase::Closed);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 2, "publication Retry must reuse the saved recap");
+    assert!(model.requests.lock().unwrap().last().unwrap().get("tools").is_none());
+    assert_eq!(end.published.lock().unwrap().len(), 1);
+    assert_eq!(end.published.lock().unwrap()[0]["transcript"].as_array().unwrap().len(), 2);
+    assert!(end.published.lock().unwrap()[0]["transcript"][0]["content"].as_str().unwrap().contains("wording I want to discuss"));
+
+    memu_handle.stop(true).await;
+    model_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_capacity_refusal_closes_without_saving_draft_or_inventing_a_recap() {
+    let (model_url, model_handle, model) = start_tool_model(usize::MAX, json!([]), None);
+    let (memu_url, memu_handle, end) = start_memu_stub_with_model(model_url);
+    end.capacity.store(20_100, Ordering::SeqCst);
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let conversation = core.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
+    let id = conversation.conversation.id;
+    core.save_message(&id, "system", "Fictional original Presence").await.unwrap();
+    let request = actix_test::TestRequest::post().uri(&format!("/api/conversations/{id}/messages"))
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .set_json(json!({"content":"oversized fictional draft ".repeat(1000)})).to_request();
+    assert_eq!(actix_test::call_service(&app, request).await.status(), 409);
+    tokio::time::timeout(Duration::from_secs(10), atomic_core::executor::wait_idle()).await.unwrap();
+    let saved = core.get_conversation(&id).await.unwrap().unwrap();
+    assert_eq!(saved.messages.len(), 1);
+    assert_eq!(saved.conversation.atomic_chat_state.unwrap().phase, atomic_core::AtomicChatPhase::Closed);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 0);
+    assert_eq!(end.published.lock().unwrap().len(), 1);
+    memu_handle.stop(true).await;
+    model_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_retry_reconciles_stranded_and_legacy_turns_without_replaying_unknown_work() {
+    use atomic_core::{AtomicChatBackend as Backend, AtomicChatRequest as Request};
+    let (model_url, model_handle, model) = start_tool_model(usize::MAX, json!([]), None);
+    let (memu_url, memu_handle, _) = start_memu_stub_with_model(model_url);
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let core = ctx.state.manager.active_core().await.unwrap();
+    for (bound, interrupted_tool) in [(true, false), (false, false), (true, true), (false, true)] {
+        let conv = core.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
+        let id = &conv.conversation.id;
+        core.save_message(id, "system", "Fictional original Presence").await.unwrap();
+        let user = if bound {
+            core.admit_chat_turn(id, "TestOwner", "TestSoul", &Backend::Api,
+                &Request::New { content: "Fictional stranded turn".into(), page_context: None, canvas_context: None }, 200_000).await.unwrap()
+        } else { core.save_message(id, "user", "Fictional unanswered legacy turn").await.unwrap() };
+        if interrupted_tool {
+            let saved = core.get_conversation(id).await.unwrap().unwrap();
+            let mut records = atomic_core::agent::ChatToolRecords::from_saved_message(saved.messages.last().unwrap());
+            records.tool_calls.push(atomic_core::ChatToolCall { id: format!("{id}-tool"), message_id: user.id.clone(),
+                tool_name: "edit_atom".into(), tool_input: json!({"atom_id":"memory:fictional"}),
+                tool_output: None, status: "running".into(), created_at: String::new(), completed_at: None });
+            core.save_chat_tool_records(id, &user.id, &records).await.unwrap();
+        }
+        let before = model.request_count.load(Ordering::SeqCst);
+        let request = actix_test::TestRequest::post().uri(&format!("/api/conversations/{id}/retry"))
+            .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+            .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"user_message_id":user.id})).to_request();
+        let response = actix_test::call_service(&app, request).await;
+        assert_eq!(response.status(), if interrupted_tool { 409 } else { 200 });
+        let saved = core.get_conversation(id).await.unwrap().unwrap();
+        assert_eq!(saved.messages.iter().filter(|row| row.message.role == "user").count(), 1);
+        if interrupted_tool {
+            assert_eq!(model.request_count.load(Ordering::SeqCst), before);
+            let tool = &saved.messages[1].tool_calls[0];
+            assert_eq!(tool.status, "failed");
+            assert_eq!(tool.tool_output.as_ref().unwrap()["outcome_unknown"], true);
+            let end = actix_test::TestRequest::post().uri("/api/memu/session/end")
+                .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+                .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"conversation_id":id})).to_request();
+            assert_eq!(actix_test::call_service(&app, end).await.status(), 200);
+            assert_eq!(model.request_count.load(Ordering::SeqCst), before, "no interchange means no invented recap call");
+        } else {
+            assert_eq!(model.request_count.load(Ordering::SeqCst), before + 1);
+            assert!(saved.conversation.atomic_chat_state.unwrap().active.is_none());
+        }
+    }
+    memu_handle.stop(true).await;
+    model_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_retry_does_not_return_a_recap_for_a_failed_ordinary_turn() {
+    use atomic_core::{AtomicChatBackend as Backend, AtomicChatRequest as Request};
+    let (model_url, model_handle, model) = start_tool_model(usize::MAX, json!([]), None);
+    let (memu_url, memu_handle, _) = start_memu_stub_with_model(model_url);
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let conv = core.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
+    let id = &conv.conversation.id;
+    core.save_message(id, "system", "Fictional original Presence").await.unwrap();
+    core.save_message(id, "user", "Older question").await.unwrap();
+    core.save_message(id, "assistant", "Older answer").await.unwrap();
+    let user = core.admit_chat_turn(id, "TestOwner", "TestSoul", &Backend::Api,
+        &Request::New { content:"Fictional failed ordinary request".into(), page_context:None, canvas_context:None }, 200_000).await.unwrap();
+    core.fail_chat_turn(id, &user.id, "Fictional ordinary failure", false).await.unwrap();
+    let end = actix_test::TestRequest::post().uri("/api/memu/session/end")
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"conversation_id":id})).to_request();
+    assert_eq!(actix_test::call_service(&app, end).await.status(), 200);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 1);
+    let retry = actix_test::TestRequest::post().uri(&format!("/api/conversations/{id}/retry"))
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"user_message_id":user.id})).to_request();
+    assert_eq!(actix_test::call_service(&app, retry).await.status(), 409);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 1);
+    memu_handle.stop(true).await;
+    model_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_automatic_close_out_revalidates_profile_after_the_admitted_reply_finishes() {
+    use atomic_core::AtomicChatRequest as Request;
+    let (model_url, model_handle, model) = start_tool_model(usize::MAX, json!([]), Some(0));
+    *model.answer.lock().unwrap() = "Fictional reply content ".repeat(150);
+    let (memu_url, memu_handle, end) = start_memu_stub_with_model(model_url.clone());
+    let ctx = TestCtx::new_with_memu(Some(memu_url.clone())).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let conv = core.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
+    let id = &conv.conversation.id;
+    core.save_message(id, "system", "Fictional original Presence").await.unwrap();
+    let settings = [("provider", "openai_compat"), ("openai_compat_base_url", model_url.as_str()),
+        ("openai_compat_api_key", "test-key"), ("openai_compat_llm_model", "mock-llm"),
+        ("openai_compat_context_length", "200000")].into_iter().map(|(k,v)| (k.to_string(),v.to_string())).collect();
+    let input = Request::New { content:"Fictional near-limit input".into(), page_context:None, canvas_context:None };
+    let projected = core.estimate_chat_request_tokens(id, &input, settings,
+        atomic_core::MemuToolConfig { base_url:memu_url, user_id:"TestOwner".into(), soul_id:"TestSoul".into() }).await.unwrap();
+    end.capacity.store(projected + 20_000 + 50, Ordering::SeqCst);
+    let send = actix_test::TestRequest::post().uri(&format!("/api/conversations/{id}/messages"))
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"content":"Fictional near-limit input"})).to_request();
+    let pending = actix_test::call_service(&app, send);
+    tokio::pin!(pending);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! { _ = model.started.notified() => {}, _ = &mut pending => panic!("reply did not reach the gated model") }
+    }).await.unwrap();
+    end.cli.store(true, Ordering::SeqCst);
+    model.release.notify_one();
+    assert_eq!(pending.await.status(), 200);
+    tokio::time::timeout(Duration::from_secs(10), atomic_core::executor::wait_idle()).await.unwrap();
+    let saved = core.get_conversation(id).await.unwrap().unwrap();
+    let state = saved.conversation.atomic_chat_state.unwrap();
+    assert_eq!(state.phase, atomic_core::AtomicChatPhase::Closing);
+    assert!(state.recap.is_none());
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 1, "backend flip must not start a stale-config API recap");
+    end.cli.store(false, Ordering::SeqCst);
+    let end_request = actix_test::TestRequest::post().uri("/api/memu/session/end")
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"conversation_id":id})).to_request();
+    assert_eq!(actix_test::call_service(&app, end_request).await.status(), 200);
+    assert_eq!(model.request_count.load(Ordering::SeqCst), 2);
     memu_handle.stop(true).await;
     model_handle.stop(true).await;
 }
@@ -1344,10 +1565,8 @@ async fn test_integrated_chat_and_end_finish_after_waiting_handlers_are_dropped(
             "get_current_page_context"
         );
         assert_eq!(saved.messages[2].tool_calls[0].status, "complete");
-        assert!(
-            saved.conversation.atomic_chat_state.is_none(),
-            "lifecycle writes remain gated"
-        );
+        assert_eq!(saved.conversation.atomic_chat_state.as_ref().unwrap().phase, atomic_core::AtomicChatPhase::Closed);
+        assert!(model.requests.lock().unwrap().last().unwrap().get("tools").is_none(), "recap must not expose tools");
         let publications = end.published.lock().unwrap().clone();
         assert_eq!(publications.len(), 1);
         assert_eq!(publications[0]["activity_recap"], "fake answer");
