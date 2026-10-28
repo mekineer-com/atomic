@@ -104,7 +104,8 @@ impl ChatToolBridge {
         for (credential, transport, turn) in turns {
             *turn.accepting.lock().expect("chat tool admission poisoned") = false;
             drain_turn(self.clone(), credential, Arc::clone(&turn), transport).await;
-            if let Some(session) = turn.state.lock().await.take() {
+            let session = turn.state.lock().await.take();
+            if let Some(session) = session {
                 records.push((turn.binding.3.clone(), session.finish()));
             }
         }
