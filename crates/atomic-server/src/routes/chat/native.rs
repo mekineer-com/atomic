@@ -78,6 +78,22 @@ pub(super) struct NativeReceipt {
     pub error: Option<String>,
 }
 
+impl NativeStatus {
+    fn matches_turn(&self, turn: &NativeTurn<'_>, observed_session: Option<&str>) -> bool {
+        self.turn.as_ref().is_some_and(|receipt| {
+            receipt.turn_id == turn.turn_id
+                && Some(&receipt.session_id) == self.session_id.as_ref()
+                && observed_session.is_none_or(|id| id == receipt.session_id)
+                && receipt.purpose
+                    == if turn.purpose == Purpose::Reply {
+                        "reply"
+                    } else {
+                        "recap"
+                    }
+        })
+    }
+}
+
 pub(super) async fn status(
     scope: &MemuScope,
     id: &str,
@@ -359,14 +375,32 @@ pub(super) async fn execute(
     // After the captured execution budget plus grace, abandon future admission,
     // drain admitted tools and retain Uncertain. That is not proof of child exit.
     let evidence = loop {
-        let evidence = status(scope, turn.conversation_id, turn.turn_id).await;
+        let remaining = observation_budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break Err("Native exit could not be confirmed within the execution budget".into());
+        }
+        let mut evidence =
+            tokio::time::timeout(remaining, status(scope, turn.conversation_id, turn.turn_id))
+                .await
+                .unwrap_or_else(|_| Err("Native status observation timed out".into()));
+        if let Ok(evidence) = &mut evidence {
+            if evidence.matches_turn(&turn, stream.session_id.as_deref()) {
+                if let Some(usage) = evidence.turn.as_mut().and_then(|turn| turn.usage.take()) {
+                    stream.usage = Some(usage.snapshot(turn.turn_id));
+                }
+            }
+        }
         if stream.refused
-            || evidence.as_ref().is_ok_and(|e| e.writer_idle == Some(true))
-            || started.elapsed() >= observation_budget
+            || evidence.as_ref().is_ok_and(|e| {
+                e.writer_idle == Some(true) && e.matches_turn(&turn, stream.session_id.as_deref())
+            })
         {
             break evidence;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(
+            Duration::from_secs(2).min(observation_budget.saturating_sub(started.elapsed())),
+        )
+        .await;
     };
     // Stop admission and drain actual tools on every path, before terminal publication.
     let records = match lease {
@@ -381,49 +415,34 @@ pub(super) async fn execute(
         // Stream loss/overflow can leave the native producer running. Never infer
         // writer exit from this Rust worker or its drained tool lease.
         match evidence {
-            Ok(status) => match status.turn {
-                Some(receipt)
-                    if receipt.turn_id == turn.turn_id
-                        && Some(&receipt.session_id) == status.session_id.as_ref()
-                        && stream
-                            .session_id
-                            .as_ref()
-                            .is_none_or(|id| id == &receipt.session_id)
-                        && receipt.purpose
-                            == if turn.purpose == Purpose::Reply {
-                                "reply"
-                            } else {
-                                "recap"
-                            } =>
-                {
-                    if let Some(usage) = receipt.usage {
-                        stream.usage = Some(usage.snapshot(turn.turn_id));
-                    }
-                    if status.writer_idle == Some(true)
-                        && receipt.status == "complete"
-                        && !(turn.purpose == Purpose::Recap
-                            && receipt
-                                .text
-                                .as_ref()
-                                .is_some_and(|text| text.trim().is_empty()))
-                    {
-                        // Prefer the persisted terminal result on stream recovery;
-                        // direct completion must agree with that same receipt.
-                        match (result, receipt.text) {
-                            (Ok(text), Some(saved)) if text == saved => Ok(text),
-                            (Err(_), Some(saved)) => Ok(saved),
-                            _ => Err((error, true)),
-                        }
-                    } else {
-                        Err((
-                            error,
-                            !(status.writer_idle == Some(true) && receipt.status == "failed"),
-                        ))
-                    }
+            Ok(status) if status.matches_turn(&turn, stream.session_id.as_deref()) => {
+                let receipt = status.turn.expect("matched native receipt");
+                if let Some(usage) = receipt.usage {
+                    stream.usage = Some(usage.snapshot(turn.turn_id));
                 }
-                _ => Err((error, !stream.refused)),
-            },
-            Err(_) => Err((error, !stream.refused)),
+                if status.writer_idle == Some(true)
+                    && receipt.status == "complete"
+                    && !(turn.purpose == Purpose::Recap
+                        && receipt
+                            .text
+                            .as_ref()
+                            .is_some_and(|text| text.trim().is_empty()))
+                {
+                    // Prefer the persisted terminal result on stream recovery;
+                    // direct completion must agree with that same receipt.
+                    match (result, receipt.text) {
+                        (Ok(text), Some(saved)) if text == saved => Ok(text),
+                        (Err(_), Some(saved)) => Ok(saved),
+                        _ => Err((error, true)),
+                    }
+                } else {
+                    Err((
+                        error,
+                        !(status.writer_idle == Some(true) && receipt.status == "failed"),
+                    ))
+                }
+            }
+            _ => Err((error, !stream.refused)),
         }
     };
     let text = match result {
@@ -561,6 +580,16 @@ mod tests {
             ["old", "first", "first second"]
         );
         assert_eq!(stream.usage.unwrap().message_id, "latest");
+        let mut status: NativeStatus = serde_json::from_value(serde_json::json!({
+            "session_id":"native", "writer_idle":true,
+            "turn":{"session_id":"native","turn_id":"turn","purpose":"reply",
+                "status":"complete","submission":"recorded","initialized":true,"text":"exact"}
+        }))
+        .unwrap();
+        assert!(status.matches_turn(&turn, Some("native")));
+        assert!(!status.matches_turn(&turn, Some("other-session")));
+        status.turn.as_mut().unwrap().turn_id = "other-turn".into();
+        assert!(!status.matches_turn(&turn, Some("native")));
     }
 
     async fn mock_chat(
