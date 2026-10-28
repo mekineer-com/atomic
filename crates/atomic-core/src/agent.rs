@@ -1484,13 +1484,7 @@ fn recap_messages(
                     ),
                 );
             }
-            let unknown = call
-                .tool_output
-                .as_ref()
-                .and_then(|v| v.get("outcome_unknown"))
-                .and_then(|v| v.as_bool())
-                == Some(true)
-                || call.status == "running";
+            let unknown = call.outcome_unknown();
             let output = call.tool_output.as_ref();
             let text = output.and_then(|v| v.as_str());
             let outcome = if unknown {
@@ -1699,14 +1693,7 @@ pub(crate) async fn estimate_chat_request_tokens(
                         .tool_calls
                         .iter()
                         .filter(|call| {
-                            call.status != "running"
-                                && call.tool_output.is_some()
-                                && call
-                                    .tool_output
-                                    .as_ref()
-                                    .and_then(|output| output.get("outcome_unknown"))
-                                    .and_then(|value| value.as_bool())
-                                    != Some(true)
+                            !call.outcome_unknown() && call.tool_output.is_some()
                         })
                         .cloned()
                         .collect();
@@ -1935,15 +1922,7 @@ impl ChatToolSession {
     }
 
     fn require_known_outcomes(&self) -> Result<(), String> {
-        if self.tool_calls_record.iter().any(|call| {
-            call.status == "running"
-                || call
-                    .tool_output
-                    .as_ref()
-                    .and_then(|output| output.get("outcome_unknown"))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-        }) {
+        if self.tool_calls_record.iter().any(ChatToolCall::outcome_unknown) {
             return Err("A previous tool's outcome is unknown. Do not resume or repeat it. Close out from saved history or start a new sitting.".to_string());
         }
         Ok(())

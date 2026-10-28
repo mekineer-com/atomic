@@ -24,6 +24,15 @@ use std::{
 use utoipa::{IntoParams, ToSchema};
 
 type ConversationKey = (String, String);
+pub(crate) struct ConversationWork {
+    key: ConversationKey,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl ConversationWork {
+    pub(crate) fn conversation_id(&self) -> &str { &self.key.1 }
+    fn matches(&self, db: &Db, id: &str) -> bool { self.key.0 == db.1 && self.key.1 == id }
+}
 const LEGACY_CONTEXT_ERROR: &str = "This chat exceeds the context limit and cannot be closed out. Your saved history is unchanged. Start a new sitting, or contact help@openalma.org for assistance.";
 static CONVERSATION_WORK: LazyLock<
     tokio::sync::Mutex<HashMap<ConversationKey, Arc<tokio::sync::Mutex<()>>>>,
@@ -265,15 +274,7 @@ async fn read_chat(db: &Db, id: &str) -> Result<atomic_core::ConversationWithMes
 }
 
 fn unknown_tools(row: &atomic_core::ChatMessageWithContext) -> bool {
-    row.tool_calls.iter().any(|call| {
-        call.status == "running"
-            || call
-                .tool_output
-                .as_ref()
-                .and_then(|value| value.get("outcome_unknown"))
-                .and_then(|value| value.as_bool())
-                == Some(true)
-    })
+    row.tool_calls.iter().any(atomic_core::ChatToolCall::outcome_unknown)
 }
 
 async fn change_phase(
@@ -426,11 +427,11 @@ async fn require_conversation_owner(
     }
 }
 
-async fn lock_conversation(
+pub(crate) async fn lock_conversation(
     db: &Db,
     id: &str,
     scope: Option<&MemuScope>,
-) -> Result<tokio::sync::OwnedMutexGuard<()>, JsonError> {
+) -> Result<ConversationWork, JsonError> {
     require_conversation_owner(db, id, scope).await?;
     let key = (db.1.clone(), id.to_string());
     let lock = {
@@ -439,13 +440,13 @@ async fn lock_conversation(
         locks.retain(|_, lock| Arc::strong_count(lock) > 1);
         Arc::clone(
             locks
-                .entry(key)
+                .entry(key.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
         )
     };
     let guard = lock.lock_owned().await;
     require_conversation_owner(db, id, scope).await?;
-    Ok(guard)
+    Ok(ConversationWork { key, _guard: guard })
 }
 
 fn rows_for_saved_history(

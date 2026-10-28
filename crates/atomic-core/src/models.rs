@@ -949,6 +949,13 @@ pub struct ChatToolCall {
     pub completed_at: Option<String>,
 }
 
+impl ChatToolCall {
+    pub fn outcome_unknown(&self) -> bool {
+        self.status == "running" || self.tool_output.as_ref()
+            .and_then(|output| output.get("outcome_unknown")).and_then(|value| value.as_bool()) == Some(true)
+    }
+}
+
 /// Citation in a chat message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

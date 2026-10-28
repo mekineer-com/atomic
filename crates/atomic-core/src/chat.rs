@@ -489,6 +489,7 @@ pub(crate) fn matching_chat_turn(
     } else {
         state.active.as_ref().is_some_and(|turn| {
             turn.user_message_id == expected_user_message_id
+                && (native.is_none() || state.recap.is_none())
                 && if native.is_some() { matching_native(turn.native_attempt_id.as_deref()) }
                     else { turn.status == AtomicChatTurnStatus::Running }
         })
@@ -1657,6 +1658,27 @@ mod tests {
             "backend":"api", "phase":"open", "active":null
         })).unwrap();
         assert!(old.native_usage.is_none());
+    }
+
+    #[test]
+    fn native_recovery_cannot_publish_after_close_or_after_recap_starts() {
+        let mut state: AtomicChatState = serde_json::from_value(serde_json::json!({
+            "backend":"claude_code", "phase":"open", "active":{
+                "user_message_id":"turn", "native_attempt_id":"attempt", "status":"uncertain", "error":"lost delivery"
+            }
+        })).unwrap();
+        let native = AtomicChatNativeOutcome { attempt_id:"attempt".into(), usage:None };
+        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).unwrap().unwrap().active.is_none());
+        state.phase = AtomicChatPhase::Closed;
+        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).is_err());
+        state.phase = AtomicChatPhase::Closing;
+        state.recap = Some(AtomicChatRecap { request_message_id:"recap".into(), native_attempt_id:Some("recap-attempt".into()),
+            outcome:AtomicChatRecapOutcome::Running });
+        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).is_err());
+        state.recap.as_mut().unwrap().outcome = AtomicChatRecapOutcome::Complete { reply_message_id:"saved-recap".into() };
+        let recap = AtomicChatNativeOutcome { attempt_id:"recap-attempt".into(), usage:None };
+        assert!(completed_chat_state(Some(state.clone()), Some("recap"), "duplicate", Some(&recap)).is_err());
+        assert!(completed_chat_state(Some(state), Some("turn"), "late ordinary", Some(&native)).is_err());
     }
 
     #[test]

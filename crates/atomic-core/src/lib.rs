@@ -2703,10 +2703,7 @@ impl AtomicCore {
             .find(|row| matches!(row.message.role.as_str(), "user" | "assistant"));
         let unknown = if let AtomicChatRequest::Retry { user_message_id } = request {
             conversation.messages.iter().find(|row| row.message.id == *user_message_id)
-                .is_some_and(|row| row.tool_calls.iter().any(|call| {
-                    call.status == "running" || call.tool_output.as_ref()
-                        .and_then(|v| v.get("outcome_unknown")).and_then(|v| v.as_bool()) == Some(true)
-                }))
+                .is_some_and(|row| row.tool_calls.iter().any(ChatToolCall::outcome_unknown))
         } else {
             false
         };

@@ -94,8 +94,9 @@ impl ChatToolBridge {
 
     /// Caller owns the sitting lock and has proved native writer exit. Drop's
     /// orphan cleanup can still be draining after that worker released its lock.
-    pub async fn drain_sitting(&self, owner: &str, soul: &str, conversation: &str)
+    pub(crate) async fn drain_sitting(&self, owner: &str, soul: &str, work: &crate::routes::chat::ConversationWork)
         -> Vec<(String, ChatToolRecords)> {
+        let conversation = work.conversation_id();
         let turns: Vec<_> = self.turns.lock().expect("chat tool registry poisoned").iter()
             .filter(|(_, (_, turn))| turn.binding.0 == owner && turn.binding.1 == soul && turn.binding.2 == conversation)
             .map(|(credential, (transport, turn))| (credential.clone(), transport.clone(), Arc::clone(turn)))
@@ -606,6 +607,8 @@ mod tests {
             .unwrap();
         let server = lease.server.clone();
         let binding = server.0.binding.clone();
+        let db = crate::db_extractor::Db(core.clone(), "fixture-db".into());
+        let work = crate::routes::chat::lock_conversation(&db, &binding.2, None).await.unwrap();
         let held = server.0.state.lock().await;
         let mut call = Box::pin(server.execute(
             "toolu-detached".to_string(),
@@ -619,8 +622,8 @@ mod tests {
         );
         drop(call);
         drop(lease);
-        assert!(bridge.drain_sitting("TestOwner", "OtherSoul", &binding.2).await.is_empty());
-        let mut drain = Box::pin(bridge.drain_sitting(&binding.0, &binding.1, &binding.2));
+        assert!(bridge.drain_sitting("TestOwner", "OtherSoul", &work).await.is_empty());
+        let mut drain = Box::pin(bridge.drain_sitting(&binding.0, &binding.1, &work));
         assert!(tokio::time::timeout(Duration::from_millis(10), drain.as_mut()).await.is_err());
         assert!(
             tokio::time::timeout(Duration::from_millis(10), server.0.work.wait_idle())

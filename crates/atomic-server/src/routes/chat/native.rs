@@ -112,6 +112,31 @@ impl NativeStatus {
     }
 }
 
+// Used only after matching receipt identity and proving native writer exit.
+fn receipt_result(receipt: NativeReceipt, purpose: Purpose) -> Result<String, (String, bool)> {
+    if receipt.status == "complete" {
+        return receipt.text.ok_or_else(|| {
+            (
+                "Native completion has no saved result; history is retained".into(),
+                true,
+            )
+        });
+    }
+    let uncertain = purpose == Purpose::Reply && receipt.status != "failed";
+    let error = if purpose == Purpose::Recap && receipt.status != "failed" {
+        "The tool-free recap result was not recorded. Writer exit is confirmed; Retry close-out in this sitting.".into()
+    } else {
+        receipt.error.unwrap_or_else(|| {
+            if uncertain {
+                "Native completion was not recorded. Close out from saved history; do not replay this turn.".into()
+            } else {
+                "The native attempt failed. Retry the saved turn or close out.".into()
+            }
+        })
+    };
+    Err((error, uncertain))
+}
+
 pub(super) async fn status(
     scope: &MemuScope,
     id: &str,
@@ -130,7 +155,18 @@ pub(super) async fn status(
         .await
         .map_err(|e| e.to_string())?;
     if !response.status().is_success() {
-        return Err(format!("Native status failed ({})", response.status()));
+        let code = response.status();
+        if code == reqwest::StatusCode::CONFLICT {
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Invalid native status: {e}"))?;
+            if body["detail"]["code"] == "atomic_native_turn_missing" {
+                return serde_json::from_value(body["detail"].clone())
+                    .map_err(|e| format!("Invalid native status: {e}"));
+            }
+        }
+        return Err(format!("Native status failed ({code})"));
     }
     response
         .json()
@@ -147,7 +183,14 @@ pub(super) async fn reconcile(
     scope: &MemuScope,
     bridge: &ChatToolBridge,
     id: &str,
+    work: &ConversationWork,
 ) -> Result<(), JsonError> {
+    if !work.matches(db, id) {
+        return Err((
+            StatusCode::CONFLICT,
+            serde_json::json!({"error":"Recovery requires this sitting's lock"}),
+        ));
+    }
     let conv = read_chat(db, id).await?;
     if !conversation_matches(&conv, scope) {
         return Err((
@@ -199,6 +242,7 @@ pub(super) async fn reconcile(
     let attempt_id = attempt_id.ok_or_else(|| (StatusCode::CONFLICT,
         serde_json::json!({"error":"Native attempt identity is missing; keep this history and start a new sitting"})))?;
     let observed = status(scope, id, turn_id).await;
+    let status_unavailable = observed.is_err();
     let matched = observed
         .as_ref()
         .is_ok_and(|status| status.matches_turn(turn_id, attempt_id, purpose, None));
@@ -222,62 +266,53 @@ pub(super) async fn reconcile(
         attempt_id: attempt_id.into(),
         usage: None,
     };
-    let receipt = if matched {
+    let mut receipt = if matched {
         observed.ok().and_then(|status| status.turn)
     } else {
         None
     };
-    let mut receipt = receipt;
     if let Some(usage) = receipt.as_mut().and_then(|receipt| receipt.usage.take()) {
         native.usage = Some(usage.snapshot(turn_id));
     }
     if idle && matched {
+        let mut changed_tools = false;
         for (message_id, records) in bridge
-            .drain_sitting(&scope.user_id, &scope.soul_id, id)
+            .drain_sitting(&scope.user_id, &scope.soul_id, work)
             .await
         {
             db.0.save_chat_tool_records(id, &message_id, &records)
                 .await
                 .map_err(core_json_error)?;
+            changed_tools = true;
         }
+        // The binder checkpoints any stranded running rows as unknown. Count
+        // that persisted change once; the next reload reads their failed status.
+        changed_tools |= conv
+            .messages
+            .iter()
+            .find(|row| row.message.id == *turn_id)
+            .is_some_and(|row| row.tool_calls.iter().any(|call| call.status == "running"));
         let records =
             db.0.saved_chat_tool_records(id, turn_id, tools_for(scope))
                 .await
                 .map_err(core_json_error)?;
         let receipt = receipt.expect("matching receipt");
-        if receipt.status == "complete" {
-            let text = receipt.text.ok_or_else(|| (StatusCode::BAD_GATEWAY,
-                serde_json::json!({"error":"Native completion has no saved result; history is retained"})))?;
-            let records = records.for_reply(&text);
-            db.0.save_chat_reply(id, Some(turn_id), &text, &records, Some(&native))
-                .await
-                .map_err(core_json_error)?;
-            chat_changed(state, db, id);
-            return Ok(());
-        }
-        let unknown_tools = records.tool_calls.iter().any(|call| {
-            call.status == "running"
-                || call
-                    .tool_output
-                    .as_ref()
-                    .and_then(|output| output.get("outcome_unknown"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
-        });
-        // A same-session recap is tool-free: after exit proof its unknown result
-        // may be retried. Keep any uncertain ordinary turn separate and untouched.
-        let uncertain = purpose == Purpose::Reply && (receipt.status != "failed" || unknown_tools);
-        let error = if purpose == Purpose::Recap && receipt.status != "failed" {
-            "The tool-free recap result was not recorded. Writer exit is confirmed; Retry close-out in this sitting.".into()
-        } else {
-            receipt.error.unwrap_or_else(|| {
-                if uncertain {
-                    "Native completion was not recorded. Close out from saved history; do not replay this turn.".into()
-                } else {
-                    "The native attempt failed. Retry the saved turn or close out.".into()
-                }
-            })
+        let (error, uncertain) = match receipt_result(receipt, purpose) {
+            Ok(text) => {
+                let records = records.for_reply(&text);
+                db.0.save_chat_reply(id, Some(turn_id), &text, &records, Some(&native))
+                    .await
+                    .map_err(core_json_error)?;
+                chat_changed(state, db, id);
+                return Ok(());
+            }
+            Err(failure) => failure,
         };
+        let uncertain = uncertain
+            || records
+                .tool_calls
+                .iter()
+                .any(atomic_core::ChatToolCall::outcome_unknown);
         return reconcile_failure(
             state,
             db,
@@ -288,14 +323,15 @@ pub(super) async fn reconcile(
             purpose,
             &error,
             uncertain,
-            conv.messages
-                .iter()
-                .find(|row| row.message.id == *turn_id)
-                .is_some_and(|row| row.tool_calls.iter().any(|call| call.status == "running")),
+            changed_tools,
         )
         .await;
     }
-    let error = "Native completion or writer exit cannot be established. Keep this history and start a new independent sitting, or reload after the memory server recovers.";
+    let error = if status_unavailable {
+        "Native status could not be read. Keep this history; check the memory server and reload, or start a new independent sitting."
+    } else {
+        "No matching native completion or writer-exit proof is available. Keep this history and start a new independent sitting, or reload after the pending work settles."
+    };
     if !was_failed {
         reconcile_failure(
             state, db, id, turn_id, saved, &native, purpose, error, true, false,
@@ -653,19 +689,10 @@ pub(super) async fn execute(
                 ) =>
             {
                 let receipt = status.turn.expect("matched native receipt");
-                if status.writer_idle == Some(true) && receipt.status == "complete" {
-                    // Prefer the persisted terminal result on stream recovery;
-                    // direct completion must agree with that same receipt.
-                    match (result, receipt.text) {
-                        (Ok(text), Some(saved)) if text == saved => Ok(text),
-                        (Err(_), Some(saved)) => Ok(saved),
-                        _ => Err((error, true)),
-                    }
+                if status.writer_idle == Some(true) {
+                    receipt_result(receipt, turn.purpose)
                 } else {
-                    Err((
-                        receipt.error.unwrap_or(error),
-                        !(status.writer_idle == Some(true) && receipt.status == "failed"),
-                    ))
+                    Err((receipt.error.unwrap_or(error), true))
                 }
             }
             _ => Err((error, !stream.refused)),
@@ -683,15 +710,10 @@ pub(super) async fn execute(
                 .await
                 .map_err(core_json_error)?;
             let uncertain = uncertain
-                || records.tool_calls.iter().any(|call| {
-                    call.status == "running"
-                        || call
-                            .tool_output
-                            .as_ref()
-                            .and_then(|output| output.get("outcome_unknown"))
-                            .and_then(Value::as_bool)
-                            == Some(true)
-                });
+                || records
+                    .tool_calls
+                    .iter()
+                    .any(atomic_core::ChatToolCall::outcome_unknown);
             db.0.fail_chat_turn(
                 turn.conversation_id,
                 turn.turn_id,
@@ -909,6 +931,11 @@ mod tests {
         query: web::Query<HashMap<String, String>>,
         request: HttpRequest,
     ) -> HttpResponse {
+        if matches!(mock.mode, "refused_later" | "recap_refused") {
+            return HttpResponse::Conflict().json(serde_json::json!({"detail":{
+                "code":"atomic_native_turn_missing", "session_id":"native-id", "turn":null, "writer_idle":true,
+            }}));
+        }
         if matches!(mock.mode, "refused" | "server_refused") {
             return HttpResponse::Ok()
                 .json(serde_json::json!({"session_id":null,"writer_idle":true,"turn":null}));
@@ -939,7 +966,7 @@ mod tests {
             "success" | "recover" | "recap" | "mismatch" | "reload" => "complete",
             "retry" if !older_attempt => "complete",
             "active" if !active => "complete",
-            "failed" | "retry" => "failed",
+            "failed" | "retry" | "reload_failed" => "failed",
             _ => "uncertain",
         };
         let mut receipt_counts = counts();
@@ -970,6 +997,10 @@ mod tests {
             "reload",
             "lost",
             "recap_lost",
+            "reload_failed",
+            "refused_later",
+            "recap_refused",
+            "recap_unknown",
         ] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
@@ -1127,14 +1158,66 @@ mod tests {
             } else {
                 lifecycle.active.unwrap().native_attempt_id.unwrap()
             };
-            if matches!(mode, "reload" | "lost" | "recap_lost") {
+            if matches!(
+                mode,
+                "reload"
+                    | "lost"
+                    | "recap_lost"
+                    | "reload_failed"
+                    | "refused_later"
+                    | "recap_refused"
+            ) {
                 *mock.attempt_id.lock().unwrap() = attempt;
                 let _ = session.finish();
+                if mode == "lost" {
+                    let saved = db.0.get_conversation(id).await.unwrap().unwrap();
+                    let row = saved
+                        .messages
+                        .iter()
+                        .find(|row| row.message.id == input.id)
+                        .unwrap();
+                    let mut records = atomic_core::agent::ChatToolRecords::from_saved_message(row);
+                    records.tool_calls.push(atomic_core::ChatToolCall {
+                        id: "stranded-tool".into(),
+                        message_id: input.id.clone(),
+                        tool_name: "focus_atom".into(),
+                        tool_input: serde_json::json!({}),
+                        tool_output: None,
+                        status: "running".into(),
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                        completed_at: None,
+                    });
+                    db.0.save_chat_tool_records(id, &input.id, &records)
+                        .await
+                        .unwrap();
+                }
+                if matches!(mode, "reload_failed" | "refused_later" | "recap_refused") {
+                    db.0.fail_chat_turn(
+                        id,
+                        &input.id,
+                        "Earlier delivery failed",
+                        mode == "reload_failed",
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                let other_work = lock_conversation(&db, "different-sitting", None)
+                    .await
+                    .unwrap();
+                assert!(reconcile(&state, &db, &scope, &bridge, id, &other_work)
+                    .await
+                    .is_err());
                 let mut events = state.event_tx.subscribe();
                 let mut foreign = scope.clone();
                 foreign.soul_id = "OtherSoul".into();
-                assert!(reconcile(&state, &db, &foreign, &bridge, id).await.is_err());
-                reconcile(&state, &db, &scope, &bridge, id).await.unwrap();
+                assert!(reconcile(&state, &db, &foreign, &bridge, id, &work)
+                    .await
+                    .is_err());
+                reconcile(&state, &db, &scope, &bridge, id, &work)
+                    .await
+                    .unwrap();
                 let recovered = db.0.get_conversation(id).await.unwrap().unwrap();
                 let saved = recovered.conversation.atomic_chat_state.unwrap();
                 if mode == "reload" {
@@ -1144,12 +1227,19 @@ mod tests {
                         recovered.messages[1].message.content,
                         "Recovered terminal response"
                     );
-                } else if mode == "recap_lost" {
+                } else if matches!(mode, "recap_lost" | "recap_refused") {
                     assert!(matches!(
                         saved.recap.unwrap().outcome,
                         RecapOutcome::Failed { .. }
                     ));
-                    assert_eq!(saved.active.unwrap().status, TurnStatus::Uncertain);
+                    assert_eq!(
+                        saved.active.unwrap().status,
+                        if mode == "recap_lost" {
+                            TurnStatus::Uncertain
+                        } else {
+                            TurnStatus::Failed
+                        }
+                    );
                     assert_eq!(recovered.messages.len(), 2);
                     assert!(db
                         .0
@@ -1165,16 +1255,36 @@ mod tests {
                         )
                         .await
                         .is_ok());
+                } else if matches!(mode, "reload_failed" | "refused_later") {
+                    assert_eq!(saved.active.unwrap().status, TurnStatus::Failed);
+                    assert!(db
+                        .0
+                        .validate_chat_request(
+                            id,
+                            &scope.user_id,
+                            &scope.soul_id,
+                            &Backend::ClaudeCode,
+                            &ChatRequest::Retry {
+                                user_message_id: input.id.clone()
+                            },
+                            128000
+                        )
+                        .await
+                        .is_ok());
                 } else {
                     assert_eq!(saved.active.unwrap().status, TurnStatus::Uncertain);
                     assert_eq!(recovered.messages.len(), 1);
+                    assert_eq!(recovered.messages[0].tool_calls[0].status, "failed");
+                    assert!(recovered.messages[0].tool_calls[0].outcome_unknown());
                 }
                 assert!(
                     mock.credential.lock().unwrap().is_empty(),
                     "reconciliation must not call the native producer"
                 );
                 while events.try_recv().is_ok() {}
-                reconcile(&state, &db, &scope, &bridge, id).await.unwrap();
+                reconcile(&state, &db, &scope, &bridge, id, &work)
+                    .await
+                    .unwrap();
                 assert!(
                     events.try_recv().is_err(),
                     "reload reconciliation must not create an event loop"
@@ -1209,7 +1319,7 @@ mod tests {
                 },
                 input: ClaudeChatInput {
                     prompt: input.content.clone(),
-                    system_prompt: (!matches!(mode, "recap" | "retry"))
+                    system_prompt: (!mode.starts_with("recap") && mode != "retry")
                         .then(|| "saved presence".into()),
                 },
             };
@@ -1236,12 +1346,20 @@ mod tests {
             }
             assert!(saved.messages.iter().all(|row| row.tool_calls.is_empty()));
             match mode {
-                "recap" => {
-                    assert_eq!(result.unwrap().message.content, "Exact recap");
-                    assert!(matches!(
-                        lifecycle.recap.unwrap().outcome,
-                        RecapOutcome::Complete { .. }
-                    ));
+                "recap" | "recap_unknown" => {
+                    if mode == "recap_unknown" {
+                        assert!(result.is_err());
+                        assert!(matches!(
+                            lifecycle.recap.unwrap().outcome,
+                            RecapOutcome::Failed { .. }
+                        ));
+                    } else {
+                        assert_eq!(result.unwrap().message.content, "Exact recap");
+                        assert!(matches!(
+                            lifecycle.recap.unwrap().outcome,
+                            RecapOutcome::Complete { .. }
+                        ));
+                    }
                     while let Ok(event) = events.try_recv() {
                         assert!(!matches!(
                             event,
@@ -1249,7 +1367,7 @@ mod tests {
                         ));
                     }
                 }
-                "success" | "recover" | "active" | "retry" => {
+                "success" | "recover" | "active" | "retry" | "mismatch" => {
                     let expected = if mode == "success" {
                         "Exact terminal response"
                     } else {
@@ -1268,7 +1386,7 @@ mod tests {
                     assert_eq!(saved.messages.len(), 1);
                     assert_eq!(
                         lifecycle.active.unwrap().status,
-                        if matches!(mode, "uncertain" | "mismatch") {
+                        if mode == "uncertain" {
                             TurnStatus::Uncertain
                         } else {
                             TurnStatus::Failed
@@ -1276,7 +1394,7 @@ mod tests {
                     );
                 }
             }
-            if mode != "recap" {
+            if !mode.starts_with("recap") {
                 let credential = mock.credential.lock().unwrap().clone();
                 let revoked = reqwest::Client::new()
                     .post(format!("{base_url}{CHAT_TOOLS_PATH}"))
