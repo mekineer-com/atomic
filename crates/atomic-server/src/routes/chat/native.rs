@@ -184,7 +184,24 @@ pub(super) async fn prepare_input(
     let saved = conv.conversation.atomic_chat_state.as_ref()
         .filter(|saved| saved.backend == Backend::ClaudeCode && saved.phase != Phase::Closed)
         .ok_or_else(|| (StatusCode::CONFLICT, serde_json::json!({"error":"Native input requires an open or closing Claude Code sitting; existing API history cannot be migrated."})))?;
-    let previous_turn = status_turn(&conv);
+    let previous_turn = saved
+        .recap
+        .as_ref()
+        .map(|recap| recap.request_message_id.as_str())
+        .or_else(|| {
+            saved
+                .active
+                .as_ref()
+                .map(|turn| turn.user_message_id.as_str())
+        })
+        .or_else(|| {
+            conv.messages
+                .iter()
+                .rev()
+                .find(|row| row.message.role == "user")
+                .map(|row| row.message.id.as_str())
+        })
+        .unwrap_or("");
     let observed = status(scope, id, previous_turn)
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, serde_json::json!({"error":error})))?;
@@ -230,72 +247,6 @@ pub(super) async fn prepare_input(
         input_tokens: tokens,
         context_tokens,
     })
-}
-
-fn status_turn(conv: &atomic_core::ConversationWithMessages) -> &str {
-    conv.conversation
-        .atomic_chat_state
-        .as_ref()
-        .and_then(|saved| {
-            saved
-                .recap
-                .as_ref()
-                .map(|recap| recap.request_message_id.as_str())
-                .or_else(|| {
-                    saved
-                        .active
-                        .as_ref()
-                        .map(|turn| turn.user_message_id.as_str())
-                })
-        })
-        .or_else(|| {
-            conv.messages
-                .iter()
-                .rev()
-                .find(|row| row.message.role == "user")
-                .map(|row| row.message.id.as_str())
-        })
-        .unwrap_or("")
-}
-
-pub(super) async fn drain_idle(
-    db: &Db,
-    scope: &MemuScope,
-    id: &str,
-    bridge: &ChatToolBridge,
-    work: &ConversationWork,
-) -> Result<(), JsonError> {
-    if !work.matches(db, id) {
-        return Err((
-            StatusCode::CONFLICT,
-            serde_json::json!({"error":"Native drain requires this sitting's lock"}),
-        ));
-    }
-    let conv = read_chat(db, id).await?;
-    if !conversation_matches(&conv, scope) {
-        return Err((
-            StatusCode::NOT_FOUND,
-            serde_json::json!({"error":"Conversation not found"}),
-        ));
-    }
-    let observed = status(scope, id, status_turn(&conv))
-        .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, serde_json::json!({"error":error})))?;
-    if observed.writer_idle != Some(true) {
-        return Err((
-            StatusCode::CONFLICT,
-            serde_json::json!({"error":"Native writer exit is not established. Wait and reload; saved history is retained."}),
-        ));
-    }
-    for (turn, records) in bridge
-        .drain_sitting(&scope.user_id, &scope.soul_id, work)
-        .await
-    {
-        db.0.save_chat_tool_records(id, &turn, &records)
-            .await
-            .map_err(core_json_error)?;
-    }
-    Ok(())
 }
 
 /// Choose input before admission replaces the saved attempt. A receipt from an
@@ -460,7 +411,7 @@ pub(super) async fn status(
 
 /// Caller holds the scoped sitting lock. Native exit and orphan Rust tool
 /// cleanup still need their independent proofs before reading final records.
-/// Dormant until N2c route wiring; no model request or new admission here.
+/// No model request or new admission here.
 pub(super) async fn reconcile(
     state: &AppState,
     db: &Db,
@@ -533,10 +484,6 @@ pub(super) async fn reconcile(
     let idle = observed
         .as_ref()
         .is_ok_and(|status| status.writer_idle == Some(true));
-    // An explicit pre-submission refusal can have no matching MCP receipt.
-    if was_failed && !matched && idle {
-        return Ok(());
-    }
     if observed
         .as_ref()
         .is_ok_and(|status| status.writer_idle == Some(false))
@@ -545,6 +492,23 @@ pub(super) async fn reconcile(
             StatusCode::CONFLICT,
             serde_json::json!({"error":"Native work is still running. Wait, or open a new independent sitting; this history is retained."}),
         ));
+    }
+    let mut changed_tools = false;
+    if idle {
+        // Writer proof applies even when this attempt never obtained a receipt.
+        for (message_id, records) in bridge
+            .drain_sitting(&scope.user_id, &scope.soul_id, work)
+            .await
+        {
+            db.0.save_chat_tool_records(id, &message_id, &records)
+                .await
+                .map_err(core_json_error)?;
+            changed_tools = true;
+        }
+    }
+    // A known refusal needs no new outcome, but orphan Rust work must drain first.
+    if was_failed && !matched && idle {
+        return Ok(());
     }
     let mut native = AtomicChatNativeOutcome {
         attempt_id: attempt_id.into(),
@@ -566,17 +530,7 @@ pub(super) async fn reconcile(
     if let Some(usage) = receipt.as_mut().and_then(|receipt| receipt.usage.take()) {
         native.usage = Some(usage.snapshot(turn_id));
     }
-    if idle && matched {
-        let mut changed_tools = false;
-        for (message_id, records) in bridge
-            .drain_sitting(&scope.user_id, &scope.soul_id, work)
-            .await
-        {
-            db.0.save_chat_tool_records(id, &message_id, &records)
-                .await
-                .map_err(core_json_error)?;
-            changed_tools = true;
-        }
+    if idle && (matched || purpose == Purpose::Reply) {
         // The binder checkpoints any stranded running rows as unknown. Count
         // that persisted change once; the next reload reads their failed status.
         changed_tools |= conv
@@ -588,6 +542,13 @@ pub(super) async fn reconcile(
             db.0.saved_chat_tool_records(id, turn_id, tools_for(scope))
                 .await
                 .map_err(core_json_error)?;
+        if !matched && purpose == Purpose::Reply {
+            // Keep ordinary work non-replayable, while allowing End to resume
+            // the existing session. Missing receipts never prove submission.
+            return reconcile_failure(state, db, id, turn_id, saved, &native, purpose,
+                "Native completion is unknown. Writer exit is confirmed; close out in the existing session, not ordinary Retry.",
+                true, changed_tools).await;
+        }
         let receipt = receipt.expect("matching receipt");
         let (error, uncertain) = match receipt_result(receipt, purpose) {
             Ok(text) => {
@@ -912,14 +873,12 @@ pub(super) async fn execute_prepared(
     scope: &MemuScope,
     profile: &ClaudeChatProfile,
     bridge: &ChatToolBridge,
+    bridge_url: &str,
     id: &str,
     turn_id: &str,
     purpose: Purpose,
     prepared: PreparedInput,
 ) -> Result<ChatMessageWithContext, JsonError> {
-    let bridge_url = bridge
-        .local_url()
-        .map_err(|error| (StatusCode::CONFLICT, serde_json::json!({"error":error})))?;
     let conv = read_chat(db, id).await?;
     let saved = conv
         .conversation
@@ -972,7 +931,7 @@ pub(super) async fn execute_prepared(
                 attempt_id: attempt.into(),
                 usage: None,
                 input_recorded: Some(prepared.continuation),
-                context_tokens: saved.native_context_tokens,
+                context_tokens: None,
             };
             db.0.fail_chat_turn(id, turn_id, &error.to_string(), false, Some(&outcome))
                 .await
@@ -1511,14 +1470,14 @@ mod tests {
         }
         if matches!(
             mock.mode,
-            "refused_later" | "recap_refused" | "continuation_refused"
+            "refused_later" | "recap_refused" | "continuation_refused" | "missing_receipt"
         ) {
             return HttpResponse::Conflict().json(serde_json::json!({"detail":{
                 "code":"atomic_native_turn_missing", "session_id":"native-id", "turn":null, "writer_idle":true,
                 "context":{"estimated_tokens":500,"overhead_tokens":50,"system_tokens":25},
             }}));
         }
-        if matches!(mock.mode, "refused" | "server_refused") {
+        if matches!(mock.mode, "refused" | "server_refused" | "missing_unbound") {
             return HttpResponse::Ok().json(
                 serde_json::json!({"session_id":null,"writer_idle":true,"turn":null,
                     "context":{"estimated_tokens":0,"overhead_tokens":0,"system_tokens":0}}),
@@ -1588,6 +1547,8 @@ mod tests {
             "refused_later",
             "recap_refused",
             "recap_unknown",
+            "missing_receipt",
+            "missing_unbound",
         ] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
@@ -1933,10 +1894,12 @@ mod tests {
                     | "reload_failed"
                     | "refused_later"
                     | "recap_refused"
+                    | "missing_receipt"
+                    | "missing_unbound"
             ) {
                 *mock.attempt_id.lock().unwrap() = attempt;
                 let _ = session.finish();
-                if mode == "lost" {
+                if matches!(mode, "lost" | "missing_receipt" | "missing_unbound") {
                     let saved = db.0.get_conversation(id).await.unwrap().unwrap();
                     let row = saved
                         .messages
@@ -2017,11 +1980,15 @@ mod tests {
                 let saved = recovered.conversation.atomic_chat_state.unwrap();
                 assert_eq!(
                     saved.native_context_tokens,
-                    Some(if matches!(mode, "refused_later" | "recap_refused") {
-                        123
+                    if matches!(mode, "missing_receipt" | "missing_unbound") {
+                        None
                     } else {
-                        700
-                    })
+                        Some(if matches!(mode, "refused_later" | "recap_refused") {
+                            123
+                        } else {
+                            700
+                        })
+                    }
                 );
                 if mode == "reload" {
                     assert!(saved.active.is_none());
@@ -2079,6 +2046,38 @@ mod tests {
                     assert_eq!(recovered.messages.len(), 1);
                     assert_eq!(recovered.messages[0].tool_calls[0].status, "failed");
                     assert!(recovered.messages[0].tool_calls[0].outcome_unknown());
+                }
+                if matches!(mode, "missing_receipt" | "missing_unbound") {
+                    assert!(
+                        db.0.validate_chat_request(
+                            id,
+                            &scope.user_id,
+                            &scope.soul_id,
+                            &Backend::ClaudeCode,
+                            &ChatRequest::Retry {
+                                user_message_id: input.id.clone()
+                            },
+                            128000
+                        )
+                        .await
+                        .is_err(),
+                        "writer exit does not authorize replay"
+                    );
+                    let recap = ChatRequest::Recap {
+                        instruction: "Recap the existing sitting".into(),
+                    };
+                    let prepared = prepare_input(&db, &scope, id, &recap, &profile, &work).await;
+                    if mode == "missing_receipt" {
+                        let prepared = prepared.unwrap();
+                        assert_eq!(prepared.operation, Operation::Continue);
+                        assert!(prepared.input.system_prompt.is_none());
+                        assert_eq!(prepared.input.prompt, "Recap the existing sitting");
+                    } else {
+                        assert!(
+                            prepared.is_err(),
+                            "missing native history must not initialize a replacement for recap"
+                        );
+                    }
                 }
                 assert!(
                     mock.credential.lock().unwrap().is_empty(),
@@ -2147,6 +2146,7 @@ mod tests {
                     &scope,
                     &profile,
                     &bridge,
+                    &base_url,
                     id,
                     &input.id,
                     Purpose::Reply,

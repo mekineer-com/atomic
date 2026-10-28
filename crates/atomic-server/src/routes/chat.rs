@@ -335,16 +335,10 @@ async fn change_phase(
     db: &Db,
     scope: &MemuScope,
     id: &str,
+    backend: &Backend,
     phase: Phase,
 ) -> Result<(), JsonError> {
-    let backend = read_chat(db, id)
-        .await?
-        .conversation
-        .atomic_chat_state
-        .as_ref()
-        .map(|saved| saved.backend)
-        .unwrap_or(Backend::Api);
-    db.0.set_chat_phase(id, &scope.user_id, &scope.soul_id, &backend, &phase)
+    db.0.set_chat_phase(id, &scope.user_id, &scope.soul_id, backend, &phase)
         .await
         .map_err(core_json_error)?;
     chat_changed(state, db, id);
@@ -355,12 +349,6 @@ async fn change_phase(
 async fn reconcile_api(state: &AppState, db: &Db, id: &str) -> Result<(), JsonError> {
     let conv = read_chat(db, id).await?;
     let saved = conv.conversation.atomic_chat_state.as_ref();
-    if saved.is_some_and(|saved| saved.backend != Backend::Api) {
-        return Err((
-            StatusCode::CONFLICT,
-            serde_json::json!({"error":"This sitting requires claude_code=true. Restore its original backend or start a new sitting."}),
-        ));
-    }
     if saved.is_some_and(|saved| saved.phase == Phase::Closed) {
         return Ok(());
     }
@@ -826,7 +814,11 @@ pub async fn get_conversation(
                 }
             }
             if let Some(error) = recovery_error {
-                value["context_error"] = serde_json::json!(memu_error_text(&error.to_string()));
+                let recovery = memu_error_text(&error.to_string());
+                value["context_error"] = serde_json::json!(match value["context_error"].as_str() {
+                    Some(meter) => format!("{meter}\n{recovery}"),
+                    None => recovery,
+                });
             }
             HttpResponse::Ok().json(value)
         }
@@ -1030,16 +1022,19 @@ async fn chat_work_with_profile(
     let capacity = profile.capacity()?;
     let backend = profile.backend();
     profile.check_binding(&conv)?;
-    match &profile {
-        AtomicChatProfileResponse::Api { .. } => reconcile_api(&state, &db, &id).await?,
+    let bridge_url = match &profile {
+        AtomicChatProfileResponse::Api { .. } => {
+            reconcile_api(&state, &db, &id).await?;
+            None
+        }
         AtomicChatProfileResponse::ClaudeCode { .. } => {
-            bridge
+            let url = bridge
                 .local_url()
                 .map_err(|error| (StatusCode::CONFLICT, serde_json::json!({"error":error})))?;
             native::reconcile(&state, &db, &scope, &bridge, &id, &work).await?;
-            native::drain_idle(&db, &scope, &id, &bridge, &work).await?;
+            Some(url)
         }
-    }
+    };
     let conv = read_chat(&db, &id).await?;
     if let Some(reply) = saved_retry_reply(&conv, &request) {
         return Ok(reply);
@@ -1122,7 +1117,7 @@ async fn chat_work_with_profile(
                 serde_json::json!({"error":LEGACY_CONTEXT_ERROR}),
             ));
         }
-        change_phase(&state, &db, &scope, &id, Phase::Closing).await?;
+        change_phase(&state, &db, &scope, &id, &backend, Phase::Closing).await?;
         schedule_close_out(state, db, scope, id, bridge);
         return Err((
             StatusCode::CONFLICT,
@@ -1156,6 +1151,7 @@ async fn chat_work_with_profile(
                 &scope,
                 cli,
                 &bridge,
+                bridge_url.expect("native tool URL validated before admission"),
                 &id,
                 &input.id,
                 native::Purpose::Reply,
@@ -1217,12 +1213,12 @@ async fn chat_work_with_profile(
     let tokens = match measured {
         Ok(tokens) => tokens,
         Err(error) => {
-            tracing::error!(conversation_id = %id, error = ?error, "Could not size saved turn; preserving its actual result");
+            tracing::warn!(conversation_id = %id, error = ?error, "Could not size saved turn; preserving its actual result");
             return result;
         }
     };
     if tokens >= capacity - 20_000 {
-        change_phase(&state, &db, &scope, &id, Phase::Closing).await?;
+        change_phase(&state, &db, &scope, &id, &backend, Phase::Closing).await?;
         schedule_close_out(state, db, scope, id, bridge);
     }
     result
@@ -1455,18 +1451,19 @@ async fn finish_memu_session(
     let capacity = profile.capacity()?;
     let backend = profile.backend();
     profile.check_binding(&conv)?;
-    match &profile {
+    let bridge_url = match &profile {
         AtomicChatProfileResponse::Api { .. } => {
-            reconcile_api(&state, &db, conversation_id).await?
+            reconcile_api(&state, &db, conversation_id).await?;
+            None
         }
         AtomicChatProfileResponse::ClaudeCode { .. } => {
-            bridge
+            let url = bridge
                 .local_url()
                 .map_err(|error| (StatusCode::CONFLICT, serde_json::json!({"error":error})))?;
             native::reconcile(&state, &db, &memu_session, bridge, conversation_id, work).await?;
-            native::drain_idle(&db, &memu_session, conversation_id, bridge, work).await?;
+            Some(url)
         }
-    }
+    };
     // Recovery may have saved the recap or recovered an ordinary assistant row.
     conv = read_chat(&db, conversation_id).await?;
     recap = existing_recap(&conv);
@@ -1507,7 +1504,15 @@ async fn finish_memu_session(
             ));
         }
     }
-    change_phase(&state, &db, &memu_session, conversation_id, Phase::Closing).await?;
+    change_phase(
+        &state,
+        &db,
+        &memu_session,
+        conversation_id,
+        &backend,
+        Phase::Closing,
+    )
+    .await?;
     if needs_recap {
         let control =
             db.0.admit_chat_turn(
@@ -1533,6 +1538,7 @@ async fn finish_memu_session(
                     &memu_session,
                     cli,
                     bridge,
+                    bridge_url.expect("native tool URL validated before admission"),
                     conversation_id,
                     &control.id,
                     native::Purpose::Recap,
@@ -1567,7 +1573,15 @@ async fn finish_memu_session(
     let result = post_atomic_session_end(&memu_session, conversation_id, recap, rows).await;
     match result {
         Ok(result) => {
-            change_phase(&state, &db, &memu_session, conversation_id, Phase::Closed).await?;
+            change_phase(
+                &state,
+                &db,
+                &memu_session,
+                conversation_id,
+                &backend,
+                Phase::Closed,
+            )
+            .await?;
             Ok(result)
         }
         Err(error) => {
