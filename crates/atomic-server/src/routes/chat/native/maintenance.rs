@@ -70,10 +70,19 @@ async fn submit(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
         .timeout(Duration::from_secs(30)).send().await.map_err(failure)?;
     if !response.status().is_success() {
         let code = response.status();
-        let error = format!("Native maintenance was not confirmed ({code}): {}. Reload to recover this attempt.",
-                            response.text().await.map_err(failure)?);
         if code == reqwest::StatusCode::CONFLICT {
-            // MCP's 409 is an admission refusal, not a lost completion response.
+            // A resend may be refused while its original handoff still owns work.
+            let observed = fetch_status(scope, id, None).await.map_err(failure)?;
+            if let Some(receipt) = observed.maintenance.filter(|receipt| receipt.attempt_id == pending.attempt_id) {
+                return apply(state, db, scope, id, saved, receipt, observed.context).await;
+            }
+        }
+        let error = if code.is_client_error() {
+            format!("Native maintenance was refused ({code}). Check the memory server configuration and Atomic installation before trying cleanup again. Saved dialogue is unchanged.")
+        } else {
+            format!("Native maintenance could not be confirmed ({code}). Reload to recover the same attempt; saved dialogue is unchanged.")
+        };
+        if code.is_client_error() {
             let mut refused = pending.clone();
             refused.status = Status::Failed;
             refused.error = Some(error.clone());
@@ -102,15 +111,18 @@ pub(super) async fn reconcile(state: &AppState, db: &Db, scope: &MemuScope,
     if observed.writer_idle != Some(true) {
         return Err(failure("Native writer exit is not established; maintenance is retained."));
     }
-    if let Some(receipt) = observed.maintenance {
-        if receipt.attempt_id == pending.attempt_id {
-            return apply(state, db, scope, id, saved, receipt, observed.context).await;
-        }
-        if Some(&receipt.attempt_id) != pending.previous_attempt_id.as_ref() {
-            return Err(failure("Native maintenance changed outside this saved attempt; keep history and reload."));
-        }
-    } else if pending.previous_attempt_id.is_some() {
-        return Err(failure("Previous native maintenance evidence is missing; keep history and reload."));
+    if observed.maintenance.as_ref().is_some_and(|receipt| receipt.attempt_id == pending.attempt_id) {
+        return apply(state, db, scope, id, saved, observed.maintenance.unwrap(), observed.context).await;
+    }
+    if pending.status != Status::Pending {
+        let mut missing = pending.clone();
+        missing.status = Status::Failed;
+        missing.error = Some("The memory server lost an acknowledged maintenance attempt. It will not be replayed. Keep this history; use End Session if the sitting is still open.".into());
+        checkpoint(state, db, scope, id, saved, &missing, None).await?;
+        return Err(failure(missing.error.as_deref().unwrap()));
+    }
+    if observed.maintenance.as_ref().map(|receipt| &receipt.attempt_id) != pending.previous_attempt_id.as_ref() {
+        return Err(failure("Previous native maintenance evidence changed or is missing; keep history and reload."));
     }
     // No matching server claim exists: replay the saved handoff, not the cleanup
     // under a fresh ID. MCP's native/prior-attempt comparison owns admission.
@@ -192,8 +204,10 @@ mod tests {
 
     async fn observe(mock: web::Data<Mock>, query: web::Query<HashMap<String, String>>) -> HttpResponse {
         assert!(!query.contains_key("turn_id"), "maintenance reads the latest scoped basis");
+        let receipt = mock.receipt.lock().unwrap().clone();
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id", "writer_idle":true,
-            "context":context(), "maintenance":mock.receipt.lock().unwrap().clone(),
+            "context":if receipt.as_ref().is_some_and(|receipt| receipt["status"] == "blocked") { Value::Null } else { context() },
+            "maintenance":receipt,
             "turn":{"session_id":"native-id","turn_id":"user-turn","attempt_id":"native-attempt",
                 "purpose":"reply","status":"complete","initialized":true,"input_recorded":true}}))
     }
@@ -203,24 +217,44 @@ mod tests {
         let pending = saved.conversation.atomic_chat_state.unwrap().maintenance.unwrap();
         assert_eq!(pending.status, Status::Pending, "intent precedes the HTTP handoff");
         assert_eq!(body["attempt_id"], pending.attempt_id);
+        assert_eq!(body["user_id"], "TestOwner");
+        assert_eq!(body["soul_id"], "TestSoul");
+        assert_eq!(body["conversation_id"], mock.id);
+        assert_eq!(body["turn_id"], "user-turn");
+        assert_eq!(body["native_attempt_id"], "native-attempt");
+        assert_eq!(body["previous_attempt_id"], Value::Null);
+        assert_eq!(body["action"], if mock.mode.starts_with("purge") { "purge" } else { "compact" });
         let first = {
             let mut requests = mock.requests.lock().unwrap();
             requests.push((*body).clone());
             requests.len() == 1
         };
         if mock.mode == "refused" { return HttpResponse::Conflict().json(serde_json::json!({"detail":"helper unavailable"})); }
+        if mock.mode == "final_404" { return HttpResponse::NotFound().finish(); }
+        if mock.mode == "final_422" { return HttpResponse::UnprocessableEntity().json(serde_json::json!({"detail":[{"msg":"invalid request"}]})); }
         if mock.mode == "unsubmitted" && first { return HttpResponse::InternalServerError().finish(); }
-        let mut receipt = body.into_inner();
-        receipt["status"] = serde_json::json!("complete");
+        // Bind only the generated attempt ID dynamically; all other MCP fields
+        // are fixed independently of the submitted JSON.
+        let status = match mock.mode {
+            "final_conflict" | "running_missing" => "running",
+            "final_prepared_missing" => "prepared", "blocked" => "blocked", _ => "complete",
+        };
+        let mut receipt = serde_json::json!({"attempt_id":pending.attempt_id,
+            "native_attempt_id":"native-attempt", "turn_id":"user-turn", "status":status,
+            "action":if mock.mode.starts_with("purge") { "purge" } else { "compact" },
+            "error":if status == "blocked" { Some("Native history changed") } else { None }});
         if mock.mode == "wrong_binding" { receipt["native_attempt_id"] = serde_json::json!("other-attempt"); }
         *mock.receipt.lock().unwrap() = Some(receipt.clone());
+        if mock.mode == "final_conflict" { return HttpResponse::Conflict().finish(); }
         if matches!(mock.mode, "lost" | "purge_lost") && first { return HttpResponse::InternalServerError().finish(); }
-        HttpResponse::Ok().json(serde_json::json!({"maintenance":receipt,"context":context()}))
+        HttpResponse::Ok().json(serde_json::json!({"maintenance":receipt,
+            "context":if status == "blocked" { Value::Null } else { context() }}))
     }
 
     #[actix_web::test]
     async fn durable_handoff_recovers_without_new_ids_or_token_savings() {
-        for mode in ["complete", "lost", "unsubmitted", "refused", "wrong_binding", "purge", "purge_lost"] {
+        for mode in ["complete", "lost", "unsubmitted", "refused", "wrong_binding", "purge", "purge_lost",
+                     "final", "final_404", "final_422", "final_conflict", "running_missing", "final_prepared_missing", "blocked"] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
             let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
@@ -232,9 +266,12 @@ mod tests {
             let conv = db.0.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
             let id = conv.conversation.id;
             db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Open).await.unwrap();
-            let kind = if mode.starts_with("purge") { Kind::Purge } else { Kind::Ordinary };
-            if kind == Kind::Purge {
+            let kind = if mode.starts_with("purge") { Kind::Purge }
+                else if mode.starts_with("final") { Kind::Final } else { Kind::Ordinary };
+            if kind != Kind::Ordinary {
                 db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closing).await.unwrap();
+            }
+            if kind == Kind::Purge {
                 db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closed).await.unwrap();
             }
             let mock = web::Data::new(Mock { mode, db:Db(db.0.clone(), db.1.clone()), id:id.clone(),
@@ -252,20 +289,39 @@ mod tests {
             let bridge = ChatToolBridge::default();
             let work = lock_conversation(&db, &id, Some(&scope)).await.unwrap();
             let result = run(&state, &db, &scope, &bridge, &id, kind, &work).await;
-            assert_eq!(result.is_ok(), matches!(mode, "complete" | "purge"));
+            assert_eq!(result.is_ok(), matches!(mode, "complete" | "purge" | "final" | "blocked"));
             let before = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
             if matches!(mode, "lost" | "unsubmitted" | "purge_lost") {
                 assert_eq!(before.maintenance.as_ref().unwrap().status, Status::Pending);
                 reconcile(&state, &db, &scope, &bridge, &id, &work).await.unwrap();
             } else if mode == "wrong_binding" {
                 assert!(reconcile(&state, &db, &scope, &bridge, &id, &work).await.is_err());
+            } else if mode == "final_conflict" {
+                assert_eq!(before.maintenance.as_ref().unwrap().status, Status::Running);
+                assert!(before.maintenance.as_ref().unwrap().final_used);
+                mock.receipt.lock().unwrap().as_mut().unwrap()["status"] = serde_json::json!("complete");
+                reconcile(&state, &db, &scope, &bridge, &id, &work).await.unwrap();
+            } else if matches!(mode, "running_missing" | "final_prepared_missing") {
+                assert!(matches!(before.maintenance.as_ref().unwrap().status, Status::Running | Status::Prepared));
+                *mock.receipt.lock().unwrap() = None;
+                assert!(reconcile(&state, &db, &scope, &bridge, &id, &work).await.is_err());
             }
             let saved = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
             let maintenance = saved.maintenance.as_ref().unwrap();
             assert_eq!(maintenance.attempt_id, before.maintenance.as_ref().unwrap().attempt_id);
-            assert_eq!(saved.phase, if kind == Kind::Purge { Phase::Closed } else { Phase::Open });
+            assert_eq!(saved.phase, match kind { Kind::Purge => Phase::Closed, Kind::Final => Phase::Closing, _ => Phase::Open });
             assert_eq!(maintenance.status, match mode {
-                "refused" => Status::Failed, "wrong_binding" => Status::Pending, _ => Status::Complete });
+                "refused" | "final_404" | "final_422" | "running_missing" | "final_prepared_missing" => Status::Failed,
+                "wrong_binding" => Status::Pending, "blocked" => Status::Blocked, _ => Status::Complete });
+            assert_eq!(maintenance.final_used, kind == Kind::Final && !matches!(mode, "final_404" | "final_422"));
+            if matches!(mode, "running_missing" | "final_prepared_missing" | "blocked") {
+                assert_eq!(saved.native_context_tokens, None);
+            }
+            if matches!(mode, "refused" | "final_404" | "final_422") {
+                let error = maintenance.error.as_deref().unwrap();
+                assert!(!error.contains('{') && !error.contains("Reload to recover"));
+                reconcile(&state, &db, &scope, &bridge, &id, &work).await.unwrap();
+            }
             if maintenance.status == Status::Complete {
                 assert_eq!(saved.native_context_tokens, Some(9000));
                 assert_eq!(maintenance.awaiting_measurement, kind == Kind::Ordinary);

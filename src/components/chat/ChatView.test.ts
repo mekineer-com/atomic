@@ -71,6 +71,14 @@ it('renders a reopened saved recap as a summary in a read-only sitting', async (
     expect(container.textContent).toContain('Saved recap text');
     expect(input.props).toBeNull();
     await act(async () => useChatStore.setState({ currentConversation: { ...current,
+      atomic_chat_state: { backend: 'claude_code', phase: 'open', active: null, maintenance: {
+        attempt_id: 'cleanup', kind: 'ordinary', status: 'blocked', error: 'Native history changed',
+        ordinary_disabled: false, awaiting_measurement: false, final_used: false,
+      } } } }));
+    expect(container.textContent).toContain('Use End Session to close out');
+    expect(input.props!.disabled).toBe(true);
+    expect(container.textContent).not.toContain('Retry reply');
+    await act(async () => useChatStore.setState({ currentConversation: { ...current,
       atomic_chat_state: { ...current.atomic_chat_state!, phase: 'closing' } }, isEndingSession: false }));
     expect(container.textContent).toContain('Use Retry close-out to finish saving');
     await act(async () => useChatStore.setState({ currentConversation: { ...current,

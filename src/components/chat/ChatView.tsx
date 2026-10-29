@@ -254,6 +254,9 @@ export function ChatView() {
             {lifecycle.maintenance.error ?? (lifecycle.maintenance.kind === 'purge'
               ? 'Removing native session files for this closed sitting. Reload to recover unfinished cleanup.'
               : 'Cleaning older tool and thinking content; dialogue is retained. Reload to recover unfinished cleanup.')}
+            {lifecycle.maintenance.status === 'blocked' && (lifecycle.phase === 'open'
+              ? ' Use End Session to close out from this history.'
+              : lifecycle.phase === 'closing' ? ' Use Retry close-out to finish this sitting.' : '')}
           </p>
         )}
 
