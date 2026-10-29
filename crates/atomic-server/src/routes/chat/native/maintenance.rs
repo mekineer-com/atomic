@@ -128,6 +128,11 @@ pub(crate) async fn run(state: &AppState, db: &Db, scope: &MemuScope,
     let saved = conv.conversation.atomic_chat_state.as_ref()
         .filter(|saved| saved.backend == Backend::ClaudeCode)
         .ok_or_else(|| failure("Maintenance requires a Claude Code sitting"))?;
+    if kind == Kind::Purge && saved.phase == Phase::Closed
+        && saved.maintenance.as_ref().is_some_and(|prior| prior.kind == Kind::Purge && prior.status == Status::Complete)
+    {
+        return Ok(());
+    }
     let phase = match kind { Kind::Ordinary => Phase::Open, Kind::Final => Phase::Closing, Kind::Purge => Phase::Closed };
     if saved.phase != phase || saved.active.as_ref().is_some_and(|turn| turn.status == TurnStatus::Running)
         || saved.recap.as_ref().is_some_and(|recap| matches!(recap.outcome, RecapOutcome::Running))
@@ -209,13 +214,13 @@ mod tests {
         receipt["status"] = serde_json::json!("complete");
         if mock.mode == "wrong_binding" { receipt["native_attempt_id"] = serde_json::json!("other-attempt"); }
         *mock.receipt.lock().unwrap() = Some(receipt.clone());
-        if mock.mode == "lost" && first { return HttpResponse::InternalServerError().finish(); }
+        if matches!(mock.mode, "lost" | "purge_lost") && first { return HttpResponse::InternalServerError().finish(); }
         HttpResponse::Ok().json(serde_json::json!({"maintenance":receipt,"context":context()}))
     }
 
     #[actix_web::test]
     async fn durable_handoff_recovers_without_new_ids_or_token_savings() {
-        for mode in ["complete", "lost", "unsubmitted", "refused", "wrong_binding"] {
+        for mode in ["complete", "lost", "unsubmitted", "refused", "wrong_binding", "purge", "purge_lost"] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
             let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
@@ -227,6 +232,11 @@ mod tests {
             let conv = db.0.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
             let id = conv.conversation.id;
             db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Open).await.unwrap();
+            let kind = if mode.starts_with("purge") { Kind::Purge } else { Kind::Ordinary };
+            if kind == Kind::Purge {
+                db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closing).await.unwrap();
+                db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closed).await.unwrap();
+            }
             let mock = web::Data::new(Mock { mode, db:Db(db.0.clone(), db.1.clone()), id:id.clone(),
                 requests:Mutex::new(Vec::new()), receipt:Mutex::new(None) });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -241,10 +251,10 @@ mod tests {
             actix_web::rt::spawn(server);
             let bridge = ChatToolBridge::default();
             let work = lock_conversation(&db, &id, Some(&scope)).await.unwrap();
-            let result = run(&state, &db, &scope, &bridge, &id, Kind::Ordinary, &work).await;
-            assert_eq!(result.is_ok(), mode == "complete");
+            let result = run(&state, &db, &scope, &bridge, &id, kind, &work).await;
+            assert_eq!(result.is_ok(), matches!(mode, "complete" | "purge"));
             let before = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
-            if matches!(mode, "lost" | "unsubmitted") {
+            if matches!(mode, "lost" | "unsubmitted" | "purge_lost") {
                 assert_eq!(before.maintenance.as_ref().unwrap().status, Status::Pending);
                 reconcile(&state, &db, &scope, &bridge, &id, &work).await.unwrap();
             } else if mode == "wrong_binding" {
@@ -253,13 +263,15 @@ mod tests {
             let saved = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
             let maintenance = saved.maintenance.as_ref().unwrap();
             assert_eq!(maintenance.attempt_id, before.maintenance.as_ref().unwrap().attempt_id);
-            assert_eq!(saved.phase, Phase::Open);
+            assert_eq!(saved.phase, if kind == Kind::Purge { Phase::Closed } else { Phase::Open });
             assert_eq!(maintenance.status, match mode {
                 "refused" => Status::Failed, "wrong_binding" => Status::Pending, _ => Status::Complete });
             if maintenance.status == Status::Complete {
                 assert_eq!(saved.native_context_tokens, Some(9000));
-                assert!(maintenance.awaiting_measurement);
-                assert!(run(&state, &db, &scope, &bridge, &id, Kind::Ordinary, &work).await.is_err());
+                assert_eq!(maintenance.awaiting_measurement, kind == Kind::Ordinary);
+                assert_eq!(run(&state, &db, &scope, &bridge, &id, kind, &work).await.is_ok(), kind == Kind::Purge);
+                let repeated = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
+                assert_eq!(repeated.maintenance.as_ref().unwrap().attempt_id, maintenance.attempt_id);
             }
             let requests = mock.requests.lock().unwrap();
             assert_eq!(requests.len(), if mode == "unsubmitted" { 2 } else { 1 });
