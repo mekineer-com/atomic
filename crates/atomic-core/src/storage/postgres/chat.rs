@@ -553,6 +553,18 @@ impl ChatStore for PostgresStorage {
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
     }
 
+    async fn set_chat_maintenance(
+        &self, conversation_id: &str, user_id: &str, soul_id: &str,
+        expected: &AtomicChatState, maintenance: &AtomicChatMaintenance, context_tokens: Option<usize>,
+    ) -> StorageResult<()> {
+        let mut tx = self.pool.begin().await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        let current = owned_chat_state(&mut tx, &self.db_id, conversation_id, user_id, soul_id).await?;
+        let state = crate::chat::changed_chat_maintenance(current, expected, maintenance, context_tokens)?;
+        write_chat_state(&mut tx, &self.db_id, conversation_id, Some(&state)).await?;
+        tx.commit().await.map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))
+    }
+
     async fn create_conversation(
         &self,
         tag_ids: &[String],

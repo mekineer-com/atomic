@@ -60,6 +60,15 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         crate::chat::set_chat_phase(&conn, conversation_id, user_id, soul_id, backend, phase)
     }
+    pub(crate) fn set_chat_maintenance_sync(
+        &self, conversation_id: &str, user_id: &str, soul_id: &str,
+        expected: &AtomicChatState, maintenance: &AtomicChatMaintenance, context_tokens: Option<usize>,
+    ) -> StorageResult<()> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::chat::set_chat_maintenance(&conn, conversation_id, user_id, soul_id,
+                                         expected, maintenance, context_tokens)
+    }
+
     pub(crate) fn create_conversation_sync(
         &self,
         tag_ids: &[String],
@@ -329,6 +338,19 @@ impl ChatStore for SqliteStorage {
         .await
         .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
     }
+    async fn set_chat_maintenance(
+        &self, conversation_id: &str, user_id: &str, soul_id: &str,
+        expected: &AtomicChatState, maintenance: &AtomicChatMaintenance, context_tokens: Option<usize>,
+    ) -> StorageResult<()> {
+        let (storage, conversation_id, user_id, soul_id, expected, maintenance) = (
+            self.clone(), conversation_id.to_string(), user_id.to_string(), soul_id.to_string(),
+            expected.clone(), maintenance.clone(),
+        );
+        tokio::task::spawn_blocking(move || storage.set_chat_maintenance_sync(
+            &conversation_id, &user_id, &soul_id, &expected, &maintenance, context_tokens))
+            .await.map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
     async fn save_chat_reply(
         &self,
         conversation_id: &str,

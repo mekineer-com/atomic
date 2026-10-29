@@ -648,6 +648,16 @@ pub trait ChatStore: Send + Sync {
         phase: &AtomicChatPhase,
     ) -> StorageResult<()>;
 
+    async fn set_chat_maintenance(
+        &self,
+        conversation_id: &str,
+        user_id: &str,
+        soul_id: &str,
+        expected: &AtomicChatState,
+        maintenance: &AtomicChatMaintenance,
+        context_tokens: Option<usize>,
+    ) -> StorageResult<()>;
+
     /// Create a new conversation with optional tag scope.
     async fn create_conversation(
         &self,

@@ -29,6 +29,9 @@ export interface AtomicChatState {
   backend: 'api' | 'claude_code';
   phase: 'open' | 'closing' | 'closed';
   context_window_tokens?: number | null;
+  maintenance?: { attempt_id: string; kind: 'ordinary' | 'final' | 'purge';
+    status: 'pending' | 'running' | 'prepared' | 'complete' | 'failed' | 'blocked';
+    error: string | null; ordinary_disabled: boolean; awaiting_measurement: boolean; final_used: boolean } | null;
   active: { user_message_id: string; status: 'running' | 'failed' | 'uncertain'; error: string | null } | null;
   recap?: { request_message_id: string; outcome:
     | { status: 'running' }
@@ -39,6 +42,7 @@ export interface AtomicChatState {
 
 export function chatRetryMessageId(conversation: Conversation, messages: ChatMessageWithContext[]): string | null {
   const state = conversation.atomic_chat_state;
+  if (chatMaintenancePending(state) || state?.maintenance?.status === 'blocked') return null;
   if (state ? state.phase !== 'open' : !(conversation.user_id && conversation.soul_id)) return null;
   const active = state?.active;
   if (active?.status === 'uncertain') return null;
@@ -50,6 +54,10 @@ export function chatRetryMessageId(conversation: Conversation, messages: ChatMes
     || (typeof call.tool_output === 'object' && call.tool_output !== null
       && 'outcome_unknown' in call.tool_output && call.tool_output.outcome_unknown === true))) return null;
   return active?.user_message_id ?? user?.id ?? null;
+}
+
+export function chatMaintenancePending(state?: AtomicChatState | null): boolean {
+  return state?.maintenance != null && ['pending', 'running', 'prepared'].includes(state.maintenance.status);
 }
 
 function chatIsRunning(state?: AtomicChatState | null): boolean {

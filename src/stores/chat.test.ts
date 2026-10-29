@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { chatRetryMessageId, useChatStore, type ChatMessageWithContext } from './chat';
+import { chatMaintenancePending, chatRetryMessageId, useChatStore, type ChatMessageWithContext, type AtomicChatState } from './chat';
 import { useUIStore } from './ui';
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -68,6 +68,19 @@ it('recognizes legacy unanswered input without offering standalone or recap Retr
   expect(chatRetryMessageId(conversation, [{ ...user,
     content: 'This Atomic session is ending. Write a recap of your activity' }])).toBeNull();
   expect(chatRetryMessageId({ ...conversation, atomic_chat_state: { backend: 'api', phase: 'open', active: null } }, [user])).toBe(user.id);
+});
+
+it('gates native Retry during unresolved maintenance without confusing it with a reply', () => {
+  const state: AtomicChatState = { backend: 'claude_code', phase: 'open',
+    active: { user_message_id: 'saved-user', status: 'failed', error: 'native failure' },
+    maintenance: { attempt_id: 'cleanup', kind: 'ordinary', status: 'pending', error: null,
+      ordinary_disabled: false, awaiting_measurement: false, final_used: false } };
+  const current = { ...useChatStore.getState().currentConversation!, atomic_chat_state: state };
+  for (const status of ['pending', 'running', 'prepared', 'blocked', 'failed', 'complete'] as const) {
+    state.maintenance!.status = status;
+    expect(chatMaintenancePending(state)).toBe(['pending', 'running', 'prepared'].includes(status));
+    expect(chatRetryMessageId(current, [])).toBe(['failed', 'complete'].includes(status) ? 'saved-user' : null);
+  }
 });
 
 it.each([true, false])('refreshes Closing state after End fails, initiallyBound=%s', async (initiallyBound) => {

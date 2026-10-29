@@ -759,7 +759,7 @@ pub async fn get_conversation(
                     .atomic_chat_state
                     .as_ref()
                     .is_some_and(|saved| {
-                        saved.backend == Backend::ClaudeCode && saved.phase != Phase::Closed
+                        saved.backend == Backend::ClaudeCode
                     })
             }) {
                 let (key, lock) = conversation_lock(&db, &id).await;

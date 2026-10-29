@@ -242,7 +242,7 @@ macro_rules! impl_spawn_arg_copy {
         )*
     };
 }
-impl_spawn_arg_copy!(i32, usize, f32, bool, Option<i32>, Option<bool>);
+impl_spawn_arg_copy!(i32, usize, f32, bool, Option<i32>, Option<bool>, Option<usize>);
 
 // ---- ReborrowArg impls ----
 
@@ -299,7 +299,7 @@ macro_rules! impl_reborrow_copy {
         )*
     };
 }
-impl_reborrow_copy!(i32, usize, f32, bool, Option<i32>, Option<bool>);
+impl_reborrow_copy!(i32, usize, f32, bool, Option<i32>, Option<bool>, Option<usize>);
 
 // Struct types: sync method takes `&Struct`, owned is `Struct`, reborrow is `&Struct`.
 macro_rules! impl_reborrow_struct {
@@ -316,6 +316,8 @@ impl_reborrow_struct!(
     AtomicChatBackend,
     AtomicChatPhase,
     AtomicChatRequest,
+    AtomicChatState,
+    AtomicChatMaintenance,
     CreateAtomRequest,
     UpdateAtomRequest,
     ListAtomsParams,
@@ -588,6 +590,8 @@ dispatch! {
         => sqlite: fail_chat_turn_sync, pg_trait: ChatStore, pg_method: fail_chat_turn;
     fn set_chat_phase_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, backend: &AtomicChatBackend, phase: &AtomicChatPhase) -> Result<(), AtomicCoreError>
         => sqlite: set_chat_phase_sync, pg_trait: ChatStore, pg_method: set_chat_phase;
+    fn set_chat_maintenance_sync(&self, conversation_id: &str, user_id: &str, soul_id: &str, expected: &AtomicChatState, maintenance: &AtomicChatMaintenance, context_tokens: Option<usize>) -> Result<(), AtomicCoreError>
+        => sqlite: set_chat_maintenance_sync, pg_trait: ChatStore, pg_method: set_chat_maintenance;
 
     // ---- WikiStore ----
     fn get_wiki_sync(&self, tag_id: &str) -> Result<Option<WikiArticleWithCitations>, AtomicCoreError>

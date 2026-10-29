@@ -2759,6 +2759,15 @@ impl AtomicCore {
             .await
     }
 
+    /// Maintenance-only checkpoint under the sitting lock; never replaces dialogue.
+    pub async fn set_chat_maintenance(
+        &self, conversation_id: &str, user_id: &str, soul_id: &str,
+        expected: &AtomicChatState, maintenance: &AtomicChatMaintenance, context_tokens: Option<usize>,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage.set_chat_maintenance_sync(conversation_id, user_id, soul_id,
+                                               expected, maintenance, context_tokens).await
+    }
+
     /// Update a conversation (title, archive status)
     pub async fn update_conversation(
         &self,

@@ -63,6 +63,14 @@ it('renders a reopened saved recap as a summary in a read-only sitting', async (
     expect(input.props).toBeNull();
     const current = useChatStore.getState().currentConversation!;
     await act(async () => useChatStore.setState({ currentConversation: { ...current,
+      atomic_chat_state: { ...current.atomic_chat_state!, backend: 'claude_code', maintenance: {
+        attempt_id: 'purge', kind: 'purge', status: 'failed', error: 'Native files could not be removed',
+        ordinary_disabled: false, awaiting_measurement: false, final_used: false,
+      } } } }));
+    expect(container.textContent).toContain('Native files could not be removed');
+    expect(container.textContent).toContain('Saved recap text');
+    expect(input.props).toBeNull();
+    await act(async () => useChatStore.setState({ currentConversation: { ...current,
       atomic_chat_state: { ...current.atomic_chat_state!, phase: 'closing' } }, isEndingSession: false }));
     expect(container.textContent).toContain('Use Retry close-out to finish saving');
     await act(async () => useChatStore.setState({ currentConversation: { ...current,

@@ -1,5 +1,8 @@
 //! Dormant native execution; admission/recovery stays in the sitting lifecycle.
 
+mod maintenance;
+pub(super) use maintenance::run as maintain;
+
 use super::*;
 use crate::mcp::chat::{ChatToolBridge, CHAT_TOOLS_PATH};
 use atomic_core::{
@@ -110,6 +113,7 @@ pub(super) struct NativeStatus {
     pub writer_idle: Option<bool>,
     pub turn: Option<NativeReceipt>,
     pub context: Option<NativeContext>,
+    pub maintenance: Option<maintenance::Receipt>,
 }
 
 #[derive(Deserialize)]
@@ -261,6 +265,13 @@ fn input_plan(
         return Err(refused("Native writer exit is not established. Keep this history and reload before continuing."));
     }
     let recap = matches!(request, ChatRequest::Recap { .. });
+    if observed.maintenance.as_ref().is_some_and(|maintenance| {
+        matches!(maintenance.status, atomic_core::AtomicChatMaintenanceStatus::Running
+            | atomic_core::AtomicChatMaintenanceStatus::Prepared)
+            || (maintenance.status == atomic_core::AtomicChatMaintenanceStatus::Blocked && !recap)
+    }) {
+        return Err(refused("Native maintenance is unresolved; only blocked history may proceed to close-out."));
+    }
     if observed.turn.is_none() {
         let retry = matches!(request, ChatRequest::Retry { .. });
         // Missing MCP evidence proves nothing. Only affirmative saved input
@@ -377,14 +388,18 @@ pub(super) async fn status(
     id: &str,
     turn_id: &str,
 ) -> Result<NativeStatus, String> {
+    fetch_status(scope, id, Some(turn_id)).await
+}
+
+async fn fetch_status(scope: &MemuScope, id: &str, turn_id: Option<&str>) -> Result<NativeStatus, String> {
+    let mut query = vec![("user_id", scope.user_id.as_str()),
+                         ("soul_id", scope.soul_id.as_str()), ("conversation_id", id)];
+    if let Some(turn_id) = turn_id {
+        query.push(("turn_id", turn_id));
+    }
     let response = reqwest::Client::new()
         .get(format!("{}/integration/atomic/chat/status", scope.base_url))
-        .query(&[
-            ("user_id", scope.user_id.as_str()),
-            ("soul_id", scope.soul_id.as_str()),
-            ("conversation_id", id),
-            ("turn_id", turn_id),
-        ])
+        .query(&query)
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -426,6 +441,7 @@ pub(super) async fn reconcile(
             serde_json::json!({"error":"Recovery requires this sitting's lock"}),
         ));
     }
+    maintenance::reconcile(state, db, scope, bridge, id, work).await?;
     let conv = read_chat(db, id).await?;
     if !conversation_matches(&conv, scope) {
         return Err((

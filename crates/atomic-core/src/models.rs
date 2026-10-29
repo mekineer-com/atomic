@@ -867,6 +867,50 @@ pub struct AtomicChatNativeOutcome {
     pub context_tokens: Option<usize>,
 }
 
+/// The lifecycle's reason for requesting native file maintenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum AtomicChatMaintenanceKind {
+    Ordinary,
+    Final,
+    Purge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum AtomicChatMaintenanceStatus {
+    Pending,
+    Running,
+    Prepared,
+    Complete,
+    Failed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AtomicChatMaintenance {
+    pub attempt_id: String,
+    pub native_attempt_id: String,
+    pub turn_id: String,
+    pub previous_attempt_id: Option<String>,
+    pub kind: AtomicChatMaintenanceKind,
+    pub status: AtomicChatMaintenanceStatus,
+    pub error: Option<String>,
+    pub ordinary_disabled: bool,
+    pub awaiting_measurement: bool,
+    pub final_used: bool,
+}
+
+impl AtomicChatMaintenance {
+    pub fn unresolved(&self) -> bool {
+        matches!(self.status, AtomicChatMaintenanceStatus::Pending
+            | AtomicChatMaintenanceStatus::Running | AtomicChatMaintenanceStatus::Prepared)
+    }
+}
+
 /// Durable admission, not a process-local claim that a native writer is idle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -883,6 +927,8 @@ pub struct AtomicChatState {
     /// Estimated native occupancy; unknown is not the last raw usage or zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_context_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<AtomicChatMaintenance>,
 }
 
 /// Chat conversation

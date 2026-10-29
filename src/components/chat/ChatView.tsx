@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { MessageSquare } from 'lucide-react';
-import { chatRetryMessageId, useChatStore, type Conversation, type ChatMessageWithContext } from '../../stores/chat';
+import { chatMaintenancePending, chatRetryMessageId, useChatStore, type Conversation, type ChatMessageWithContext } from '../../stores/chat';
 import { useUIStore, type TabEntry } from '../../stores/ui';
 import { useChatEvents } from '../../hooks/useChatEvents';
 import { useContentSearch } from '../../hooks';
@@ -66,7 +66,9 @@ export function ChatView() {
   });
 
   const [isSending, setIsSending] = useState(false);
-  const inputBlocked = isStreaming || isSending || Boolean(lifecycle && (lifecycle.phase !== 'open' || lifecycle.active)) || Boolean(integrated && retryMessageId);
+  const inputBlocked = isStreaming || isSending || chatMaintenancePending(lifecycle)
+    || lifecycle?.maintenance?.status === 'blocked'
+    || Boolean(lifecycle && (lifecycle.phase !== 'open' || lifecycle.active)) || Boolean(integrated && retryMessageId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -245,6 +247,14 @@ export function ChatView() {
             searchQuery={isSearchOpen ? searchQuery : ''}
             highlightText={highlightText}
           />
+        )}
+
+        {lifecycle?.maintenance && lifecycle.maintenance.status !== 'complete' && (
+          <p role="status" className="text-sm text-[var(--color-text-secondary)]">
+            {lifecycle.maintenance.error ?? (lifecycle.maintenance.kind === 'purge'
+              ? 'Removing native session files for this closed sitting. Reload to recover unfinished cleanup.'
+              : 'Cleaning older tool and thinking content; dialogue is retained. Reload to recover unfinished cleanup.')}
+          </p>
         )}
 
         {lifecycle?.phase === 'closing' && lifecycle.recap?.outcome.status !== 'complete' && (

@@ -418,6 +418,7 @@ pub(crate) fn bound_chat_state(
             context_window_tokens: None,
             native_usage: None,
             native_context_tokens: None,
+            maintenance: None,
         },
     };
     if state.backend != *backend {
@@ -597,6 +598,9 @@ pub(crate) fn changed_chat_phase(
     if state.phase == *phase {
         return Ok(state);
     }
+    if state.maintenance.as_ref().is_some_and(|maintenance| maintenance.unresolved()) {
+        return Err(AtomicCoreError::Conflict("Reconcile native maintenance before changing the sitting phase".into()));
+    }
     match (state.phase, *phase) {
         (AtomicChatPhase::Open, AtomicChatPhase::Closing) => {}
         (AtomicChatPhase::Closing, AtomicChatPhase::Closed)
@@ -682,6 +686,12 @@ pub(crate) fn prepared_chat_state(
     let role = last.map(|message| message.role.as_str());
     let mut state = bound_chat_state(current, backend, role)?;
     let conflict = |message: &str| AtomicCoreError::Conflict(message.to_string());
+    if state.maintenance.as_ref().is_some_and(|maintenance| maintenance.unresolved()
+        || (maintenance.status == crate::AtomicChatMaintenanceStatus::Blocked
+            && !matches!(request, AtomicChatRequest::Recap { .. })))
+    {
+        return Err(conflict("Native maintenance is unresolved. Reload before continuing; blocked history can only close out."));
+    }
     match request {
         AtomicChatRequest::New { .. } => {
             state = admitted_chat_state(Some(state), backend, role)?;
@@ -923,6 +933,37 @@ pub fn fail_chat_turn(
     let mut state = stored_chat_state(&tx, conversation_id)?
         .ok_or_else(|| AtomicCoreError::Conflict("No admitted chat turn".to_string()))?;
     failed_chat_state(&mut state, user_message_id, error, uncertain, native_outcome)?;
+    write_chat_state(&tx, conversation_id, Some(&state))?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub(crate) fn changed_chat_maintenance(
+    current: Option<AtomicChatState>,
+    expected: &AtomicChatState,
+    maintenance: &crate::AtomicChatMaintenance,
+    context_tokens: Option<usize>,
+) -> Result<AtomicChatState, AtomicCoreError> {
+    let mut state = current.filter(|state| state == expected
+        && state.backend == AtomicChatBackend::ClaudeCode)
+        .ok_or_else(|| AtomicCoreError::Conflict("Native sitting changed before maintenance checkpoint".into()))?;
+    state.maintenance = Some(maintenance.clone());
+    state.native_context_tokens = context_tokens;
+    Ok(state)
+}
+
+pub fn set_chat_maintenance(
+    conn: &Connection,
+    conversation_id: &str,
+    user_id: &str,
+    soul_id: &str,
+    expected: &AtomicChatState,
+    maintenance: &crate::AtomicChatMaintenance,
+    context_tokens: Option<usize>,
+) -> Result<(), AtomicCoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let current = owned_chat_state(&tx, conversation_id, user_id, soul_id)?;
+    let state = changed_chat_maintenance(current, expected, maintenance, context_tokens)?;
     write_chat_state(&tx, conversation_id, Some(&state))?;
     tx.commit()?;
     Ok(())
@@ -1671,6 +1712,46 @@ mod tests {
             "backend":"api", "phase":"open", "active":null
         })).unwrap();
         assert!(old.native_usage.is_none());
+        assert!(old.maintenance.is_none());
+    }
+
+    #[test]
+    fn maintenance_checkpoint_is_scoped_cas_and_preserves_dialogue_and_phase() {
+        use crate::{AtomicChatMaintenance as Maintenance, AtomicChatMaintenanceStatus as Status};
+        let (db, _file) = setup_db();
+        let conn = db.conn.lock().unwrap();
+        let conv = create_conversation(&conn, &[], None, Some(("TestOwner", "TestSoul"))).unwrap();
+        let id = &conv.conversation.id;
+        set_chat_phase(&conn, id, "TestOwner", "TestSoul", &AtomicChatBackend::ClaudeCode, &AtomicChatPhase::Open).unwrap();
+        save_message(&conn, id, "system", "fictional Presence").unwrap();
+        let saved = stored_chat_state(&conn, id).unwrap().unwrap();
+        let pending: Maintenance = serde_json::from_value(serde_json::json!({
+            "attempt_id":"cleanup", "native_attempt_id":"native", "turn_id":"turn", "previous_attempt_id":null,
+            "kind":"ordinary", "status":"pending", "error":null,
+            "ordinary_disabled":false, "awaiting_measurement":false, "final_used":false
+        })).unwrap();
+        assert!(set_chat_maintenance(&conn, id, "OtherOwner", "TestSoul", &saved, &pending, Some(100)).is_err());
+        set_chat_maintenance(&conn, id, "TestOwner", "TestSoul", &saved, &pending, Some(100)).unwrap();
+        assert!(set_chat_maintenance(&conn, id, "TestOwner", "TestSoul", &saved, &pending, None).is_err());
+        let mut current = stored_chat_state(&conn, id).unwrap().unwrap();
+        assert_eq!(current.phase, AtomicChatPhase::Open);
+        assert_eq!(current.native_context_tokens, Some(100));
+        assert_eq!(get_messages_with_context(&conn, id).unwrap()[0].message.content, "fictional Presence");
+        assert!(changed_chat_phase(current.clone(), &AtomicChatPhase::Closing).is_err());
+        let request = AtomicChatRequest::New { content:"new input".into(), page_context:None, canvas_context:None };
+        assert!(prepared_chat_state(Some(current.clone()), &AtomicChatBackend::ClaudeCode, None,
+                                    &request, 128000, false).is_err());
+        current.maintenance.as_mut().unwrap().status = Status::Blocked;
+        assert!(prepared_chat_state(Some(current.clone()), &AtomicChatBackend::ClaudeCode, None,
+                                    &request, 128000, false).is_err());
+        current.phase = AtomicChatPhase::Closing;
+        assert!(prepared_chat_state(Some(current.clone()), &AtomicChatBackend::ClaudeCode, None,
+            &AtomicChatRequest::Recap { instruction:"fictional recap".into() }, 128000, false).is_ok());
+        let mut failed = pending;
+        failed.status = Status::Failed;
+        let stored = stored_chat_state(&conn, id).unwrap().unwrap();
+        set_chat_maintenance(&conn, id, "TestOwner", "TestSoul", &stored, &failed, None).unwrap();
+        assert_eq!(stored_chat_state(&conn, id).unwrap().unwrap().native_context_tokens, None);
     }
 
     #[test]
