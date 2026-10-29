@@ -1440,7 +1440,9 @@ async fn finish_memu_session(
         .is_some_and(|saved| saved.phase == Phase::Closed)
     {
         if conv.conversation.atomic_chat_state.as_ref().is_some_and(|saved| saved.backend == Backend::ClaudeCode) {
-            native::reconcile(&state, &db, &memu_session, bridge, conversation_id, work).await?;
+            if let Err(error) = native::reconcile(&state, &db, &memu_session, bridge, conversation_id, work).await {
+                tracing::warn!(conversation_id, error = ?error, "Closed sitting still needs native storage cleanup");
+            }
         }
         return Ok(serde_json::json!({"ok":true,"status":"already_ended"}));
     }
@@ -1575,8 +1577,10 @@ async fn finish_memu_session(
             )
             .await?;
             if backend == Backend::ClaudeCode {
-                native::maintain(&state, &db, &memu_session, bridge, conversation_id,
-                    atomic_core::AtomicChatMaintenanceKind::Purge, work).await?;
+                if let Err(error) = native::maintain(&state, &db, &memu_session, bridge, conversation_id,
+                    atomic_core::AtomicChatMaintenanceKind::Purge, work).await {
+                    tracing::warn!(conversation_id, error = ?error, "Session published and Closed; native storage cleanup remains");
+                }
             }
             Ok(result)
         }

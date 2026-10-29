@@ -28,10 +28,8 @@ fn action(kind: Kind) -> &'static str {
 }
 
 pub(crate) fn ordinary_due(saved: &AtomicChatState, capacity: usize, tokens: usize) -> bool {
-    saved.backend == Backend::ClaudeCode && saved.phase == Phase::Open && saved.active.is_none()
-        && tokens >= capacity.saturating_mul(70) / 100 && tokens < capacity.saturating_sub(20_000)
-        && saved.maintenance.as_ref().is_none_or(|prior| !prior.unresolved()
-            && !prior.ordinary_disabled && !prior.awaiting_measurement && prior.status != Status::Blocked)
+    tokens >= capacity.saturating_mul(70) / 100
+        && saved.maintenance.as_ref().is_none_or(|prior| !prior.ordinary_disabled && !prior.awaiting_measurement)
 }
 
 pub(crate) fn final_recap_used(saved: &AtomicChatState) -> bool {
@@ -62,6 +60,7 @@ async fn apply(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
     let mut next = pending.clone();
     next.status = receipt.status;
     next.error = receipt.error;
+    if next.kind == Kind::Final && next.status == Status::Failed { next.final_used = false; }
     next.awaiting_measurement = next.kind == Kind::Ordinary && next.status == Status::Complete;
     next.ordinary_disabled |= next.kind == Kind::Ordinary && matches!(next.status, Status::Failed | Status::Blocked);
     checkpoint(state, db, scope, id, saved, &next,
@@ -92,7 +91,8 @@ async fn submit(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
             }
         }
         let error = if code.is_client_error() {
-            format!("Native maintenance was refused ({code}). Check the memory server configuration and Atomic installation before trying cleanup again. Saved dialogue is unchanged.")
+            format!("Native maintenance was refused ({code}). Check the memory server configuration and Atomic installation. Saved dialogue is unchanged.{}",
+                if pending.kind == Kind::Ordinary { " Automatic cleanup is now disabled for this sitting; final close-out cleanup remains available." } else { "" })
         } else {
             format!("Native maintenance could not be confirmed ({code}). Reload to recover the same attempt; saved dialogue is unchanged.")
         };
@@ -136,7 +136,7 @@ pub(super) async fn reconcile(state: &AppState, db: &Db, scope: &MemuScope,
         let mut missing = pending.clone();
         missing.status = Status::Failed;
         missing.ordinary_disabled |= missing.kind == Kind::Ordinary;
-        missing.error = Some("The memory server lost an acknowledged maintenance attempt. It will not be replayed. Keep this history; use End Session if the sitting is still open.".into());
+        missing.error = Some("The memory server lost an acknowledged maintenance attempt. It will not be replayed. Keep this history; reload to check the sitting before retrying close-out.".into());
         checkpoint(state, db, scope, id, saved, &missing, None).await?;
         return Err(failure(missing.error.as_deref().unwrap()));
     }
@@ -180,11 +180,9 @@ pub(crate) async fn run(state: &AppState, db: &Db, scope: &MemuScope,
     }
     let observed = fetch_status(scope, id, None).await.map_err(failure)?;
     if observed.writer_idle != Some(true) { return Err(failure("Native writer exit is not established")); }
-    let Some(receipt) = observed.turn else {
-        return if kind == Kind::Purge && observed.session_id.is_none() { Ok(Status::Complete) }
-            else { Err(failure("Native maintenance has no sitting/turn evidence")) };
-    };
-    if observed.session_id.as_deref() != Some(receipt.session_id.as_str()) {
+    let empty_purge = kind == Kind::Purge && observed.session_id.is_none() && observed.turn.is_none();
+    if !empty_purge && observed.turn.as_ref().is_none_or(|receipt|
+        observed.session_id.as_deref() != Some(receipt.session_id.as_str())) {
         return Err(failure("Native maintenance sitting binding does not match"));
     }
     // Reuse the existing bridge drain; never infer tool exit from the HTTP stream.
@@ -192,12 +190,14 @@ pub(crate) async fn run(state: &AppState, db: &Db, scope: &MemuScope,
         db.0.save_chat_tool_records(id, &message_id, &records).await.map_err(core_json_error)?;
     }
     let next = Maintenance { attempt_id:uuid::Uuid::new_v4().to_string(),
-        native_attempt_id:receipt.attempt_id, turn_id:receipt.turn_id,
+        native_attempt_id:observed.turn.as_ref().map(|receipt| receipt.attempt_id.clone()).unwrap_or_default(),
+        turn_id:observed.turn.as_ref().map(|receipt| receipt.turn_id.clone()).unwrap_or_default(),
         previous_attempt_id:observed.maintenance.as_ref().map(|prior| prior.attempt_id.clone()),
-        kind, status:Status::Pending, error:None,
+        kind, status:if empty_purge { Status::Complete } else { Status::Pending }, error:None,
         ordinary_disabled:previous.is_some_and(|prior| prior.ordinary_disabled),
         awaiting_measurement:false, final_used:kind == Kind::Final || previous.is_some_and(|prior| prior.final_used) };
     checkpoint(state, db, scope, id, saved, &next, saved.native_context_tokens).await?;
+    if empty_purge { return Ok(Status::Complete); }
     let mut admitted = saved.clone();
     admitted.maintenance = Some(next);
     submit(state, db, scope, id, &admitted).await
@@ -207,7 +207,7 @@ pub(crate) async fn run(state: &AppState, db: &Db, scope: &MemuScope,
 mod tests {
     use super::*;
     use actix_web::{App, HttpServer};
-    use std::sync::Mutex;
+    use std::sync::{Mutex, atomic::{AtomicUsize, Ordering}};
 
     struct Mock {
         mode: &'static str,
@@ -216,6 +216,7 @@ mod tests {
         requests: Mutex<Vec<Value>>,
         receipt: Mutex<Option<Value>>,
         native_calls: Mutex<Vec<Value>>,
+        status_reads: AtomicUsize,
     }
 
     fn context() -> Value {
@@ -223,10 +224,10 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_policy_keeps_the_closeout_reserve_and_latches() {
+    fn ordinary_threshold_and_measurement_latches() {
         let mut saved: AtomicChatState = serde_json::from_value(serde_json::json!({
             "backend":"claude_code","phase":"open","active":null})).unwrap();
-        for (tokens, due) in [(139999,false), (140000,true), (179999,true), (180000,false)] {
+        for (tokens, due) in [(139999,false), (140000,true), (179999,true)] {
             assert_eq!(ordinary_due(&saved, 200000, tokens), due);
         }
         saved.maintenance = Some(serde_json::from_value(serde_json::json!({
@@ -237,8 +238,6 @@ mod tests {
         saved.maintenance.as_mut().unwrap().awaiting_measurement = false;
         assert!(ordinary_due(&saved, 200000, 140000));
         saved.maintenance.as_mut().unwrap().ordinary_disabled = true;
-        assert!(!ordinary_due(&saved, 200000, 140000));
-        saved.backend = Backend::Api;
         assert!(!ordinary_due(&saved, 200000, 140000));
     }
 
@@ -255,7 +254,7 @@ mod tests {
 
     #[actix_web::test]
     async fn final_cleanup_is_only_for_fit_or_provider_context_failure_and_has_one_retry() {
-        for mode in ["recap_fit", "recap_predicted", "recap_context", "recap_quota", "recap_again", "recap_unknown", "recap_smaller", "recap_smaller_unknown"] {
+        for mode in ["recap_fit", "recap_predicted", "recap_context", "recap_quota", "recap_again", "recap_unknown", "recap_smaller", "recap_smaller_unknown", "recap_after_clean_quota"] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
             let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
@@ -277,7 +276,7 @@ mod tests {
             }
             db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closing).await.unwrap();
             let mock = web::Data::new(Mock { mode, db:Db(db.0.clone(), db.1.clone()), id:id.clone(),
-                requests:Mutex::new(Vec::new()), receipt:Mutex::new(None), native_calls:Mutex::new(Vec::new()) });
+                requests:Mutex::new(Vec::new()), receipt:Mutex::new(None), native_calls:Mutex::new(Vec::new()), status_reads:AtomicUsize::new(0) });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let scope = MemuScope { base_url:format!("http://{}", listener.local_addr().unwrap()), user_id:"TestOwner".into(), soul_id:"TestSoul".into() };
             let factory = mock.clone();
@@ -296,11 +295,11 @@ mod tests {
                 memu_response_sentences:5, memu_log_prompts:false };
             let request = ChatRequest::Recap { instruction:"fictional recap".into() };
             let result = execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, capacity, &work).await;
-            assert_eq!(result.is_err(), matches!(mode, "recap_quota" | "recap_again" | "recap_smaller" | "recap_smaller_unknown"));
-            let cleanup = matches!(mode, "recap_predicted" | "recap_context" | "recap_again");
+            assert_eq!(result.is_err(), matches!(mode, "recap_quota" | "recap_again" | "recap_smaller" | "recap_smaller_unknown" | "recap_after_clean_quota"));
+            let cleanup = matches!(mode, "recap_predicted" | "recap_context" | "recap_again" | "recap_after_clean_quota");
             assert_eq!(mock.requests.lock().unwrap().len(), usize::from(cleanup));
             let calls = mock.native_calls.lock().unwrap().len();
-            assert_eq!(calls, if mode == "recap_smaller" { 0 } else if matches!(mode, "recap_context" | "recap_again") { 2 } else { 1 });
+            assert_eq!(calls, if mode == "recap_smaller" { 0 } else if matches!(mode, "recap_context" | "recap_again" | "recap_after_clean_quota") { 2 } else { 1 });
             if mode == "recap_again" {
                 assert!(execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, 200000, &work).await.is_err());
                 assert_eq!(mock.native_calls.lock().unwrap().len(), calls);
@@ -309,17 +308,25 @@ mod tests {
                 assert!(execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, capacity, &work).await.is_err());
                 assert_eq!(mock.requests.lock().unwrap().len(), 0);
                 assert_eq!(mock.native_calls.lock().unwrap().len(), 2);
+            } else if mode == "recap_after_clean_quota" {
+                execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, capacity, &work).await.unwrap();
+                assert_eq!(mock.native_calls.lock().unwrap().len(), 3);
+                assert_eq!(mock.requests.lock().unwrap().len(), 1, "transient recap Retry cannot spend another cleanup");
             }
             handle.stop(true).await;
         }
     }
 
     async fn observe(mock: web::Data<Mock>, query: web::Query<HashMap<String, String>>) -> HttpResponse {
+        mock.status_reads.fetch_add(1, Ordering::Relaxed);
+        if mock.mode == "purge_empty" {
+            return HttpResponse::Ok().json(serde_json::json!({"session_id":null,"turn":null,"writer_idle":true,"context":null}));
+        }
         if mock.mode.starts_with("recap_") {
             let last = mock.native_calls.lock().unwrap().last().cloned();
             let calls = mock.native_calls.lock().unwrap().len();
             let failed = last.is_some() && (matches!(mock.mode, "recap_quota" | "recap_again" | "recap_smaller_unknown")
-                || (mock.mode == "recap_context" && calls == 1));
+                || (mock.mode == "recap_context" && calls == 1) || (mock.mode == "recap_after_clean_quota" && calls <= 2));
             let turn_id = last.as_ref().map(|body| body["turn_id"].as_str().unwrap())
                 .or_else(|| query.get("turn_id").map(String::as_str)).unwrap_or("user-turn");
             return HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id", "writer_idle":true,
@@ -332,7 +339,7 @@ mod tests {
                     "purpose":if last.is_some() { "recap" } else { "reply" },
                     "status":if failed { "failed" } else { "complete" }, "initialized":true,"input_recorded":true,
                     "submission":"recorded", "text":"Saved recap", "error":if failed { Some("native failed") } else { None },
-                    "native_result":{"is_error":failed,"errors":[if mock.mode == "recap_quota" { "Quota exceeded" } else { "Prompt is too long" }]},
+                    "native_result":{"is_error":failed,"errors":[if mock.mode == "recap_quota" || (mock.mode == "recap_after_clean_quota" && calls == 2) { "Quota exceeded" } else { "Prompt is too long" }]},
                     "usage":last.as_ref().map(|_| serde_json::json!({"message_id":"recap-message","usage":{
                         "input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20}}))}}));
         }
@@ -367,7 +374,8 @@ mod tests {
         assert_eq!(body["conversation_id"], mock.id);
         assert_eq!(body["turn_id"], "user-turn");
         assert_eq!(body["native_attempt_id"], "native-attempt");
-        assert_eq!(body["previous_attempt_id"], Value::Null);
+        assert_eq!(body["previous_attempt_id"], mock.receipt.lock().unwrap().as_ref()
+            .map(|receipt| receipt["attempt_id"].clone()).unwrap_or(Value::Null));
         assert_eq!(body["action"], if mock.mode.starts_with("purge") { "purge" } else { "compact" });
         let first = {
             let mut requests = mock.requests.lock().unwrap();
@@ -382,6 +390,7 @@ mod tests {
         // are fixed independently of the submitted JSON.
         let status = match mock.mode {
             "final_conflict" | "running_missing" => "running",
+            "final_failed" if first => "failed",
             "final_prepared_missing" => "prepared", "blocked" => "blocked", _ => "complete",
         };
         let mut receipt = serde_json::json!({"attempt_id":pending.attempt_id,
@@ -400,7 +409,7 @@ mod tests {
     async fn durable_handoff_recovers_without_new_ids_or_token_savings() {
         for mode in ["complete", "lost", "unsubmitted", "refused", "wrong_binding", "purge", "purge_lost",
                      "final", "final_404", "final_422", "final_conflict", "running_missing", "final_prepared_missing", "blocked",
-                     "purge_404", "purge_422"] {
+                     "purge_404", "purge_422", "purge_empty", "final_failed"] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
             let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
@@ -421,7 +430,7 @@ mod tests {
                 db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closed).await.unwrap();
             }
             let mock = web::Data::new(Mock { mode, db:Db(db.0.clone(), db.1.clone()), id:id.clone(),
-                requests:Mutex::new(Vec::new()), receipt:Mutex::new(None), native_calls:Mutex::new(Vec::new()) });
+                requests:Mutex::new(Vec::new()), receipt:Mutex::new(None), native_calls:Mutex::new(Vec::new()), status_reads:AtomicUsize::new(0) });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let scope = MemuScope { base_url:format!("http://{}", listener.local_addr().unwrap()),
                 user_id:"TestOwner".into(), soul_id:"TestSoul".into() };
@@ -435,7 +444,7 @@ mod tests {
             let bridge = ChatToolBridge::default();
             let work = lock_conversation(&db, &id, Some(&scope)).await.unwrap();
             let result = run(&state, &db, &scope, &bridge, &id, kind, &work).await;
-            assert_eq!(result.is_ok(), matches!(mode, "complete" | "purge" | "final" | "blocked"));
+            assert_eq!(result.is_ok(), matches!(mode, "complete" | "purge" | "final" | "blocked" | "purge_empty" | "final_failed"));
             let before = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
             if matches!(mode, "lost" | "unsubmitted" | "purge_lost") {
                 assert_eq!(before.maintenance.as_ref().unwrap().status, Status::Pending);
@@ -456,11 +465,15 @@ mod tests {
                 reconcile(&state, &db, &scope, &bridge, &id, &work).await.unwrap();
                 assert_eq!(mock.requests.lock().unwrap().len(), 1, "reload must not replay the refused purge");
                 run(&state, &db, &scope, &bridge, &id, kind, &work).await.unwrap();
+            } else if mode == "final_failed" {
+                assert_eq!(before.maintenance.as_ref().unwrap().status, Status::Failed);
+                assert!(!before.maintenance.as_ref().unwrap().final_used, "known unadopted cleanup releases its reserve");
+                run(&state, &db, &scope, &bridge, &id, kind, &work).await.unwrap();
             }
             let saved = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
             let maintenance = saved.maintenance.as_ref().unwrap();
-            let repaired_purge = matches!(mode, "purge_404" | "purge_422");
-            assert_eq!(maintenance.attempt_id == before.maintenance.as_ref().unwrap().attempt_id, !repaired_purge);
+            let repaired = matches!(mode, "purge_404" | "purge_422" | "final_failed");
+            assert_eq!(maintenance.attempt_id == before.maintenance.as_ref().unwrap().attempt_id, !repaired);
             assert_eq!(saved.phase, match kind { Kind::Purge => Phase::Closed, Kind::Final => Phase::Closing, _ => Phase::Open });
             assert_eq!(maintenance.status, match mode {
                 "refused" | "final_404" | "final_422" | "running_missing" | "final_prepared_missing" => Status::Failed,
@@ -475,16 +488,18 @@ mod tests {
                 reconcile(&state, &db, &scope, &bridge, &id, &work).await.unwrap();
             }
             if maintenance.status == Status::Complete {
-                assert_eq!(saved.native_context_tokens, Some(9000));
+                assert_eq!(saved.native_context_tokens, if mode == "purge_empty" { None } else { Some(9000) });
                 assert_eq!(maintenance.awaiting_measurement, kind == Kind::Ordinary);
+                let reads = mock.status_reads.load(Ordering::Relaxed);
                 assert_eq!(run(&state, &db, &scope, &bridge, &id, kind, &work).await.is_ok(), kind == Kind::Purge);
+                assert_eq!(mock.status_reads.load(Ordering::Relaxed), reads, "completed cleanup needs no MCP contact");
                 let repeated = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
                 assert_eq!(repeated.maintenance.as_ref().unwrap().attempt_id, maintenance.attempt_id);
             }
             let requests = mock.requests.lock().unwrap();
-            assert_eq!(requests.len(), if mode == "unsubmitted" || repaired_purge { 2 } else { 1 });
-            assert_eq!(requests.last().unwrap()["attempt_id"], maintenance.attempt_id);
-            if !repaired_purge {
+            assert_eq!(requests.len(), if mode == "purge_empty" { 0 } else if mode == "unsubmitted" || repaired { 2 } else { 1 });
+            if let Some(last) = requests.last() { assert_eq!(last["attempt_id"], maintenance.attempt_id); }
+            if !repaired {
                 assert!(requests.iter().all(|request| request["attempt_id"] == maintenance.attempt_id));
             }
             drop(requests);

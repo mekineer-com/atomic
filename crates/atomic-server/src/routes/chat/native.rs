@@ -636,13 +636,21 @@ pub(super) async fn execute_recap(
         let conv = read_chat(db, id).await?;
         let saved = conv.conversation.atomic_chat_state.as_ref().expect("closing native sitting");
         let final_cleanup = saved.maintenance.as_ref().filter(|prior| prior.kind == Kind::Final && prior.final_used);
-        if let Some(cleanup) = final_cleanup.filter(|cleanup| cleanup.status != Status::Complete) {
+        if let Some(cleanup) = final_cleanup.filter(|cleanup| cleanup.unresolved()) {
             return Err((StatusCode::CONFLICT, serde_json::json!({"error":cleanup.error.as_deref()
                 .unwrap_or("Final native cleanup is unfinished; keep this sitting and reload.")})));
         }
         if maintenance::final_recap_used(saved) {
-            return Err((StatusCode::CONFLICT, serde_json::json!({"error":
-                "The reserved same-session recap retry has already been attempted. Keep this history; contact help@openalma.org if close-out still cannot complete."})));
+            let recap = saved.recap.as_ref().expect("post-clean recap attempt");
+            let observed = status(scope, id, &recap.request_message_id).await
+                .map_err(|error| (StatusCode::BAD_GATEWAY, serde_json::json!({"error":error})))?;
+            if observed.writer_idle == Some(true) && recap.native_attempt_id.as_ref().is_some_and(|attempt|
+                observed.matches_turn(&recap.request_message_id, attempt, Purpose::Recap, None))
+                && observed.turn.as_ref().is_some_and(|receipt| receipt.status == "failed" && context_length_error(receipt))
+            {
+                return Err((StatusCode::CONFLICT, serde_json::json!({"error":
+                    "The same-session recap is still too large after final cleanup. Keep this history; contact help@openalma.org for close-out assistance."})));
+            }
         }
         let prepared = prepare_input(db, scope, id, request, profile, work).await?;
         let needs_cleanup = final_cleanup.is_none() && prepared.context_tokens.is_some_and(|tokens|
@@ -1261,6 +1269,8 @@ mod tests {
         mode: &'static str,
         credential: Mutex<String>,
         attempt_id: Mutex<String>,
+        turn_id: Mutex<String>,
+        maintenance: Mutex<Option<Value>>,
         status_reads: AtomicUsize,
     }
 
@@ -1466,6 +1476,7 @@ mod tests {
             );
         }
         *mock.attempt_id.lock().unwrap() = body["attempt_id"].as_str().unwrap().into();
+        *mock.turn_id.lock().unwrap() = body["turn_id"].as_str().unwrap().into();
         if mock.mode.starts_with("recap") {
             assert_eq!(body["operation"], "continue");
             assert!(body["system_prompt"].is_null() && body["bridge_url"].is_null());
@@ -1531,12 +1542,27 @@ mod tests {
             .streaming(futures::stream::iter(chunks))
     }
 
+    async fn mock_maintenance(mock: web::Data<MockNative>, body: web::Json<Value>) -> HttpResponse {
+        assert_eq!(mock.mode, "route");
+        assert_eq!(body["action"], "compact");
+        assert_eq!(body["native_attempt_id"], *mock.attempt_id.lock().unwrap());
+        assert_eq!(body["turn_id"], *mock.turn_id.lock().unwrap());
+        let receipt = serde_json::json!({"attempt_id":body["attempt_id"],"native_attempt_id":body["native_attempt_id"],
+            "turn_id":body["turn_id"],"action":"compact","status":"complete"});
+        let mut saved = mock.maintenance.lock().unwrap();
+        assert!(saved.is_none(), "successful reply triggers cleanup only once");
+        *saved = Some(receipt.clone());
+        HttpResponse::Ok().json(serde_json::json!({"maintenance":receipt,
+            "context":{"estimated_tokens":90000,"overhead_tokens":50,"system_tokens":25}}))
+    }
+
     async fn mock_status(
         mock: web::Data<MockNative>,
         query: web::Query<HashMap<String, String>>,
         request: HttpRequest,
     ) -> HttpResponse {
-        if query["turn_id"].is_empty() {
+        let turn_id = query.get("turn_id").cloned().unwrap_or_else(|| mock.turn_id.lock().unwrap().clone());
+        if turn_id.is_empty() {
             return HttpResponse::Ok().json(
                 serde_json::json!({"session_id":null,"writer_idle":true,"turn":null,
                     "context":{"estimated_tokens":0,"overhead_tokens":0,"system_tokens":0}}),
@@ -1548,7 +1574,7 @@ mod tests {
             return HttpResponse::Ok().json(serde_json::json!({
                 "session_id":"native-id", "writer_idle":true,
                 "context":{"estimated_tokens":500,"overhead_tokens":50,"system_tokens":25}, "turn":{
-                    "session_id":"native-id", "turn_id":query["turn_id"],
+                    "session_id":"native-id", "turn_id":turn_id,
                     "attempt_id":mock.attempt_id.lock().unwrap().clone(),
                     "purpose":"reply", "status":"failed", "submission":"recorded",
                     "initialized":true, "input_recorded":true
@@ -1602,8 +1628,9 @@ mod tests {
         let mut receipt_counts = counts();
         receipt_counts["cache_read_input_tokens"] = serde_json::json!(321);
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id","writer_idle":!active,
-            "context":{"estimated_tokens":if active || older_attempt { 9000 } else { 700 },"overhead_tokens":50,"system_tokens":25},
-            "turn":{"session_id":"native-id","turn_id":query["turn_id"],"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode.starts_with("recap") { "recap" } else { "reply" },
+            "maintenance":mock.maintenance.lock().unwrap().clone(),
+            "context":{"estimated_tokens":if mock.mode == "route" { 90000 } else if active || older_attempt { 9000 } else { 700 },"overhead_tokens":50,"system_tokens":25},
+            "turn":{"session_id":"native-id","turn_id":turn_id,"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode.starts_with("recap") { "recap" } else { "reply" },
                 "status":status,"submission":"recorded","initialized":true,
                 "usage":{"message_id":"message","usage":receipt_counts},
                 "error":if status == "failed" { Some("Saved native failure") } else { None },
@@ -1660,6 +1687,8 @@ mod tests {
                 mode,
                 credential: Mutex::new(String::new()),
                 attempt_id: Mutex::new(String::new()),
+                turn_id: Mutex::new(String::new()),
+                maintenance: Mutex::new(None),
                 status_reads: AtomicUsize::new(0),
             });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1672,6 +1701,7 @@ mod tests {
                     .app_data(web::Data::new(factory_bridge.clone()))
                     .app_data(factory_mock.clone())
                     .route("/integration/atomic/chat", web::post().to(mock_chat))
+                    .route("/integration/atomic/chat/maintenance", web::post().to(mock_maintenance))
                     .route(
                         "/integration/atomic/chat/status",
                         web::get().to(mock_status),
@@ -1815,7 +1845,10 @@ mod tests {
                 let saved = read_chat(&db, id).await.unwrap();
                 let lifecycle = saved.conversation.atomic_chat_state.as_ref().unwrap();
                 assert_eq!(lifecycle.backend, Backend::ClaudeCode);
-                assert_eq!(lifecycle.native_context_tokens, Some(700));
+                assert_eq!(lifecycle.native_context_tokens, Some(90000));
+                let maintenance = lifecycle.maintenance.as_ref().unwrap();
+                assert!(maintenance.awaiting_measurement);
+                assert_eq!(maintenance.status, atomic_core::AtomicChatMaintenanceStatus::Complete);
                 assert_eq!(lifecycle.context_window_tokens, Some(128000));
                 assert!(lifecycle.active.is_none());
                 assert_eq!(saved.messages.len(), 3);
