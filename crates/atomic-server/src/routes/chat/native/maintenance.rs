@@ -114,6 +114,9 @@ pub(super) async fn reconcile(state: &AppState, db: &Db, scope: &MemuScope,
     if observed.maintenance.as_ref().is_some_and(|receipt| receipt.attempt_id == pending.attempt_id) {
         return apply(state, db, scope, id, saved, observed.maintenance.unwrap(), observed.context).await;
     }
+    // A terminal purge refusal is not an in-flight claim. Do not replay it here;
+    // run() may admit a subsequent storage-only purge after the server is repaired.
+    if pending.status == Status::Failed { return Ok(()); }
     if pending.status != Status::Pending {
         let mut missing = pending.clone();
         missing.status = Status::Failed;
@@ -230,8 +233,8 @@ mod tests {
             requests.len() == 1
         };
         if mock.mode == "refused" { return HttpResponse::Conflict().json(serde_json::json!({"detail":"helper unavailable"})); }
-        if mock.mode == "final_404" { return HttpResponse::NotFound().finish(); }
-        if mock.mode == "final_422" { return HttpResponse::UnprocessableEntity().json(serde_json::json!({"detail":[{"msg":"invalid request"}]})); }
+        if mock.mode.ends_with("_404") && first { return HttpResponse::NotFound().finish(); }
+        if mock.mode.ends_with("_422") && first { return HttpResponse::UnprocessableEntity().json(serde_json::json!({"detail":[{"msg":"invalid request"}]})); }
         if mock.mode == "unsubmitted" && first { return HttpResponse::InternalServerError().finish(); }
         // Bind only the generated attempt ID dynamically; all other MCP fields
         // are fixed independently of the submitted JSON.
@@ -254,7 +257,8 @@ mod tests {
     #[actix_web::test]
     async fn durable_handoff_recovers_without_new_ids_or_token_savings() {
         for mode in ["complete", "lost", "unsubmitted", "refused", "wrong_binding", "purge", "purge_lost",
-                     "final", "final_404", "final_422", "final_conflict", "running_missing", "final_prepared_missing", "blocked"] {
+                     "final", "final_404", "final_422", "final_conflict", "running_missing", "final_prepared_missing", "blocked",
+                     "purge_404", "purge_422"] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
             let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
@@ -305,10 +309,16 @@ mod tests {
                 assert!(matches!(before.maintenance.as_ref().unwrap().status, Status::Running | Status::Prepared));
                 *mock.receipt.lock().unwrap() = None;
                 assert!(reconcile(&state, &db, &scope, &bridge, &id, &work).await.is_err());
+            } else if matches!(mode, "purge_404" | "purge_422") {
+                assert_eq!(before.maintenance.as_ref().unwrap().status, Status::Failed);
+                reconcile(&state, &db, &scope, &bridge, &id, &work).await.unwrap();
+                assert_eq!(mock.requests.lock().unwrap().len(), 1, "reload must not replay the refused purge");
+                run(&state, &db, &scope, &bridge, &id, kind, &work).await.unwrap();
             }
             let saved = read_chat(&db, &id).await.unwrap().conversation.atomic_chat_state.unwrap();
             let maintenance = saved.maintenance.as_ref().unwrap();
-            assert_eq!(maintenance.attempt_id, before.maintenance.as_ref().unwrap().attempt_id);
+            let repaired_purge = matches!(mode, "purge_404" | "purge_422");
+            assert_eq!(maintenance.attempt_id == before.maintenance.as_ref().unwrap().attempt_id, !repaired_purge);
             assert_eq!(saved.phase, match kind { Kind::Purge => Phase::Closed, Kind::Final => Phase::Closing, _ => Phase::Open });
             assert_eq!(maintenance.status, match mode {
                 "refused" | "final_404" | "final_422" | "running_missing" | "final_prepared_missing" => Status::Failed,
@@ -330,8 +340,11 @@ mod tests {
                 assert_eq!(repeated.maintenance.as_ref().unwrap().attempt_id, maintenance.attempt_id);
             }
             let requests = mock.requests.lock().unwrap();
-            assert_eq!(requests.len(), if mode == "unsubmitted" { 2 } else { 1 });
-            assert!(requests.iter().all(|request| request["attempt_id"] == maintenance.attempt_id));
+            assert_eq!(requests.len(), if mode == "unsubmitted" || repaired_purge { 2 } else { 1 });
+            assert_eq!(requests.last().unwrap()["attempt_id"], maintenance.attempt_id);
+            if !repaired_purge {
+                assert!(requests.iter().all(|request| request["attempt_id"] == maintenance.attempt_id));
+            }
             drop(requests);
             handle.stop(true).await;
         }
