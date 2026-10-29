@@ -6105,13 +6105,13 @@ mod tests {
             "You have access to ALL atoms.",
             Some(&MemuToolConfig {
                 base_url: "http://127.0.0.1:8099".to_string(),
-                user_id: "Marcos".to_string(),
-                soul_id: "Siri".to_string(),
+                user_id: "TestOwner".to_string(),
+                soul_id: "TestSoul".to_string(),
             }),
         );
 
-        assert!(prompt.contains("You are with Marcos in the app Atomic"));
-        assert!(prompt.contains("In Atomic, Marcos is the user."));
+        assert!(prompt.contains("You are with TestOwner in the app Atomic"));
+        assert!(prompt.contains("In Atomic, TestOwner is the user."));
         assert!(prompt.contains("Guidelines for Atomic:"));
         assert!(!prompt.contains("helpful AI assistant"));
     }

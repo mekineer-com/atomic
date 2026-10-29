@@ -362,9 +362,9 @@ mod tests {
         assert!(external.local_url().is_err());
     }
 
-    async fn session(core: &AtomicCore, events: Arc<Mutex<Vec<ChatEvent>>>) -> ChatToolSession {
+    async fn session(core: &AtomicCore, events: Arc<Mutex<Vec<ChatEvent>>>, soul_id: &str) -> ChatToolSession {
         let conversation = core
-            .create_conversation(&[], None, Some(("TestOwner", "TestSoul")))
+            .create_conversation(&[], None, Some(("TestOwner", soul_id)))
             .await
             .unwrap();
         let message = core
@@ -374,7 +374,7 @@ mod tests {
         let scope = MemuToolConfig {
             base_url: "http://127.0.0.1:1".to_string(),
             user_id: "TestOwner".to_string(),
-            soul_id: "TestSoul".to_string(),
+            soul_id: soul_id.to_string(),
         };
         let mut other_scope = scope.clone();
         other_scope.soul_id = "OtherSoul".to_string();
@@ -467,7 +467,7 @@ mod tests {
         let other = AtomicCore::open_or_create(dir.path().join("second.db")).unwrap();
         let bridge = web::Data::new(ChatToolBridge::default());
         let events = Arc::new(Mutex::new(Vec::new()));
-        let captured = session(&core, events.clone()).await;
+        let captured = session(&core, events.clone(), "TestSoul").await;
         let focus_schema = captured
             .tools()
             .iter()
@@ -476,9 +476,14 @@ mod tests {
             .parameters
             .clone();
         let lease = bridge.register(captured).unwrap();
+        let other_events = Arc::new(Mutex::new(Vec::new()));
         let other_lease = bridge
-            .register(session(&other, Arc::new(Mutex::new(Vec::new()))).await)
+            .register(session(&other, other_events.clone(), "SecondSoul").await)
             .unwrap();
+        other_lease.server.execute("toolu-other".into(), "focus_atom".into(),
+            json!({"atom_id":"second-soul-atom"})).await.unwrap();
+        assert!(events.lock().unwrap().is_empty());
+        assert!(!other_events.lock().unwrap().is_empty());
         let shutdown = web::Data::new(crate::shutdown::Shutdown::default());
         let app = test::init_service(
             App::new()
@@ -633,11 +638,17 @@ mod tests {
         assert_eq!(records.tool_calls[1].id, "toolu-create_atom");
         assert_eq!(records.tool_calls[1].status, "failed");
         assert!(records.citations.is_empty());
+        let first_events = events.lock().unwrap().len();
+        other_lease.server.execute("toolu-other-after-drain".into(), "focus_atom".into(),
+            json!({"atom_id":"second-soul-atom"})).await.unwrap();
+        assert_eq!(events.lock().unwrap().len(), first_events);
+        let other_records = other_lease.finish().await;
+        assert_eq!(other_records.tool_calls.len(), 2);
+        assert!(other_records.tool_calls.iter().all(|call| call.id.starts_with("toolu-other")));
         tokio::time::timeout(Duration::from_secs(5), idle_body)
             .await
             .unwrap()
             .unwrap();
-        drop(other_lease);
         tokio::time::timeout(Duration::from_secs(5), executor::wait_idle())
             .await
             .unwrap();
@@ -652,7 +663,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let bridge = ChatToolBridge::default();
         let lease = bridge
-            .register(session(&core, events.clone()).await)
+            .register(session(&core, events.clone(), "TestSoul").await)
             .unwrap();
         let server = lease.server.clone();
         let binding = server.0.binding.clone();
@@ -709,7 +720,7 @@ mod tests {
         let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
         let bridge = ChatToolBridge::default();
         let lease = bridge
-            .register(session(&core, Arc::new(Mutex::new(Vec::new()))).await)
+            .register(session(&core, Arc::new(Mutex::new(Vec::new())), "TestSoul").await)
             .unwrap();
         let token = lease.credential().to_string();
         let server = lease.server.clone();

@@ -1275,6 +1275,7 @@ mod tests {
         purpose: Mutex<String>,
         context_tokens: AtomicUsize,
         publications: Mutex<Vec<Value>>,
+        purge_calls: AtomicUsize,
     }
 
     fn counts() -> Value {
@@ -1551,6 +1552,7 @@ mod tests {
         assert_eq!(mock.mode, "route");
         let purge = body["action"] == "purge";
         if purge {
+            mock.purge_calls.fetch_add(1, Ordering::Relaxed);
             let publications = mock.publications.lock().unwrap().clone();
             assert_eq!(publications.len(), 1, "publish before purging native history");
             let id = publications[0]["conversation_id"].as_str().unwrap().strip_prefix("chat:atomic-").unwrap();
@@ -1561,7 +1563,9 @@ mod tests {
         assert_eq!(body["native_attempt_id"], *mock.attempt_id.lock().unwrap());
         assert_eq!(body["turn_id"], *mock.turn_id.lock().unwrap());
         let receipt = serde_json::json!({"attempt_id":body["attempt_id"],"native_attempt_id":body["native_attempt_id"],
-            "turn_id":body["turn_id"],"action":body["action"],"status":"complete"});
+            "turn_id":body["turn_id"],"action":body["action"],
+            "status":if purge { "failed" } else { "complete" },
+            "error":if purge { Some("Fictional storage removal failed") } else { None }});
         let mut saved = mock.maintenance.lock().unwrap();
         if !purge {
             assert!(saved.is_none(), "successful reply triggers cleanup only once");
@@ -1657,8 +1661,18 @@ mod tests {
         let mut receipt_counts = counts();
         receipt_counts["cache_read_input_tokens"] = serde_json::json!(321);
         let purpose = mock.purpose.lock().unwrap().clone();
+        let maintenance = {
+            let mut saved = mock.maintenance.lock().unwrap();
+            if let Some(receipt) = saved.as_mut().filter(|receipt|
+                receipt["action"] == "purge" && receipt["status"] == "failed") {
+                // MCP status retries interrupted filesystem removal, not publication.
+                receipt["status"] = serde_json::json!("complete");
+                receipt["error"] = Value::Null;
+            }
+            saved.clone()
+        };
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id","writer_idle":!active,
-            "maintenance":mock.maintenance.lock().unwrap().clone(),
+            "maintenance":maintenance,
             "context":{"estimated_tokens":if mock.mode == "route" { mock.context_tokens.load(Ordering::Relaxed) } else if active || older_attempt { 9000 } else { 700 },"overhead_tokens":50,"system_tokens":25},
             "turn":{"session_id":"native-id","turn_id":turn_id,"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":purpose,
                 "status":status,"submission":"recorded","initialized":true,
@@ -1723,6 +1737,7 @@ mod tests {
                 purpose: Mutex::new(if mode.starts_with("recap") { "recap" } else { "reply" }.into()),
                 context_tokens: AtomicUsize::new(90000),
                 publications: Mutex::new(Vec::new()),
+                purge_calls: AtomicUsize::new(0),
             });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             bridge.set_listeners(&[listener.local_addr().unwrap()]);
@@ -1943,15 +1958,24 @@ mod tests {
                 assert_eq!(lifecycle.phase, Phase::Closed);
                 assert_eq!(existing_recap(&closed).as_deref(), Some("Exact recap"));
                 assert_eq!(lifecycle.maintenance.as_ref().unwrap().kind, atomic_core::AtomicChatMaintenanceKind::Purge);
-                assert_eq!(lifecycle.maintenance.as_ref().unwrap().status, atomic_core::AtomicChatMaintenanceStatus::Complete);
+                assert_eq!(lifecycle.maintenance.as_ref().unwrap().status, atomic_core::AtomicChatMaintenanceStatus::Failed);
+                assert!(lifecycle.maintenance.as_ref().unwrap().error.as_deref().unwrap().contains("storage removal"));
                 assert_eq!(mock.publications.lock().unwrap().len(), 1);
-                let reads = mock.status_reads.load(Ordering::Relaxed);
+                let recap_attempt = mock.attempt_id.lock().unwrap().clone();
                 let ended = finish_memu_session(
                     state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id, &bridge, &work,
                 ).await.unwrap();
                 assert_eq!(ended["status"], "already_ended");
-                assert_eq!(mock.status_reads.load(Ordering::Relaxed), reads);
+                let recovered = read_chat(&db, id).await.unwrap();
+                let lifecycle = recovered.conversation.atomic_chat_state.as_ref().unwrap();
+                assert_eq!(lifecycle.phase, Phase::Closed);
+                assert_eq!(lifecycle.maintenance.as_ref().unwrap().status, atomic_core::AtomicChatMaintenanceStatus::Complete);
+                assert_eq!(*mock.attempt_id.lock().unwrap(), recap_attempt);
+                assert_eq!(mock.purge_calls.load(Ordering::Relaxed), 1);
                 assert_eq!(mock.publications.lock().unwrap().len(), 1);
+                let reads = mock.status_reads.load(Ordering::Relaxed);
+                finish_memu_session(state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id, &bridge, &work).await.unwrap();
+                assert_eq!(mock.status_reads.load(Ordering::Relaxed), reads);
                 drop(work);
                 let original_attempt = mock.attempt_id.lock().unwrap().clone();
                 let user = saved
