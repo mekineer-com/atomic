@@ -961,7 +961,7 @@ async fn observe(
 }
 
 /// Called only under the executor-owned sitting lock, after managed admission.
-/// Carry the exact read-only projection into the runner; production stays gated until N4.
+/// Carry the exact read-only projection into the runner.
 pub(super) async fn execute_prepared(
     state: &AppState,
     db: &Db,
@@ -1276,6 +1276,9 @@ mod tests {
         context_tokens: AtomicUsize,
         publications: Mutex<Vec<Value>>,
         purge_calls: AtomicUsize,
+        reply_calls: AtomicUsize,
+        publication_calls: AtomicUsize,
+        admission_error: Mutex<String>,
     }
 
     fn counts() -> Value {
@@ -1466,6 +1469,9 @@ mod tests {
         body: web::Json<Value>,
     ) -> HttpResponse {
         assert_eq!(body["profile_fingerprint"], "fingerprint");
+        if body["purpose"] == "reply" {
+            mock.reply_calls.fetch_add(1, Ordering::Relaxed);
+        }
         if matches!(
             mock.mode,
             "success" | "route" | "retry" | "continuation_refused"
@@ -1589,8 +1595,19 @@ mod tests {
         assert_eq!(transcript[0]["role"], "user");
         assert_eq!(transcript[1]["role"], "assistant");
         assert_eq!(transcript[1]["content"], "Exact terminal response");
+        if mock.publication_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            *mock.admission_error.lock().unwrap() = "Repair Atomic's session helper".into();
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({"error":"Fictional publication failure"}));
+        }
         mock.publications.lock().unwrap().push(body.into_inner());
         HttpResponse::Ok().json(serde_json::json!({"ok":true}))
+    }
+
+    async fn mock_profile(mock: web::Data<MockNative>) -> HttpResponse {
+        HttpResponse::Ok().json(serde_json::json!({"backend":"claude_code","cli":{
+            "model":"fictional","context_window_tokens":128000,"timeout_seconds":1,
+            "effort":"medium","fingerprint":"fingerprint","memu_response_sentences":5,
+            "memu_log_prompts":false,"admission_error":mock.admission_error.lock().unwrap().clone()}}))
     }
 
     async fn mock_status(
@@ -1742,6 +1759,9 @@ mod tests {
                 context_tokens: AtomicUsize::new(90000),
                 publications: Mutex::new(Vec::new()),
                 purge_calls: AtomicUsize::new(0),
+                reply_calls: AtomicUsize::new(0),
+                publication_calls: AtomicUsize::new(0),
+                admission_error: Mutex::new(String::new()),
             });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             bridge.set_listeners(&[listener.local_addr().unwrap()]);
@@ -1758,7 +1778,7 @@ mod tests {
                     .route("/integration/atomic/session_end", web::post().to(mock_session_end))
                     .route("/owner", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"user_id":"TestOwner"})) }))
                     .route("/souls", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"souls":["TestSoul"]})) }))
-                    .route("/integration/atomic/chat_profile", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"backend":"claude_code","cli":{"model":"fictional","context_window_tokens":128000,"timeout_seconds":1,"effort":"medium","fingerprint":"fingerprint","memu_response_sentences":5,"memu_log_prompts":false}})) }))
+                    .route("/integration/atomic/chat_profile", web::get().to(mock_profile))
                     .route("/integration/atomic/chat/maintenance", web::post().to(mock_maintenance))
                     .route(
                         "/integration/atomic/chat/status",
@@ -1790,6 +1810,7 @@ mod tests {
                 fingerprint: "fingerprint".into(),
                 memu_response_sentences: 5,
                 memu_log_prompts: false,
+                admission_error: String::new(),
             };
             let request = ChatRequest::New {
                 content: "fictional input".into(),
@@ -1884,20 +1905,24 @@ mod tests {
                     serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap(),
                     before
                 );
-                // The production gate is intentionally bypassed only at this typed
-                // internal entry; this runs the same admission/capacity/dispatch path.
+                let mut unavailable = profile.clone();
+                unavailable.admission_error = "Install or repair Atomic's Claude session helper".into();
                 let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
-                let result = chat_work_with_profile(
+                let error = chat_work_with_profile(
+                    state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id.clone(),
+                    request.clone(), web::Data::new(bridge.clone()),
+                    AtomicChatProfileResponse::ClaudeCode { cli: unavailable }, work,
+                ).await.unwrap_err();
+                assert!(error.1["error"].as_str().unwrap().contains("Install or repair"));
+                assert_eq!(serde_json::to_value(read_chat(&db, id).await.unwrap()).unwrap(), before);
+                assert!(mock.attempt_id.lock().unwrap().is_empty());
+                let result = chat_work(
                     state.clone(),
                     Db(db.0.clone(), db.1.clone()),
                     scope.clone(),
                     id.clone(),
                     request,
                     web::Data::new(bridge.clone()),
-                    AtomicChatProfileResponse::ClaudeCode {
-                        cli: profile.clone(),
-                    },
-                    work,
                 )
                 .await
                 .unwrap();
@@ -1934,7 +1959,6 @@ mod tests {
                 // Crossing the reserve boundary closes admission without saving the draft
                 // or starting another ordinary cleanup/model turn.
                 mock.context_tokens.store(108000, Ordering::Relaxed);
-                let previous_attempt = mock.attempt_id.lock().unwrap().clone();
                 let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
                 let error = chat_work_with_profile(
                     state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id.clone(),
@@ -1945,18 +1969,22 @@ mod tests {
                 assert!(error.1["error"].as_str().unwrap().contains("sitting is closing"));
                 let closing = read_chat(&db, id).await.unwrap();
                 assert_eq!(closing.conversation.atomic_chat_state.as_ref().unwrap().phase, Phase::Closing);
-                assert_eq!(closing.messages.len(), saved.messages.len());
-                assert_eq!(*mock.attempt_id.lock().unwrap(), previous_attempt);
+                assert!(closing.messages.iter().all(|row| row.message.content != "unsent next draft"));
+                assert_eq!(rows_for_saved_history(&closing).len(), rows_for_saved_history(&saved).len());
+                assert_eq!(mock.reply_calls.load(Ordering::Relaxed), 1);
 
-                // The scheduled production worker remains gated until N4. Exercise its
-                // existing closeout body with the same typed-profile seam as Send.
+                tokio::time::timeout(Duration::from_secs(10), atomic_core::executor::wait_idle()).await.unwrap();
                 let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
-                let ended = finish_memu_session_with_profile(
-                    state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id,
-                    &bridge, &work, read_chat(&db, id).await.unwrap(),
-                    AtomicChatProfileResponse::ClaudeCode { cli: profile.clone() },
-                ).await.unwrap();
-                assert_eq!(ended["ok"], true);
+                let unpublished = read_chat(&db, id).await.unwrap();
+                assert_eq!(unpublished.conversation.atomic_chat_state.as_ref().unwrap().phase, Phase::Closing);
+                assert_eq!(existing_recap(&unpublished).as_deref(), Some("Exact recap"));
+                let recap_attempt = mock.attempt_id.lock().unwrap().clone();
+                assert!(mock.publications.lock().unwrap().is_empty());
+                assert!(!mock.admission_error.lock().unwrap().is_empty());
+                // Publication of the saved recap needs no helper or new model call.
+                finish_memu_session(state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id, &bridge, &work).await.unwrap();
+                assert_eq!(*mock.attempt_id.lock().unwrap(), recap_attempt);
+                assert_eq!(mock.publication_calls.load(Ordering::Relaxed), 2);
                 let closed = read_chat(&db, id).await.unwrap();
                 let lifecycle = closed.conversation.atomic_chat_state.as_ref().unwrap();
                 assert_eq!(lifecycle.phase, Phase::Closed);

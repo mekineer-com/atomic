@@ -94,6 +94,7 @@ struct ClaudeChatProfile {
     fingerprint: String,
     memu_response_sentences: usize,
     memu_log_prompts: bool,
+    admission_error: String,
 }
 
 impl ClaudeChatProfile {
@@ -106,6 +107,15 @@ impl ClaudeChatProfile {
 }
 
 impl AtomicChatProfileResponse {
+    fn check_admission(&self) -> Result<(), JsonError> {
+        if let Self::ClaudeCode { cli } = self {
+            if !cli.admission_error.is_empty() {
+                return Err((StatusCode::CONFLICT, serde_json::json!({"error":cli.admission_error})));
+            }
+        }
+        Ok(())
+    }
+
     fn backend(&self) -> Backend {
         match self {
             Self::Api { .. } => Backend::Api,
@@ -239,13 +249,7 @@ async fn fetch_atomic_chat_profile(
     profile.capacity()?;
     let settings = match &profile {
         AtomicChatProfileResponse::Api { settings } => settings,
-        // N2 parses CLI metadata; production dispatch stays dormant until N4.
-        AtomicChatProfileResponse::ClaudeCode { .. } => {
-            return Err((
-                StatusCode::CONFLICT,
-                serde_json::json!({"error": "Claude Code dispatch is not connected yet. Restore claude_code=false for API sittings; no API fallback is used."}),
-            ))
-        }
+        AtomicChatProfileResponse::ClaudeCode { .. } => return Ok(profile),
     };
     let (model_key, url_key) = match settings.get("provider").map(String::as_str) {
         Some("openai_compat") => ("openai_compat_llm_model", Some("openai_compat_base_url")),
@@ -623,7 +627,12 @@ pub async fn create_conversation(
     };
     let backend = if let Some(scope) = &memu_session {
         match fetch_atomic_chat_profile(scope).await {
-            Ok(profile) => profile.backend(),
+            Ok(profile) => {
+                if let Err(error) = profile.check_admission() {
+                    return json_error_response(error);
+                }
+                profile.backend()
+            },
             Err(error) => return json_error_response(error),
         }
     } else {
@@ -1039,6 +1048,7 @@ async fn chat_work_with_profile(
     if let Some(reply) = saved_retry_reply(&conv, &request) {
         return Ok(reply);
     }
+    profile.check_admission()?;
     // Validate using admission's pure rules before sizing or choosing close-out.
     db.0.validate_chat_request(
         &id,
@@ -1432,7 +1442,7 @@ async fn finish_memu_session(
     bridge: &ChatToolBridge,
     work: &ConversationWork,
 ) -> Result<serde_json::Value, JsonError> {
-    let conv = read_chat(&db, conversation_id).await?;
+    let mut conv = read_chat(&db, conversation_id).await?;
     if conv
         .conversation
         .atomic_chat_state
@@ -1458,19 +1468,6 @@ async fn finish_memu_session(
         .await;
     }
     let profile = fetch_atomic_chat_profile(&memu_session).await?;
-    finish_memu_session_with_profile(state, db, memu_session, conversation_id, bridge, work, conv, profile).await
-}
-
-async fn finish_memu_session_with_profile(
-    state: web::Data<AppState>,
-    db: Db,
-    memu_session: MemuScope,
-    conversation_id: &str,
-    bridge: &ChatToolBridge,
-    work: &ConversationWork,
-    mut conv: atomic_core::ConversationWithMessages,
-    profile: AtomicChatProfileResponse,
-) -> Result<serde_json::Value, JsonError> {
     let request = ChatRequest::Recap {
         instruction: atomic_recap_instruction(&memu_session.user_id),
     };
@@ -1496,6 +1493,7 @@ async fn finish_memu_session_with_profile(
     let rows = rows_for_saved_history(&conv);
     let needs_recap = recap.is_none() && needs_activity_recap(&conv, &rows);
     if needs_recap {
+        profile.check_admission()?;
         let projected = match &profile {
             AtomicChatProfileResponse::Api { settings } => Some(
                 db.0.estimate_chat_request_tokens(
@@ -1613,15 +1611,24 @@ mod tests {
         let value = serde_json::json!({"backend":"claude_code", "cli":{
             "model":"fictional-cli", "context_window_tokens":128000, "timeout_seconds":90,
             "effort":"high", "fingerprint":"captured-profile", "memu_response_sentences":5,
-            "memu_log_prompts":true
+            "memu_log_prompts":true, "admission_error":""
         }});
         let profile: AtomicChatProfileResponse = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(profile.backend(), Backend::ClaudeCode);
         assert_eq!(profile.capacity().unwrap(), 128000);
+        assert!(profile.check_admission().is_ok());
         assert!(matches!(
             profile,
             AtomicChatProfileResponse::ClaudeCode { .. }
         ));
+        let mut unavailable = value.clone();
+        unavailable["cli"]["admission_error"] = serde_json::json!("Repair Atomic's helper");
+        let profile: AtomicChatProfileResponse = serde_json::from_value(unavailable).unwrap();
+        assert_eq!(profile.capacity().unwrap(), 128000);
+        assert!(profile.check_admission().unwrap_err().1["error"].as_str().unwrap().contains("Repair"));
+        let mut missing_readiness = value.clone();
+        missing_readiness["cli"].as_object_mut().unwrap().remove("admission_error");
+        assert!(serde_json::from_value::<AtomicChatProfileResponse>(missing_readiness).is_err());
         let mut too_small = value;
         too_small["cli"]["context_window_tokens"] = serde_json::json!(20000);
         let profile: AtomicChatProfileResponse = serde_json::from_value(too_small).unwrap();

@@ -292,7 +292,7 @@ mod tests {
             let capacity = if mode.starts_with("recap_smaller") { 128000 } else { 200000 };
             let profile = ClaudeChatProfile { model:"fictional".into(), context_window_tokens:capacity,
                 timeout_seconds:1, effort:"medium".into(), fingerprint:"fingerprint".into(),
-                memu_response_sentences:5, memu_log_prompts:false };
+                memu_response_sentences:5, memu_log_prompts:false, admission_error:String::new() };
             let request = ChatRequest::Recap { instruction:"fictional recap".into() };
             let result = execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, capacity, &work).await;
             assert_eq!(result.is_err(), matches!(mode, "recap_quota" | "recap_again" | "recap_smaller" | "recap_smaller_unknown" | "recap_after_clean_quota"));

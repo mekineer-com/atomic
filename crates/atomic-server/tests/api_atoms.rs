@@ -282,6 +282,7 @@ struct MemuEndState {
     fail_next: AtomicBool,
     capacity: AtomicUsize,
     cli: AtomicBool,
+    admission_error: Mutex<String>,
 }
 
 async fn memu_session_end(state: web::Data<MemuEndState>, body: web::Json<Value>) -> HttpResponse {
@@ -359,6 +360,7 @@ fn start_memu_stub_with_model(
         fail_next: AtomicBool::new(false),
         capacity: AtomicUsize::new(200_000),
         cli: AtomicBool::new(false),
+        admission_error: Mutex::new(String::new()),
     });
     let captured_end = end_state.clone();
     let server = HttpServer::new(move || {
@@ -382,6 +384,7 @@ fn start_memu_stub_with_model(
                     let model_url = model_url.clone();
                     let capacity = profile_state.capacity.load(Ordering::SeqCst);
                     let backend = if profile_state.cli.load(Ordering::SeqCst) { "claude_code" } else { "api" };
+                    let admission_error = profile_state.admission_error.lock().unwrap().clone();
                     async move {
                         assert_eq!(request.query_string(), "user_id=TestOwner&soul_id=TestSoul");
                         if backend == "claude_code" {
@@ -389,7 +392,7 @@ fn start_memu_stub_with_model(
                                 "backend":"claude_code",
                                 "cli":{"model":"fictional-cli", "context_window_tokens":capacity,
                                     "timeout_seconds":90, "effort":"medium", "fingerprint":"fictional-profile",
-                                    "memu_response_sentences":3, "memu_log_prompts":false}
+                                    "memu_response_sentences":3, "memu_log_prompts":false, "admission_error":admission_error}
                             }));
                         }
                         HttpResponse::Ok().json(json!({
@@ -810,6 +813,32 @@ async fn test_create_conversation_stores_hidden_memu_snapshot() {
     assert_eq!(visible["messages"].as_array().unwrap().len(), 0);
 
     memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
+async fn test_native_creation_checks_readiness_without_api_settings_or_blocking_reads() {
+    let (url, handle, profile) = start_memu_stub_with_model("http://127.0.0.1:9".into());
+    profile.cli.store(true, Ordering::SeqCst);
+    *profile.admission_error.lock().unwrap() = "Install or repair Atomic's session helper".into();
+    let ctx = TestCtx::new_with_memu(Some(url)).await;
+    let app = actix_test::init_service(test_app(&ctx)).await;
+    let create = || actix_test::TestRequest::post().uri("/api/conversations")
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul")).set_json(json!({"tag_ids":[]})).to_request();
+    assert_eq!(actix_test::call_service(&app, create()).await.status(), 409);
+    let core = ctx.state.manager.active_core().await.unwrap();
+    assert!(core.get_conversations(None, 50, 0, Some(("TestOwner", "TestSoul"))).await.unwrap().is_empty());
+    profile.admission_error.lock().unwrap().clear();
+    let response = actix_test::call_service(&app, create()).await;
+    assert_eq!(response.status(), 201);
+    let created: Value = actix_test::read_body_json(response).await;
+    assert_eq!(created["atomic_chat_state"]["backend"], "claude_code");
+    *profile.admission_error.lock().unwrap() = "Repair Atomic's session helper".into();
+    let read = actix_test::TestRequest::get().uri(&format!("/api/conversations/{}", created["id"].as_str().unwrap()))
+        .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul")).to_request();
+    assert_eq!(actix_test::call_service(&app, read).await.status(), 200);
+    handle.stop(true).await;
 }
 
 #[actix_web::test]
