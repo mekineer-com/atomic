@@ -1932,12 +1932,12 @@ mod tests {
                 // The scheduled production worker remains gated until N4. Exercise its
                 // existing closeout body with the same typed-profile seam as Send.
                 let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
-                let result = finish_memu_session_with_profile(
+                let ended = finish_memu_session_with_profile(
                     state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id,
                     &bridge, &work, read_chat(&db, id).await.unwrap(),
                     AtomicChatProfileResponse::ClaudeCode { cli: profile.clone() },
                 ).await.unwrap();
-                assert_eq!(result["ok"], true);
+                assert_eq!(ended["ok"], true);
                 let closed = read_chat(&db, id).await.unwrap();
                 let lifecycle = closed.conversation.atomic_chat_state.as_ref().unwrap();
                 assert_eq!(lifecycle.phase, Phase::Closed);
@@ -1946,10 +1946,10 @@ mod tests {
                 assert_eq!(lifecycle.maintenance.as_ref().unwrap().status, atomic_core::AtomicChatMaintenanceStatus::Complete);
                 assert_eq!(mock.publications.lock().unwrap().len(), 1);
                 let reads = mock.status_reads.load(Ordering::Relaxed);
-                let result = finish_memu_session(
+                let ended = finish_memu_session(
                     state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id, &bridge, &work,
                 ).await.unwrap();
-                assert_eq!(result["status"], "already_ended");
+                assert_eq!(ended["status"], "already_ended");
                 assert_eq!(mock.status_reads.load(Ordering::Relaxed), reads);
                 assert_eq!(mock.publications.lock().unwrap().len(), 1);
                 drop(work);
