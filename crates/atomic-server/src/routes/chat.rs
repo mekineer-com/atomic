@@ -1432,7 +1432,7 @@ async fn finish_memu_session(
     bridge: &ChatToolBridge,
     work: &ConversationWork,
 ) -> Result<serde_json::Value, JsonError> {
-    let mut conv = read_chat(&db, conversation_id).await?;
+    let conv = read_chat(&db, conversation_id).await?;
     if conv
         .conversation
         .atomic_chat_state
@@ -1446,10 +1446,7 @@ async fn finish_memu_session(
         }
         return Ok(serde_json::json!({"ok":true,"status":"already_ended"}));
     }
-    let request = ChatRequest::Recap {
-        instruction: atomic_recap_instruction(&memu_session.user_id),
-    };
-    let mut recap = existing_recap(&conv);
+    let recap = existing_recap(&conv);
     // Completed pre-activation sittings retain their existing publication semantics.
     if conv.conversation.atomic_chat_state.is_none() && recap.is_some() {
         return post_atomic_session_end(
@@ -1461,6 +1458,22 @@ async fn finish_memu_session(
         .await;
     }
     let profile = fetch_atomic_chat_profile(&memu_session).await?;
+    finish_memu_session_with_profile(state, db, memu_session, conversation_id, bridge, work, conv, profile).await
+}
+
+async fn finish_memu_session_with_profile(
+    state: web::Data<AppState>,
+    db: Db,
+    memu_session: MemuScope,
+    conversation_id: &str,
+    bridge: &ChatToolBridge,
+    work: &ConversationWork,
+    mut conv: atomic_core::ConversationWithMessages,
+    profile: AtomicChatProfileResponse,
+) -> Result<serde_json::Value, JsonError> {
+    let request = ChatRequest::Recap {
+        instruction: atomic_recap_instruction(&memu_session.user_id),
+    };
     let capacity = profile.capacity()?;
     let backend = profile.backend();
     profile.check_binding(&conv)?;
@@ -1479,7 +1492,7 @@ async fn finish_memu_session(
     };
     // Recovery may have saved the recap or recovered an ordinary assistant row.
     conv = read_chat(&db, conversation_id).await?;
-    recap = existing_recap(&conv);
+    let mut recap = existing_recap(&conv);
     let rows = rows_for_saved_history(&conv);
     let needs_recap = recap.is_none() && needs_activity_recap(&conv, &rows);
     if needs_recap {

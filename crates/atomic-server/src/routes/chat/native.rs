@@ -1272,6 +1272,9 @@ mod tests {
         turn_id: Mutex<String>,
         maintenance: Mutex<Option<Value>>,
         status_reads: AtomicUsize,
+        purpose: Mutex<String>,
+        context_tokens: AtomicUsize,
+        publications: Mutex<Vec<Value>>,
     }
 
     fn counts() -> Value {
@@ -1477,7 +1480,8 @@ mod tests {
         }
         *mock.attempt_id.lock().unwrap() = body["attempt_id"].as_str().unwrap().into();
         *mock.turn_id.lock().unwrap() = body["turn_id"].as_str().unwrap().into();
-        if mock.mode.starts_with("recap") {
+        *mock.purpose.lock().unwrap() = body["purpose"].as_str().unwrap().into();
+        if body["purpose"] == "recap" {
             assert_eq!(body["operation"], "continue");
             assert!(body["system_prompt"].is_null() && body["bridge_url"].is_null());
             assert!(!request.headers().contains_key("authorization"));
@@ -1523,6 +1527,7 @@ mod tests {
             serde_json::json!({"type":"usage","message_id":"message","usage":counts()}),
         ];
         match mock.mode {
+            "route" if body["purpose"] == "recap" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact recap"})),
             "success" | "route" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact terminal response"})),
             "recap" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Exact recap"})),
             "mismatch" => frames.push(serde_json::json!({"type":"complete","session_id":"native-id","text":"Not the saved answer"})),
@@ -1542,18 +1547,42 @@ mod tests {
             .streaming(futures::stream::iter(chunks))
     }
 
-    async fn mock_maintenance(mock: web::Data<MockNative>, body: web::Json<Value>) -> HttpResponse {
+    async fn mock_maintenance(mock: web::Data<MockNative>, core: web::Data<atomic_core::AtomicCore>, body: web::Json<Value>) -> HttpResponse {
         assert_eq!(mock.mode, "route");
-        assert_eq!(body["action"], "compact");
+        let purge = body["action"] == "purge";
+        if purge {
+            let publications = mock.publications.lock().unwrap().clone();
+            assert_eq!(publications.len(), 1, "publish before purging native history");
+            let id = publications[0]["conversation_id"].as_str().unwrap().strip_prefix("chat:atomic-").unwrap();
+            assert_eq!(core.get_conversation(id).await.unwrap().unwrap().conversation.atomic_chat_state.unwrap().phase, Phase::Closed);
+        } else {
+            assert_eq!(body["action"], "compact");
+        }
         assert_eq!(body["native_attempt_id"], *mock.attempt_id.lock().unwrap());
         assert_eq!(body["turn_id"], *mock.turn_id.lock().unwrap());
         let receipt = serde_json::json!({"attempt_id":body["attempt_id"],"native_attempt_id":body["native_attempt_id"],
-            "turn_id":body["turn_id"],"action":"compact","status":"complete"});
+            "turn_id":body["turn_id"],"action":body["action"],"status":"complete"});
         let mut saved = mock.maintenance.lock().unwrap();
-        assert!(saved.is_none(), "successful reply triggers cleanup only once");
+        if !purge {
+            assert!(saved.is_none(), "successful reply triggers cleanup only once");
+        }
         *saved = Some(receipt.clone());
         HttpResponse::Ok().json(serde_json::json!({"maintenance":receipt,
             "context":{"estimated_tokens":90000,"overhead_tokens":50,"system_tokens":25}}))
+    }
+
+    async fn mock_session_end(mock: web::Data<MockNative>, core: web::Data<atomic_core::AtomicCore>, body: web::Json<Value>) -> HttpResponse {
+        let id = body["conversation_id"].as_str().unwrap().strip_prefix("chat:atomic-").unwrap();
+        let saved = core.get_conversation(id).await.unwrap().unwrap();
+        assert_eq!(saved.conversation.atomic_chat_state.unwrap().phase, Phase::Closing);
+        assert_eq!(body["activity_recap"], "Exact recap");
+        let transcript = body["transcript"].as_array().unwrap();
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0]["role"], "user");
+        assert_eq!(transcript[1]["role"], "assistant");
+        assert_eq!(transcript[1]["content"], "Exact terminal response");
+        mock.publications.lock().unwrap().push(body.into_inner());
+        HttpResponse::Ok().json(serde_json::json!({"ok":true}))
     }
 
     async fn mock_status(
@@ -1627,14 +1656,15 @@ mod tests {
         };
         let mut receipt_counts = counts();
         receipt_counts["cache_read_input_tokens"] = serde_json::json!(321);
+        let purpose = mock.purpose.lock().unwrap().clone();
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id","writer_idle":!active,
             "maintenance":mock.maintenance.lock().unwrap().clone(),
-            "context":{"estimated_tokens":if mock.mode == "route" { 90000 } else if active || older_attempt { 9000 } else { 700 },"overhead_tokens":50,"system_tokens":25},
-            "turn":{"session_id":"native-id","turn_id":turn_id,"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":if mock.mode.starts_with("recap") { "recap" } else { "reply" },
+            "context":{"estimated_tokens":if mock.mode == "route" { mock.context_tokens.load(Ordering::Relaxed) } else if active || older_attempt { 9000 } else { 700 },"overhead_tokens":50,"system_tokens":25},
+            "turn":{"session_id":"native-id","turn_id":turn_id,"attempt_id":if older_attempt { "older-attempt".to_string() } else { mock.attempt_id.lock().unwrap().clone() },"purpose":purpose,
                 "status":status,"submission":"recorded","initialized":true,
                 "usage":{"message_id":"message","usage":receipt_counts},
                 "error":if status == "failed" { Some("Saved native failure") } else { None },
-                "text":if mock.mode.starts_with("recap") { Some("Exact recap") }
+                "text":if purpose == "recap" { Some("Exact recap") }
                     else if matches!(mock.mode, "success" | "route") { Some("Exact terminal response") }
                     else if status == "complete" { Some("Recovered terminal response") } else { None }}}))
     }
@@ -1690,17 +1720,26 @@ mod tests {
                 turn_id: Mutex::new(String::new()),
                 maintenance: Mutex::new(None),
                 status_reads: AtomicUsize::new(0),
+                purpose: Mutex::new(if mode.starts_with("recap") { "recap" } else { "reply" }.into()),
+                context_tokens: AtomicUsize::new(90000),
+                publications: Mutex::new(Vec::new()),
             });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             bridge.set_listeners(&[listener.local_addr().unwrap()]);
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let factory_bridge = bridge.clone();
             let factory_mock = mock.clone();
+            let factory_core = db.0.clone();
             let server = HttpServer::new(move || {
                 App::new()
                     .app_data(web::Data::new(factory_bridge.clone()))
                     .app_data(factory_mock.clone())
+                    .app_data(web::Data::new(factory_core.clone()))
                     .route("/integration/atomic/chat", web::post().to(mock_chat))
+                    .route("/integration/atomic/session_end", web::post().to(mock_session_end))
+                    .route("/owner", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"user_id":"TestOwner"})) }))
+                    .route("/souls", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"souls":["TestSoul"]})) }))
+                    .route("/integration/atomic/chat_profile", web::get().to(|| async { HttpResponse::Ok().json(serde_json::json!({"backend":"claude_code","cli":{"model":"fictional","context_window_tokens":128000,"timeout_seconds":1,"effort":"medium","fingerprint":"fingerprint","memu_response_sentences":5,"memu_log_prompts":false}})) }))
                     .route("/integration/atomic/chat/maintenance", web::post().to(mock_maintenance))
                     .route(
                         "/integration/atomic/chat/status",
@@ -1799,6 +1838,8 @@ mod tests {
                 _prepared_work = Some(work);
             }
             if mode == "route" {
+                let mut state = state;
+                state.memu_session = Some(crate::state::MemuSessionConfig { base_url: base_url.clone() });
                 let state = web::Data::new(state);
                 let mut small = profile.clone();
                 small.context_window_tokens = 20_001;
@@ -1852,6 +1893,66 @@ mod tests {
                 assert_eq!(lifecycle.context_window_tokens, Some(128000));
                 assert!(lifecycle.active.is_none());
                 assert_eq!(saved.messages.len(), 3);
+
+                // Reload must return saved state without queueing behind a live worker.
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                let reads = mock.status_reads.load(Ordering::Relaxed);
+                let request = actix_web::test::TestRequest::get()
+                    .insert_header(("X-OpenAlma-User", "TestOwner"))
+                    .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+                    .to_http_request();
+                let response = tokio::time::timeout(Duration::from_secs(2), get_conversation(
+                    request, state.clone(), Db(db.0.clone(), db.1.clone()),
+                    web::Path::from(id.clone()), web::Data::new(bridge.clone()),
+                )).await.expect("reload queued behind the sitting lock");
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = actix_web::body::to_bytes(response.into_body()).await.unwrap();
+                let reloaded: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(reloaded["atomic_chat_state"]["phase"], "open");
+                assert_eq!(mock.status_reads.load(Ordering::Relaxed), reads);
+                drop(work);
+
+                // Crossing the reserve boundary closes admission without saving the draft
+                // or starting another ordinary cleanup/model turn.
+                mock.context_tokens.store(108000, Ordering::Relaxed);
+                let previous_attempt = mock.attempt_id.lock().unwrap().clone();
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                let error = chat_work_with_profile(
+                    state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id.clone(),
+                    ChatRequest::New { content: "unsent next draft".into(), page_context: None, canvas_context: None },
+                    web::Data::new(bridge.clone()),
+                    AtomicChatProfileResponse::ClaudeCode { cli: profile.clone() }, work,
+                ).await.unwrap_err();
+                assert!(error.1["error"].as_str().unwrap().contains("sitting is closing"));
+                let closing = read_chat(&db, id).await.unwrap();
+                assert_eq!(closing.conversation.atomic_chat_state.as_ref().unwrap().phase, Phase::Closing);
+                assert_eq!(closing.messages.len(), saved.messages.len());
+                assert_eq!(*mock.attempt_id.lock().unwrap(), previous_attempt);
+
+                // The scheduled production worker remains gated until N4. Exercise its
+                // existing closeout body with the same typed-profile seam as Send.
+                let work = lock_conversation(&db, id, Some(&scope)).await.unwrap();
+                let result = finish_memu_session_with_profile(
+                    state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id,
+                    &bridge, &work, read_chat(&db, id).await.unwrap(),
+                    AtomicChatProfileResponse::ClaudeCode { cli: profile.clone() },
+                ).await.unwrap();
+                assert_eq!(result["ok"], true);
+                let closed = read_chat(&db, id).await.unwrap();
+                let lifecycle = closed.conversation.atomic_chat_state.as_ref().unwrap();
+                assert_eq!(lifecycle.phase, Phase::Closed);
+                assert_eq!(existing_recap(&closed).as_deref(), Some("Exact recap"));
+                assert_eq!(lifecycle.maintenance.as_ref().unwrap().kind, atomic_core::AtomicChatMaintenanceKind::Purge);
+                assert_eq!(lifecycle.maintenance.as_ref().unwrap().status, atomic_core::AtomicChatMaintenanceStatus::Complete);
+                assert_eq!(mock.publications.lock().unwrap().len(), 1);
+                let reads = mock.status_reads.load(Ordering::Relaxed);
+                let result = finish_memu_session(
+                    state.clone(), Db(db.0.clone(), db.1.clone()), scope.clone(), id, &bridge, &work,
+                ).await.unwrap();
+                assert_eq!(result["status"], "already_ended");
+                assert_eq!(mock.status_reads.load(Ordering::Relaxed), reads);
+                assert_eq!(mock.publications.lock().unwrap().len(), 1);
+                drop(work);
                 let original_attempt = mock.attempt_id.lock().unwrap().clone();
                 let user = saved
                     .messages
