@@ -255,7 +255,7 @@ mod tests {
 
     #[actix_web::test]
     async fn final_cleanup_is_only_for_fit_or_provider_context_failure_and_has_one_retry() {
-        for mode in ["recap_fit", "recap_predicted", "recap_context", "recap_quota", "recap_again", "recap_unknown", "recap_smaller"] {
+        for mode in ["recap_fit", "recap_predicted", "recap_context", "recap_quota", "recap_again", "recap_unknown", "recap_smaller", "recap_smaller_unknown"] {
             let dir = tempfile::TempDir::new().unwrap();
             let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
             let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
@@ -270,7 +270,7 @@ mod tests {
             db.0.save_message(&id, "system", "fictional Presence").await.unwrap();
             db.0.save_message(&id, "user", "fictional question").await.unwrap();
             db.0.save_message(&id, "assistant", "fictional answer").await.unwrap();
-            if mode == "recap_smaller" {
+            if mode.starts_with("recap_smaller") {
                 let input = db.0.admit_chat_turn(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode,
                     &ChatRequest::New { content:"fictional sizing turn".into(), page_context:None, canvas_context:None }, 200000).await.unwrap();
                 db.0.fail_chat_turn(&id, &input.id, "fictional refusal", false, None).await.unwrap();
@@ -290,13 +290,13 @@ mod tests {
             actix_web::rt::spawn(server);
             let bridge = ChatToolBridge::default();
             let work = lock_conversation(&db, &id, Some(&scope)).await.unwrap();
-            let capacity = if mode == "recap_smaller" { 128000 } else { 200000 };
+            let capacity = if mode.starts_with("recap_smaller") { 128000 } else { 200000 };
             let profile = ClaudeChatProfile { model:"fictional".into(), context_window_tokens:capacity,
                 timeout_seconds:1, effort:"medium".into(), fingerprint:"fingerprint".into(),
                 memu_response_sentences:5, memu_log_prompts:false };
             let request = ChatRequest::Recap { instruction:"fictional recap".into() };
             let result = execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, capacity, &work).await;
-            assert_eq!(result.is_err(), matches!(mode, "recap_quota" | "recap_again" | "recap_smaller"));
+            assert_eq!(result.is_err(), matches!(mode, "recap_quota" | "recap_again" | "recap_smaller" | "recap_smaller_unknown"));
             let cleanup = matches!(mode, "recap_predicted" | "recap_context" | "recap_again");
             assert_eq!(mock.requests.lock().unwrap().len(), usize::from(cleanup));
             let calls = mock.native_calls.lock().unwrap().len();
@@ -305,6 +305,10 @@ mod tests {
                 assert!(execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, 200000, &work).await.is_err());
                 assert_eq!(mock.native_calls.lock().unwrap().len(), calls);
                 assert_eq!(mock.requests.lock().unwrap().len(), 1);
+            } else if mode == "recap_smaller_unknown" {
+                assert!(execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, capacity, &work).await.is_err());
+                assert_eq!(mock.requests.lock().unwrap().len(), 0);
+                assert_eq!(mock.native_calls.lock().unwrap().len(), 2);
             }
             handle.stop(true).await;
         }
@@ -314,12 +318,12 @@ mod tests {
         if mock.mode.starts_with("recap_") {
             let last = mock.native_calls.lock().unwrap().last().cloned();
             let calls = mock.native_calls.lock().unwrap().len();
-            let failed = last.is_some() && (mock.mode == "recap_quota" || mock.mode == "recap_again"
+            let failed = last.is_some() && (matches!(mock.mode, "recap_quota" | "recap_again" | "recap_smaller_unknown")
                 || (mock.mode == "recap_context" && calls == 1));
             let turn_id = last.as_ref().map(|body| body["turn_id"].as_str().unwrap())
                 .or_else(|| query.get("turn_id").map(String::as_str)).unwrap_or("user-turn");
             return HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id", "writer_idle":true,
-                "context":if mock.mode == "recap_unknown" && last.is_none() { Value::Null }
+                "context":if matches!(mock.mode, "recap_unknown" | "recap_smaller_unknown") && last.is_none() { Value::Null }
                     else { serde_json::json!({"estimated_tokens":if matches!(mock.mode, "recap_predicted" | "recap_smaller") && last.is_none() { 200000 } else { 1000 },
                         "overhead_tokens":50,"system_tokens":25}) },
                 "maintenance":mock.receipt.lock().unwrap().clone(),

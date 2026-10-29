@@ -768,7 +768,11 @@ pub(crate) fn prepared_chat_state(
             }
         }
     }
-    state.context_window_tokens = Some(context_window_tokens);
+    // A failed recap with a smaller profile must not erase the ordinary-turn
+    // capacity basis and make cleanup eligible on the next End attempt.
+    if *backend != AtomicChatBackend::ClaudeCode || !matches!(request, AtomicChatRequest::Recap { .. }) {
+        state.context_window_tokens = Some(context_window_tokens);
+    }
     Ok(state)
 }
 
@@ -1792,6 +1796,18 @@ mod tests {
             assert!(!state.maintenance.as_ref().unwrap().awaiting_measurement);
             assert_eq!(state.maintenance.as_ref().unwrap().ordinary_disabled, tokens > 60_000);
         }
+    }
+
+    #[test]
+    fn failed_native_recap_retains_the_ordinary_capacity_basis() {
+        let state: AtomicChatState = serde_json::from_value(serde_json::json!({
+            "backend":"claude_code","phase":"closing","active":null,"context_window_tokens":200000})).unwrap();
+        let request = AtomicChatRequest::Recap { instruction:"fictional recap".into() };
+        let mut admitted = prepared_chat_state(Some(state), &AtomicChatBackend::ClaudeCode, None, &request, 128000, false).unwrap();
+        assert_eq!(admitted.context_window_tokens, Some(200000));
+        admitted_chat_message(&mut admitted, &request, "recap");
+        failed_chat_state(&mut admitted, "recap", "provider context overflow", false, None).unwrap();
+        assert_eq!(admitted.context_window_tokens, Some(200000));
     }
 
     #[test]
