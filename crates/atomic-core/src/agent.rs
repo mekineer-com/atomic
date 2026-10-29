@@ -5094,6 +5094,7 @@ mod tests {
             .await
             .err()
             .unwrap()
+            .to_string()
             .contains("no saved Soul Presence"));
         assert_eq!(
             core.get_conversation(cid)
