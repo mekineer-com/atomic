@@ -1474,10 +1474,14 @@ mod tests {
                 body["prompt_tokens"].as_u64().unwrap() as usize,
                 atomic_core::chunking::count_tokens(body["prompt"].as_str().unwrap()) + 8
             );
-            assert!(
-                body["overhead_tokens"].as_u64().unwrap() > 0,
-                "the runner must receive preparation's schema-inclusive token count"
-            );
+            if body["purpose"] == "recap" {
+                assert_eq!(body["overhead_tokens"], 0, "recap has no tool schemas");
+            } else {
+                assert!(
+                    body["overhead_tokens"].as_u64().unwrap() > 0,
+                    "the runner must receive preparation's schema-inclusive token count"
+                );
+            }
         }
         *mock.attempt_id.lock().unwrap() = body["attempt_id"].as_str().unwrap().into();
         *mock.turn_id.lock().unwrap() = body["turn_id"].as_str().unwrap().into();

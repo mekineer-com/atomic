@@ -142,6 +142,12 @@ async fn fake_chat_completion(body: web::Json<Value>) -> HttpResponse {
 }
 
 async fn fake_chat_completion_with_memu_write_tools(body: web::Json<Value>) -> HttpResponse {
+    if body["tools"].is_null() {
+        assert!(body["messages"].as_array().unwrap().iter().any(|message|
+            message["role"] == "user" && message["content"].as_str()
+                .is_some_and(|content| content.starts_with("This Atomic session is ending."))));
+        return fake_chat_completion(body).await;
+    }
     let tool_names: Vec<&str> = body["tools"]
         .as_array()
         .unwrap()

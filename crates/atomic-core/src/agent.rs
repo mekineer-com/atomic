@@ -4268,7 +4268,8 @@ mod tests {
                 .conversation
                 .atomic_chat_state
                 .unwrap();
-            assert_eq!(before.context_window_tokens, Some(200_000));
+            assert_eq!(before.context_window_tokens,
+                if backend == Backend::Api { Some(200_000) } else { None });
             assert!(matches!(
                 before.recap.as_ref().unwrap().outcome,
                 Outcome::Uncertain { .. }
