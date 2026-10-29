@@ -22,5 +22,6 @@ From the Atomic checkout:
 python3 -m unittest discover -s scripts/claude_session -p 'test_*.py'
 ```
 
-The local `pyproject.toml` packages only this callable. Installation and native
-runtime integration remain separate from these offline preservation tests.
+The local `pyproject.toml` packages only this callable. OpenAlma's managed Atomic
+Install/Update installs it into the memory server's Python environment, with MCP
+stopped. Native activation/acceptance remain separate from these offline tests.

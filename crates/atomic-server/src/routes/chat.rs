@@ -1220,6 +1220,14 @@ async fn chat_work_with_profile(
     if tokens >= capacity - 20_000 {
         change_phase(&state, &db, &scope, &id, &backend, Phase::Closing).await?;
         schedule_close_out(state, db, scope, id, bridge);
+    } else if backend == Backend::ClaudeCode && result.is_ok() {
+        let saved = read_chat(&db, &id).await?;
+        if saved.conversation.atomic_chat_state.as_ref().is_some_and(|saved| native::ordinary_due(saved, capacity, tokens)) {
+            if let Err(error) = native::maintain(&state, &db, &scope, &bridge, &id,
+                atomic_core::AtomicChatMaintenanceKind::Ordinary, &work).await {
+                tracing::warn!(conversation_id = %id, error = ?error, "Native cleanup is unfinished; retaining its saved outcome");
+            }
+        }
     }
     result
 }
@@ -1431,6 +1439,9 @@ async fn finish_memu_session(
         .as_ref()
         .is_some_and(|saved| saved.phase == Phase::Closed)
     {
+        if conv.conversation.atomic_chat_state.as_ref().is_some_and(|saved| saved.backend == Backend::ClaudeCode) {
+            native::reconcile(&state, &db, &memu_session, bridge, conversation_id, work).await?;
+        }
         return Ok(serde_json::json!({"ok":true,"status":"already_ended"}));
     }
     let request = ChatRequest::Recap {
@@ -1469,7 +1480,6 @@ async fn finish_memu_session(
     recap = existing_recap(&conv);
     let rows = rows_for_saved_history(&conv);
     let needs_recap = recap.is_none() && needs_activity_recap(&conv, &rows);
-    let mut prepared = None;
     if needs_recap {
         let projected = match &profile {
             AtomicChatProfileResponse::Api { settings } => Some(
@@ -1482,14 +1492,7 @@ async fn finish_memu_session(
                 .await
                 .map_err(core_json_error)?,
             ),
-            AtomicChatProfileResponse::ClaudeCode { cli } => {
-                let input =
-                    native::prepare_input(&db, &memu_session, conversation_id, &request, cli, work)
-                        .await?;
-                let tokens = input.context_tokens;
-                prepared = Some(input);
-                tokens
-            }
+            AtomicChatProfileResponse::ClaudeCode { .. } => None,
         };
         if projected.is_some_and(|tokens| {
             tokens.saturating_add(atomic_core::agent::CHAT_RESPONSE_MAX_TOKENS as usize) > capacity
@@ -1498,8 +1501,6 @@ async fn finish_memu_session(
                 StatusCode::CONFLICT,
                 serde_json::json!({"error":if conv.conversation.atomic_chat_state.is_none() {
                     LEGACY_CONTEXT_ERROR
-                } else if backend == Backend::ClaudeCode {
-                    "The recap needs more native context space. Keep this history; same-session Session Survivor close-out recovery is not connected yet."
                 } else { "The recap needs a model/provider with a larger usable context window. Increase llm.context_window_tokens with a compatible model; saved history is unchanged." }}),
             ));
         }
@@ -1514,25 +1515,13 @@ async fn finish_memu_session(
     )
     .await?;
     if needs_recap {
-        let control =
-            db.0.admit_chat_turn(
-                conversation_id,
-                &memu_session.user_id,
-                &memu_session.soul_id,
-                &backend,
-                &request,
-                capacity,
-            )
-            .await
-            .map_err(core_json_error)?;
-        chat_changed(&state, &db, conversation_id);
         let ChatRequest::Recap { instruction } = &request else {
             unreachable!()
         };
         // Recap delivery uses durable state, never an ordinary reply/stream bubble.
         match &profile {
             AtomicChatProfileResponse::ClaudeCode { cli } => {
-                native::execute_prepared(
+                native::execute_recap(
                     &state,
                     &db,
                     &memu_session,
@@ -1540,13 +1529,16 @@ async fn finish_memu_session(
                     bridge,
                     bridge_url.expect("native tool URL validated before admission"),
                     conversation_id,
-                    &control.id,
-                    native::Purpose::Recap,
-                    prepared.expect("prepared native recap"),
+                    &request,
+                    capacity,
+                    work,
                 )
                 .await?;
             }
             AtomicChatProfileResponse::Api { settings } => {
+                let control = db.0.admit_chat_turn(conversation_id, &memu_session.user_id,
+                    &memu_session.soul_id, &backend, &request, capacity).await.map_err(core_json_error)?;
+                chat_changed(&state, &db, conversation_id);
                 match db
                     .0
                     .execute_saved_chat_recap(
@@ -1582,6 +1574,10 @@ async fn finish_memu_session(
                 Phase::Closed,
             )
             .await?;
+            if backend == Backend::ClaudeCode {
+                native::maintain(&state, &db, &memu_session, bridge, conversation_id,
+                    atomic_core::AtomicChatMaintenanceKind::Purge, work).await?;
+            }
             Ok(result)
         }
         Err(error) => {

@@ -582,6 +582,16 @@ fn apply_native_usage(
         {
             return Err(AtomicCoreError::Conflict("Native usage does not match this Claude turn".into()));
         }
+        if let (Some(maintenance), Some(outcome), Some(capacity)) = (
+            state.maintenance.as_mut(), outcome, state.context_window_tokens,
+        ) {
+            if maintenance.awaiting_measurement && outcome.attempt_id != maintenance.native_attempt_id {
+                if let Some(tokens) = outcome.context_tokens {
+                    maintenance.ordinary_disabled |= tokens > capacity.saturating_mul(60) / 100;
+                    maintenance.awaiting_measurement = false;
+                }
+            }
+        }
         state.native_usage = Some(usage.clone());
     }
     if let Some(outcome) = outcome {
@@ -1752,6 +1762,36 @@ mod tests {
         let stored = stored_chat_state(&conn, id).unwrap().unwrap();
         set_chat_maintenance(&conn, id, "TestOwner", "TestSoul", &stored, &failed, None).unwrap();
         assert_eq!(stored_chat_state(&conn, id).unwrap().unwrap().native_context_tokens, None);
+    }
+
+    #[test]
+    fn cleanup_latch_waits_for_later_finalized_coverage() {
+        for tokens in [50_000, 60_000, 60_001] {
+            let mut state: AtomicChatState = serde_json::from_value(serde_json::json!({
+                "backend":"claude_code", "phase":"open", "active":null, "context_window_tokens":100000,
+                "maintenance":{"attempt_id":"cleanup", "native_attempt_id":"before", "turn_id":"turn",
+                    "kind":"ordinary", "status":"complete", "error":null, "previous_attempt_id":null,
+                    "ordinary_disabled":false,"awaiting_measurement":true,"final_used":false}
+            })).unwrap();
+            let usage = crate::AtomicChatUsage { turn_id:"turn".into(), message_id:"message".into(),
+                input_tokens:tokens, cache_creation_input_tokens:0, cache_read_input_tokens:0, output_tokens:0 };
+            let mut outcome = AtomicChatNativeOutcome { attempt_id:"before".into(), usage:Some(usage.clone()),
+                input_recorded:Some(true), context_tokens:Some(tokens) };
+            apply_native_usage(&mut state, "turn", Some(&outcome)).unwrap();
+            assert!(state.maintenance.as_ref().unwrap().awaiting_measurement, "same pre-clean turn is not new usage");
+            outcome.attempt_id = "after".into();
+            outcome.usage = None;
+            apply_native_usage(&mut state, "turn", Some(&outcome)).unwrap();
+            assert!(state.maintenance.as_ref().unwrap().awaiting_measurement);
+            outcome.usage = Some(usage);
+            outcome.context_tokens = None;
+            apply_native_usage(&mut state, "turn", Some(&outcome)).unwrap();
+            assert!(state.maintenance.as_ref().unwrap().awaiting_measurement);
+            outcome.context_tokens = Some(tokens);
+            apply_native_usage(&mut state, "turn", Some(&outcome)).unwrap();
+            assert!(!state.maintenance.as_ref().unwrap().awaiting_measurement);
+            assert_eq!(state.maintenance.as_ref().unwrap().ordinary_disabled, tokens > 60_000);
+        }
     }
 
     #[test]

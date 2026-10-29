@@ -1,7 +1,7 @@
 //! Dormant native execution; admission/recovery stays in the sitting lifecycle.
 
 mod maintenance;
-pub(super) use maintenance::run as maintain;
+pub(super) use maintenance::{ordinary_due, run as maintain};
 
 use super::*;
 use crate::mcp::chat::{ChatToolBridge, CHAT_TOOLS_PATH};
@@ -130,6 +130,7 @@ pub(super) struct NativeReceipt {
     pub initialized: Option<bool>,
     #[serde(default)]
     pub input_recorded: bool,
+    native_result: Option<Value>,
 }
 
 impl NativeReceipt {
@@ -465,8 +466,11 @@ pub(super) async fn reconcile(
             serde_json::json!({"error":"Restore claude_code=false for this API sitting"}),
         ));
     }
-    if saved.phase == Phase::Closed
-        || saved
+    if saved.phase == Phase::Closed {
+        return maintain(state, db, scope, bridge, id, atomic_core::AtomicChatMaintenanceKind::Purge, work)
+            .await.map(|_| ());
+    }
+    if saved
             .recap
             .as_ref()
             .is_some_and(|recap| matches!(recap.outcome, RecapOutcome::Complete { .. }))
@@ -608,6 +612,73 @@ pub(super) async fn reconcile(
         .await?;
     }
     Err((StatusCode::CONFLICT, serde_json::json!({"error":error})))
+}
+
+fn context_length_error(receipt: &NativeReceipt) -> bool {
+    let Some(result) = receipt.native_result.as_ref().filter(|result| result["is_error"] == true) else { return false; };
+    result["errors"].as_array().into_iter().flatten().filter_map(Value::as_str)
+        .chain(result["result"].as_str()).any(|error| {
+            let error = error.to_ascii_lowercase();
+            ["prompt is too long", "context_length_exceeded", "maximum context length", "exceeds the context window"]
+                .iter().any(|phrase| error.contains(phrase))
+        })
+}
+
+/// One existing native recap path, with at most one reserved file cleanup.
+/// The cleanup basis identifies whether its one subsequent recap was admitted.
+pub(super) async fn execute_recap(
+    state: &AppState, db: &Db, scope: &MemuScope, profile: &ClaudeChatProfile,
+    bridge: &ChatToolBridge, bridge_url: &str, id: &str, request: &ChatRequest,
+    capacity: usize, work: &ConversationWork,
+) -> Result<(), JsonError> {
+    use atomic_core::{AtomicChatMaintenanceKind as Kind, AtomicChatMaintenanceStatus as Status};
+    loop {
+        let conv = read_chat(db, id).await?;
+        let saved = conv.conversation.atomic_chat_state.as_ref().expect("closing native sitting");
+        let final_cleanup = saved.maintenance.as_ref().filter(|prior| prior.kind == Kind::Final && prior.final_used);
+        if let Some(cleanup) = final_cleanup.filter(|cleanup| cleanup.status != Status::Complete) {
+            return Err((StatusCode::CONFLICT, serde_json::json!({"error":cleanup.error.as_deref()
+                .unwrap_or("Final native cleanup is unfinished; keep this sitting and reload.")})));
+        }
+        if maintenance::final_recap_used(saved) {
+            return Err((StatusCode::CONFLICT, serde_json::json!({"error":
+                "The reserved same-session recap retry has already been attempted. Keep this history; contact help@openalma.org if close-out still cannot complete."})));
+        }
+        let prepared = prepare_input(db, scope, id, request, profile, work).await?;
+        let needs_cleanup = final_cleanup.is_none() && prepared.context_tokens.is_some_and(|tokens|
+            tokens.saturating_add(atomic_core::agent::CHAT_RESPONSE_MAX_TOKENS as usize) > capacity);
+        if !needs_cleanup {
+            let control = db.0.admit_chat_turn(id, &scope.user_id, &scope.soul_id, &Backend::ClaudeCode,
+                                              request, capacity).await.map_err(core_json_error)?;
+            chat_changed(state, db, id);
+            let result = execute_prepared(state, db, scope, profile, bridge, bridge_url,
+                                          id, &control.id, Purpose::Recap, prepared).await;
+            if result.is_ok() { return Ok(()); }
+            // Only authoritative provider context failure, with this attempt's
+            // writer exited, can spend the final cleanup after a failed call.
+            let current = read_chat(db, id).await?;
+            let attempt = current.conversation.atomic_chat_state.as_ref()
+                .and_then(|saved| saved.recap.as_ref()).and_then(|recap| recap.native_attempt_id.as_deref());
+            let context_failure = if final_cleanup.is_none() {
+                status(scope, id, &control.id).await.ok().is_some_and(|observed|
+                    observed.writer_idle == Some(true) && attempt.is_some_and(|attempt|
+                        observed.matches_turn(&control.id, attempt, Purpose::Recap, None))
+                    && observed.turn.as_ref().is_some_and(|receipt| receipt.status == "failed" && context_length_error(receipt)))
+            } else { false };
+            if !context_failure { return result.map(|_| ()); }
+        }
+        if saved.context_window_tokens.is_some_and(|previous| capacity < previous) {
+            return Err((StatusCode::CONFLICT, serde_json::json!({"error":
+                "The selected usable context window is smaller than this sitting used. Restore a larger compatible model and claude_code_context_window_tokens; cleanup does not repair configuration changes."})));
+        }
+        let outcome = maintain(state, db, scope, bridge, id, Kind::Final, work).await?;
+        if outcome != Status::Complete {
+            return Err((StatusCode::CONFLICT, serde_json::json!({"error":
+                "Final native cleanup did not complete. Keep this sitting; its saved maintenance error has the details."})));
+        }
+        // Preserve the old estimate, but let Claude's actual context limit
+        // decide this single same-session retry after successful cleanup.
+    }
 }
 
 async fn reconcile_failure(

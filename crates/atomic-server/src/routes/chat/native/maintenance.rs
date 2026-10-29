@@ -27,6 +27,19 @@ fn action(kind: Kind) -> &'static str {
     if kind == Kind::Purge { "purge" } else { "compact" }
 }
 
+pub(crate) fn ordinary_due(saved: &AtomicChatState, capacity: usize, tokens: usize) -> bool {
+    saved.backend == Backend::ClaudeCode && saved.phase == Phase::Open && saved.active.is_none()
+        && tokens >= capacity.saturating_mul(70) / 100 && tokens < capacity.saturating_sub(20_000)
+        && saved.maintenance.as_ref().is_none_or(|prior| !prior.unresolved()
+            && !prior.ordinary_disabled && !prior.awaiting_measurement && prior.status != Status::Blocked)
+}
+
+pub(crate) fn final_recap_used(saved: &AtomicChatState) -> bool {
+    saved.maintenance.as_ref().is_some_and(|prior| prior.kind == Kind::Final && prior.final_used
+        && saved.recap.as_ref().and_then(|recap| recap.native_attempt_id.as_ref())
+            .is_some_and(|attempt| *attempt != prior.native_attempt_id))
+}
+
 async fn checkpoint(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
                     saved: &AtomicChatState, next: &Maintenance, context: Option<usize>) -> Result<(), JsonError> {
     if saved.maintenance.as_ref() != Some(next) || saved.native_context_tokens != context {
@@ -38,7 +51,7 @@ async fn checkpoint(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
 }
 
 async fn apply(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
-               saved: &AtomicChatState, receipt: Receipt, context: Option<NativeContext>) -> Result<(), JsonError> {
+               saved: &AtomicChatState, receipt: Receipt, context: Option<NativeContext>) -> Result<Status, JsonError> {
     let pending = saved.maintenance.as_ref().expect("saved maintenance intent");
     if receipt.attempt_id != pending.attempt_id || receipt.native_attempt_id != pending.native_attempt_id
         || receipt.turn_id != pending.turn_id || receipt.action != action(pending.kind)
@@ -50,16 +63,17 @@ async fn apply(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
     next.status = receipt.status;
     next.error = receipt.error;
     next.awaiting_measurement = next.kind == Kind::Ordinary && next.status == Status::Complete;
+    next.ordinary_disabled |= next.kind == Kind::Ordinary && matches!(next.status, Status::Failed | Status::Blocked);
     checkpoint(state, db, scope, id, saved, &next,
                context.map(|context| context.estimated_tokens)).await?;
     if next.unresolved() || (next.kind == Kind::Purge && next.status != Status::Complete) {
         return Err(failure(next.error.as_deref().unwrap_or("Native maintenance is still pending; reload to recover the same attempt.")));
     }
-    Ok(())
+    Ok(next.status)
 }
 
 async fn submit(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
-                saved: &AtomicChatState) -> Result<(), JsonError> {
+                saved: &AtomicChatState) -> Result<Status, JsonError> {
     let pending = saved.maintenance.as_ref().expect("saved maintenance intent");
     let response = reqwest::Client::new()
         .post(format!("{}/integration/atomic/chat/maintenance", scope.base_url))
@@ -67,7 +81,7 @@ async fn submit(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
             "conversation_id":id, "turn_id":pending.turn_id,
             "native_attempt_id":pending.native_attempt_id, "attempt_id":pending.attempt_id,
             "previous_attempt_id":pending.previous_attempt_id, "action":action(pending.kind)}))
-        .timeout(Duration::from_secs(30)).send().await.map_err(failure)?;
+        .timeout(Duration::from_secs(120)).send().await.map_err(failure)?;
     if !response.status().is_success() {
         let code = response.status();
         if code == reqwest::StatusCode::CONFLICT {
@@ -86,6 +100,7 @@ async fn submit(state: &AppState, db: &Db, scope: &MemuScope, id: &str,
             let mut refused = pending.clone();
             refused.status = Status::Failed;
             refused.error = Some(error.clone());
+            refused.ordinary_disabled |= refused.kind == Kind::Ordinary;
             if refused.kind == Kind::Final { refused.final_used = false; }
             checkpoint(state, db, scope, id, saved, &refused, saved.native_context_tokens).await?;
         }
@@ -112,7 +127,7 @@ pub(super) async fn reconcile(state: &AppState, db: &Db, scope: &MemuScope,
         return Err(failure("Native writer exit is not established; maintenance is retained."));
     }
     if observed.maintenance.as_ref().is_some_and(|receipt| receipt.attempt_id == pending.attempt_id) {
-        return apply(state, db, scope, id, saved, observed.maintenance.unwrap(), observed.context).await;
+        return apply(state, db, scope, id, saved, observed.maintenance.unwrap(), observed.context).await.map(|_| ());
     }
     // A terminal purge refusal is not an in-flight claim. Do not replay it here;
     // run() may admit a subsequent storage-only purge after the server is repaired.
@@ -120,6 +135,7 @@ pub(super) async fn reconcile(state: &AppState, db: &Db, scope: &MemuScope,
     if pending.status != Status::Pending {
         let mut missing = pending.clone();
         missing.status = Status::Failed;
+        missing.ordinary_disabled |= missing.kind == Kind::Ordinary;
         missing.error = Some("The memory server lost an acknowledged maintenance attempt. It will not be replayed. Keep this history; use End Session if the sitting is still open.".into());
         checkpoint(state, db, scope, id, saved, &missing, None).await?;
         return Err(failure(missing.error.as_deref().unwrap()));
@@ -132,11 +148,11 @@ pub(super) async fn reconcile(state: &AppState, db: &Db, scope: &MemuScope,
     for (message_id, records) in bridge.drain_sitting(&scope.user_id, &scope.soul_id, work).await {
         db.0.save_chat_tool_records(id, &message_id, &records).await.map_err(core_json_error)?;
     }
-    submit(state, db, scope, id, saved).await
+    submit(state, db, scope, id, saved).await.map(|_| ())
 }
 
 pub(crate) async fn run(state: &AppState, db: &Db, scope: &MemuScope,
-    bridge: &ChatToolBridge, id: &str, kind: Kind, work: &ConversationWork) -> Result<(), JsonError> {
+    bridge: &ChatToolBridge, id: &str, kind: Kind, work: &ConversationWork) -> Result<Status, JsonError> {
     reconcile(state, db, scope, bridge, id, work).await?;
     let conv = read_chat(db, id).await?;
     if !conversation_matches(&conv, scope) { return Err(failure("Conversation owner/Soul changed")); }
@@ -146,7 +162,7 @@ pub(crate) async fn run(state: &AppState, db: &Db, scope: &MemuScope,
     if kind == Kind::Purge && saved.phase == Phase::Closed
         && saved.maintenance.as_ref().is_some_and(|prior| prior.kind == Kind::Purge && prior.status == Status::Complete)
     {
-        return Ok(());
+        return Ok(Status::Complete);
     }
     let phase = match kind { Kind::Ordinary => Phase::Open, Kind::Final => Phase::Closing, Kind::Purge => Phase::Closed };
     if saved.phase != phase || saved.active.as_ref().is_some_and(|turn| turn.status == TurnStatus::Running)
@@ -165,7 +181,7 @@ pub(crate) async fn run(state: &AppState, db: &Db, scope: &MemuScope,
     let observed = fetch_status(scope, id, None).await.map_err(failure)?;
     if observed.writer_idle != Some(true) { return Err(failure("Native writer exit is not established")); }
     let Some(receipt) = observed.turn else {
-        return if kind == Kind::Purge && observed.session_id.is_none() { Ok(()) }
+        return if kind == Kind::Purge && observed.session_id.is_none() { Ok(Status::Complete) }
             else { Err(failure("Native maintenance has no sitting/turn evidence")) };
     };
     if observed.session_id.as_deref() != Some(receipt.session_id.as_str()) {
@@ -199,13 +215,123 @@ mod tests {
         id: String,
         requests: Mutex<Vec<Value>>,
         receipt: Mutex<Option<Value>>,
+        native_calls: Mutex<Vec<Value>>,
     }
 
     fn context() -> Value {
         serde_json::json!({"estimated_tokens":9000,"overhead_tokens":50,"system_tokens":25})
     }
 
+    #[test]
+    fn ordinary_policy_keeps_the_closeout_reserve_and_latches() {
+        let mut saved: AtomicChatState = serde_json::from_value(serde_json::json!({
+            "backend":"claude_code","phase":"open","active":null})).unwrap();
+        for (tokens, due) in [(139999,false), (140000,true), (179999,true), (180000,false)] {
+            assert_eq!(ordinary_due(&saved, 200000, tokens), due);
+        }
+        saved.maintenance = Some(serde_json::from_value(serde_json::json!({
+            "attempt_id":"cleanup","native_attempt_id":"before","turn_id":"turn","previous_attempt_id":null,
+            "kind":"ordinary","status":"complete","error":null,"ordinary_disabled":false,
+            "awaiting_measurement":true,"final_used":false})).unwrap());
+        assert!(!ordinary_due(&saved, 200000, 140000));
+        saved.maintenance.as_mut().unwrap().awaiting_measurement = false;
+        assert!(ordinary_due(&saved, 200000, 140000));
+        saved.maintenance.as_mut().unwrap().ordinary_disabled = true;
+        assert!(!ordinary_due(&saved, 200000, 140000));
+        saved.backend = Backend::Api;
+        assert!(!ordinary_due(&saved, 200000, 140000));
+    }
+
+    async fn recap_chat(mock: web::Data<Mock>, request: HttpRequest, body: web::Json<Value>) -> HttpResponse {
+        assert_eq!(body["purpose"], "recap");
+        assert_eq!(body["operation"], "continue");
+        assert!(body["system_prompt"].is_null() && body["bridge_url"].is_null());
+        assert!(!request.headers().contains_key("authorization"));
+        mock.native_calls.lock().unwrap().push((*body).clone());
+        HttpResponse::Ok().content_type("application/x-ndjson").body(format!("{}\n{}\n",
+            serde_json::json!({"type":"session","session_id":"native-id","turn_id":body["turn_id"],"attempt_id":body["attempt_id"]}),
+            serde_json::json!({"type":"complete","session_id":"native-id","text":"Saved recap"})))
+    }
+
+    #[actix_web::test]
+    async fn final_cleanup_is_only_for_fit_or_provider_context_failure_and_has_one_retry() {
+        for mode in ["recap_fit", "recap_predicted", "recap_context", "recap_quota", "recap_again", "recap_unknown", "recap_smaller"] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let manager = Arc::new(atomic_core::DatabaseManager::new(dir.path()).unwrap());
+            let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
+            let state = AppState { manager, event_tx:tokio::sync::broadcast::channel(32).0,
+                public_url:None, log_buffer:crate::log_buffer::LogBuffer::new(4), memu_session:None,
+                export_jobs:crate::export_jobs::ExportJobManager::for_tests(dir.path().join("exports")),
+                setup_token:None, dangerously_skip_setup_token:false,
+                setup_claim_lock:tokio::sync::Mutex::new(()), setup_claim_limiter:crate::state::SetupClaimLimiter::new() };
+            let conv = db.0.create_conversation(&[], None, Some(("TestOwner", "TestSoul"))).await.unwrap();
+            let id = conv.conversation.id;
+            db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Open).await.unwrap();
+            db.0.save_message(&id, "system", "fictional Presence").await.unwrap();
+            db.0.save_message(&id, "user", "fictional question").await.unwrap();
+            db.0.save_message(&id, "assistant", "fictional answer").await.unwrap();
+            if mode == "recap_smaller" {
+                let input = db.0.admit_chat_turn(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode,
+                    &ChatRequest::New { content:"fictional sizing turn".into(), page_context:None, canvas_context:None }, 200000).await.unwrap();
+                db.0.fail_chat_turn(&id, &input.id, "fictional refusal", false, None).await.unwrap();
+            }
+            db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closing).await.unwrap();
+            let mock = web::Data::new(Mock { mode, db:Db(db.0.clone(), db.1.clone()), id:id.clone(),
+                requests:Mutex::new(Vec::new()), receipt:Mutex::new(None), native_calls:Mutex::new(Vec::new()) });
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let scope = MemuScope { base_url:format!("http://{}", listener.local_addr().unwrap()), user_id:"TestOwner".into(), soul_id:"TestSoul".into() };
+            let factory = mock.clone();
+            let server = HttpServer::new(move || App::new().app_data(factory.clone())
+                .route("/integration/atomic/chat/status", web::get().to(observe))
+                .route("/integration/atomic/chat/maintenance", web::post().to(handoff))
+                .route("/integration/atomic/chat", web::post().to(recap_chat)))
+                .workers(1).listen(listener).unwrap().run();
+            let handle = server.handle();
+            actix_web::rt::spawn(server);
+            let bridge = ChatToolBridge::default();
+            let work = lock_conversation(&db, &id, Some(&scope)).await.unwrap();
+            let capacity = if mode == "recap_smaller" { 128000 } else { 200000 };
+            let profile = ClaudeChatProfile { model:"fictional".into(), context_window_tokens:capacity,
+                timeout_seconds:1, effort:"medium".into(), fingerprint:"fingerprint".into(),
+                memu_response_sentences:5, memu_log_prompts:false };
+            let request = ChatRequest::Recap { instruction:"fictional recap".into() };
+            let result = execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, capacity, &work).await;
+            assert_eq!(result.is_err(), matches!(mode, "recap_quota" | "recap_again" | "recap_smaller"));
+            let cleanup = matches!(mode, "recap_predicted" | "recap_context" | "recap_again");
+            assert_eq!(mock.requests.lock().unwrap().len(), usize::from(cleanup));
+            let calls = mock.native_calls.lock().unwrap().len();
+            assert_eq!(calls, if mode == "recap_smaller" { 0 } else if matches!(mode, "recap_context" | "recap_again") { 2 } else { 1 });
+            if mode == "recap_again" {
+                assert!(execute_recap(&state, &db, &scope, &profile, &bridge, &scope.base_url, &id, &request, 200000, &work).await.is_err());
+                assert_eq!(mock.native_calls.lock().unwrap().len(), calls);
+                assert_eq!(mock.requests.lock().unwrap().len(), 1);
+            }
+            handle.stop(true).await;
+        }
+    }
+
     async fn observe(mock: web::Data<Mock>, query: web::Query<HashMap<String, String>>) -> HttpResponse {
+        if mock.mode.starts_with("recap_") {
+            let last = mock.native_calls.lock().unwrap().last().cloned();
+            let calls = mock.native_calls.lock().unwrap().len();
+            let failed = last.is_some() && (mock.mode == "recap_quota" || mock.mode == "recap_again"
+                || (mock.mode == "recap_context" && calls == 1));
+            let turn_id = last.as_ref().map(|body| body["turn_id"].as_str().unwrap())
+                .or_else(|| query.get("turn_id").map(String::as_str)).unwrap_or("user-turn");
+            return HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id", "writer_idle":true,
+                "context":if mock.mode == "recap_unknown" && last.is_none() { Value::Null }
+                    else { serde_json::json!({"estimated_tokens":if matches!(mock.mode, "recap_predicted" | "recap_smaller") && last.is_none() { 200000 } else { 1000 },
+                        "overhead_tokens":50,"system_tokens":25}) },
+                "maintenance":mock.receipt.lock().unwrap().clone(),
+                "turn":{"session_id":"native-id", "turn_id":turn_id,
+                    "attempt_id":last.as_ref().map(|body| body["attempt_id"].as_str().unwrap()).unwrap_or("native-attempt"),
+                    "purpose":if last.is_some() { "recap" } else { "reply" },
+                    "status":if failed { "failed" } else { "complete" }, "initialized":true,"input_recorded":true,
+                    "submission":"recorded", "text":"Saved recap", "error":if failed { Some("native failed") } else { None },
+                    "native_result":{"is_error":failed,"errors":[if mock.mode == "recap_quota" { "Quota exceeded" } else { "Prompt is too long" }]},
+                    "usage":last.as_ref().map(|_| serde_json::json!({"message_id":"recap-message","usage":{
+                        "input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":20}}))}}));
+        }
         assert!(!query.contains_key("turn_id"), "maintenance reads the latest scoped basis");
         let receipt = mock.receipt.lock().unwrap().clone();
         HttpResponse::Ok().json(serde_json::json!({"session_id":"native-id", "writer_idle":true,
@@ -220,6 +346,18 @@ mod tests {
         let pending = saved.conversation.atomic_chat_state.unwrap().maintenance.unwrap();
         assert_eq!(pending.status, Status::Pending, "intent precedes the HTTP handoff");
         assert_eq!(body["attempt_id"], pending.attempt_id);
+        if mock.mode.starts_with("recap_") {
+            assert_eq!(pending.kind, Kind::Final);
+            assert_eq!(body["native_attempt_id"], pending.native_attempt_id);
+            assert_eq!(body["action"], "compact");
+            mock.requests.lock().unwrap().push((*body).clone());
+            let receipt = serde_json::json!({"attempt_id":pending.attempt_id,"native_attempt_id":pending.native_attempt_id,
+                "turn_id":pending.turn_id,"action":"compact","status":"complete"});
+            *mock.receipt.lock().unwrap() = Some(receipt.clone());
+            return HttpResponse::Ok().json(serde_json::json!({"maintenance":receipt,
+                "context":{"estimated_tokens":if mock.mode == "recap_predicted" { 200000 } else { 1000 },
+                    "overhead_tokens":50,"system_tokens":25}}));
+        }
         assert_eq!(body["user_id"], "TestOwner");
         assert_eq!(body["soul_id"], "TestSoul");
         assert_eq!(body["conversation_id"], mock.id);
@@ -279,7 +417,7 @@ mod tests {
                 db.0.set_chat_phase(&id, "TestOwner", "TestSoul", &Backend::ClaudeCode, &Phase::Closed).await.unwrap();
             }
             let mock = web::Data::new(Mock { mode, db:Db(db.0.clone(), db.1.clone()), id:id.clone(),
-                requests:Mutex::new(Vec::new()), receipt:Mutex::new(None) });
+                requests:Mutex::new(Vec::new()), receipt:Mutex::new(None), native_calls:Mutex::new(Vec::new()) });
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let scope = MemuScope { base_url:format!("http://{}", listener.local_addr().unwrap()),
                 user_id:"TestOwner".into(), soul_id:"TestSoul".into() };
