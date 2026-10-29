@@ -338,8 +338,8 @@ mod tests {
     };
     use serde_json::{json, Value};
 
-    #[test]
-    fn bridge_uses_bound_loopback_port_not_a_public_url() {
+    #[actix_web::test]
+    async fn bridge_uses_bound_loopback_port_not_a_public_url() {
         for (bound, expected) in [
             ("0.0.0.0:8123", "http://127.0.0.1:8123"),
             ("[::]:8124", "http://[::1]:8124"),
