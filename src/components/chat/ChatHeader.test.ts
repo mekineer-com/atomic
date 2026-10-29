@@ -26,8 +26,9 @@ it('keeps End available to wait for managed work, offers close-out recovery and 
     expect(rootElement.textContent).toContain('Estimated context:');
     expect(rootElement.textContent).toContain('API mode');
     expect(rootElement.querySelector('[title="Required source for this chat\'s AI responses."]')).not.toBeNull();
-    expect(rootElement.querySelector('meter')?.max).toBe(180000);
-    expect(rootElement.querySelector('meter')?.value).toBe(1234);
+    // This Happy DOM version incorrectly clamps meter property getters to 1.
+    expect(rootElement.querySelector('meter')?.getAttribute('max')).toBe('180000');
+    expect(rootElement.querySelector('meter')?.getAttribute('value')).toBe('1234');
     const end = [...rootElement.querySelectorAll('button')].find(button => button.textContent === 'End Session')!;
     expect(end.disabled).toBe(false);
     await render({ ...conversation, atomic_chat_state: { ...conversation.atomic_chat_state!, phase: 'closing' } });
