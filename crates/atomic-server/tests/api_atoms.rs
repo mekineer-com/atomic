@@ -837,7 +837,11 @@ async fn test_native_creation_checks_readiness_without_api_settings_or_blocking_
     let read = actix_test::TestRequest::get().uri(&format!("/api/conversations/{}", created["id"].as_str().unwrap()))
         .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
         .insert_header(("X-OpenAlma-Soul", "TestSoul")).to_request();
-    assert_eq!(actix_test::call_service(&app, read).await.status(), 200);
+    let response = actix_test::call_service(&app, read).await;
+    assert_eq!(response.status(), 200);
+    let unread: Value = actix_test::read_body_json(response).await;
+    assert!(unread.get("context_error").is_none());
+    assert!(unread.get("context_meter").is_none());
     handle.stop(true).await;
 }
 

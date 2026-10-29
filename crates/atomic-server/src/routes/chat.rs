@@ -799,7 +799,7 @@ pub async fn get_conversation(
                     .as_ref()
                     .is_some_and(|saved| saved.phase == Phase::Closed)
             }) {
-                let meter: Result<serde_json::Value, JsonError> = async {
+                let meter: Result<Option<serde_json::Value>, JsonError> = async {
                     let profile = fetch_atomic_chat_profile(&scope).await?;
                     profile.check_binding(&conv)?;
                     let capacity = profile.capacity()?;
@@ -807,15 +807,17 @@ pub async fn get_conversation(
                         AtomicChatProfileResponse::Api { settings } => db.0.estimate_chat_request_tokens(
                             &id, &standing_request(&conv, &scope.user_id), settings, tools_for(&scope))
                             .await.map_err(core_json_error)?,
-                        AtomicChatProfileResponse::ClaudeCode { .. } => conv.conversation.atomic_chat_state
-                            .as_ref().and_then(|saved| saved.native_context_tokens)
-                            .ok_or_else(|| (StatusCode::CONFLICT,
-                                serde_json::json!({"error":"Native context size is unknown; no fit estimate is available. End can still attempt a same-session recap."})))?,
+                        AtomicChatProfileResponse::ClaudeCode { .. } => {
+                            let Some(tokens) = conv.conversation.atomic_chat_state.as_ref()
+                                .and_then(|saved| saved.native_context_tokens) else { return Ok(None); };
+                            tokens
+                        },
                     };
-                    Ok(serde_json::json!({"estimated_tokens":tokens,"limit_tokens":capacity - 20_000,"usable_tokens":capacity}))
+                    Ok(Some(serde_json::json!({"estimated_tokens":tokens,"limit_tokens":capacity - 20_000,"usable_tokens":capacity})))
                 }.await;
                 match meter {
-                    Ok(meter) => value["context_meter"] = meter,
+                    Ok(Some(meter)) => value["context_meter"] = meter,
+                    Ok(None) => {},
                     Err((_, error)) => {
                         value["context_error"] =
                             serde_json::json!(memu_error_text(&error.to_string()))

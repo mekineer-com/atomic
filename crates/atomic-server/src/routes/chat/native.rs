@@ -1,4 +1,4 @@
-//! Dormant native execution; admission/recovery stays in the sitting lifecycle.
+//! Native execution; admission/recovery stays in the sitting lifecycle.
 
 mod maintenance;
 pub(super) use maintenance::{ordinary_due, run as maintain};
@@ -1953,6 +1953,7 @@ mod tests {
                 let bytes = actix_web::body::to_bytes(response.into_body()).await.unwrap();
                 let reloaded: Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(reloaded["atomic_chat_state"]["phase"], "open");
+                assert_eq!(reloaded["context_meter"]["estimated_tokens"], 90000);
                 assert_eq!(mock.status_reads.load(Ordering::Relaxed), reads);
                 drop(work);
 
