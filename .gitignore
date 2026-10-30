@@ -4,6 +4,7 @@ src-tauri/gen/
 src-tauri/Cargo.lock
 target/
 node_modules/
+__pycache__/
 dist/
 dist-web/
 gen/
