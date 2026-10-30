@@ -7,6 +7,7 @@ import { DossierUsageLinks, MemoryCitationLinks } from './DossierMarkdown';
 
 type MemoryReview = {
   id: string;
+  memory_ref?: number | null;
   summary: string;
   memory_type: string;
   category_names?: string[];
@@ -387,7 +388,10 @@ function MemoryRow({
         )}
       </div>
       <textarea readOnly={disabled} className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
-      <DossierUsageLinks usages={item.dossier_usages} />
+      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
+        {item.memory_ref && <span className="font-medium text-[var(--color-text-secondary)]">M{item.memory_ref}</span>}
+        <DossierUsageLinks usages={item.dossier_usages} />
+      </div>
       <div className="mt-2 flex gap-2">
         <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary, displayed_summary: item.summary } : { id: item.id, displayed_summary: item.summary }))}>{edited ? 'Save + approve' : 'Approve'}</button>
         <button disabled={busy || disabled || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id, displayed_summary: item.summary }))}>Delete</button>

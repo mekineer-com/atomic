@@ -220,7 +220,10 @@ describe('PendingReviewPanel', () => {
   it('updates clean memory rows and retires dirty conflicting rows', async () => {
     const onStale = vi.fn();
     transport.invoke.mockResolvedValue({
-      items: [{ id: 'memory:m1', summary: 'old memory', memory_type: 'knowledge' }],
+      items: [{
+        id: 'memory:m1', memory_ref: 42, summary: 'old memory', memory_type: 'knowledge',
+        dossier_usages: [{ id: 'category:c1', name: 'Test dossier', cited: false }],
+      }],
       categories: [],
       soul_summaries: [],
       summaries_revision: 1,
@@ -229,6 +232,7 @@ describe('PendingReviewPanel', () => {
     const root = createRoot(container);
 
     await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
+    expect(container.textContent).toContain('M42Used byTest dossier');
     await act(async () => {
       transport.listeners.get('atom-updated')?.({
         id: 'memory:m1', content: 'external memory', approved_at: null,
