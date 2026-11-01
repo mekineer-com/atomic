@@ -279,33 +279,38 @@ def prepare_atomic_session(source_bytes: bytes) -> AtomicSessionCandidate:
     for index, record in enumerate(records):
         if record.get("isSidechain") or record.get("isMeta"):
             continue
-        if is_user_turn_start(record):
-            if pending_start is not None and answered:
-                latest_start = pending_start
-            pending_start, answered = index, False
-            unclear = False
-        if pending_start is None or record.get("type") not in ("user", "assistant"):
+        if record.get("type") not in ("user", "assistant"):
             continue
         message = record["message"]
         content = message.get("content")
+        row_unclear = False
         if isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
-                    unclear = True
+                    row_unclear = True
                 elif block.get("type") in TOOL_USE_TYPES:
                     pending_calls.add(block["id"])
                     answered = False
                 elif block.get("type") == "tool_result":
                     if block["tool_use_id"] not in pending_calls:
-                        unclear = True
+                        row_unclear = True
                     pending_calls.discard(block["tool_use_id"])
                 elif block.get("type") not in ("text", "thinking", "image", "document"):
-                    unclear = True
+                    row_unclear = True
         elif not isinstance(content, str):
-            unclear = True
+            row_unclear = True
+        if pending_calls or row_unclear:
+            answered = False
+        if is_user_turn_start(record):
+            if pending_start is not None and answered:
+                latest_start = pending_start
+            pending_start, answered = index, False
+            unclear = row_unclear
+        else:
+            unclear |= row_unclear
         if pending_calls or unclear:
             answered = False
-        elif record.get("type") == "assistant":
+        elif pending_start is not None and record.get("type") == "assistant":
             # Commentary is not completion, even if its calls settle in a later row.
             if (record.get("isApiErrorMessage") or record.get("error")
                     or message.get("stop_reason") not in (None, "end_turn", "stop_sequence")):

@@ -134,7 +134,7 @@ class ClaudeSafePreservationTest(unittest.TestCase):
                 self.assertEqual(prepare_atomic_session(result.candidate_bytes).candidate_bytes, result.candidate_bytes)
 
     def test_unfinished_commentary_does_not_displace_completed_exchange(self):
-        for tail in ("pending", "settled", "partial", "complete", "unknown", "truncated", "user_unknown"):
+        for tail in ("pending", "settled", "partial", "complete", "unknown", "truncated", "user_unknown", "user_unknown_text"):
             with self.subTest(tail=tail):
                 records = [
                     row("user", "u0", None, "Completed question"),
@@ -151,9 +151,12 @@ class ClaudeSafePreservationTest(unittest.TestCase):
                         {"type": "tool_use", "id": "call1", "name": "fictional", "input": {}},
                         {"type": "tool_use", "id": "call2", "name": "fictional", "input": {}}]),
                 ]
-                if tail == "user_unknown":
+                if tail in {"user_unknown", "user_unknown_text"}:
                     records[-1]["message"]["content"] = [{"type": "text", "text": "I will inspect this."}]
-                    records.append(row("user", "unknown", "comment", [{"type": "future_tool_result", "opaque": True}]))
+                    blocks = [{"type": "future_tool_result", "opaque": True}]
+                    if tail == "user_unknown_text":
+                        blocks.append({"type": "text", "text": "Unknown continuation"})
+                    records.append(row("user", "unknown", "comment", blocks))
                 if tail in {"settled", "partial", "complete", "unknown", "truncated"}:
                     results = [{"type": "tool_result", "tool_use_id": "call1", "content": "First"}]
                     if tail != "partial":
