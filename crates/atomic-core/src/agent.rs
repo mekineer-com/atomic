@@ -3285,7 +3285,7 @@ mod tests {
         core.save_message(cid, "assistant", "We discussed the quoted wording")
             .await
             .unwrap();
-        let legacy = core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity\nFull Atomic transcript: SECRET_NESTED_HISTORY").await.unwrap();
+        let legacy = core.save_message(cid, "user", "This Atomic session is ending. Write a recap of your activity\nFull Atomic transcript:\nSECRET_NESTED_HISTORY").await.unwrap();
         legacy_edit.id = "current-unclear-edit".into();
         legacy_edit.message_id = legacy.id.clone();
         legacy_edit.status = "running".into();
