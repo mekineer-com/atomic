@@ -343,6 +343,11 @@ pub enum ServerEvent {
         user_id: String,
         soul_id: String,
     },
+    MemuMemoryDeleted {
+        id: String,
+        user_id: String,
+        soul_id: String,
+    },
 
     /// The per-DB `dashboard.featured_report_id` pointer changed.
     /// Broadcast on every write through the dashboard route so the
@@ -506,6 +511,9 @@ impl ServerEvent {
                 user_id, soul_id, ..
             }
             | Self::MemuSoulSummaryChanged {
+                user_id, soul_id, ..
+            }
+            | Self::MemuMemoryDeleted {
                 user_id, soul_id, ..
             } => Some((user_id, soul_id)),
             _ => None,

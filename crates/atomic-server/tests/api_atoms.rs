@@ -514,9 +514,12 @@ async fn memu_approve_empty(body: web::Json<Value>) -> HttpResponse {
     HttpResponse::Ok().json(json!({"status": "ok"}))
 }
 
-async fn memu_delete_memory_conflict(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
-    assert_eq!(path.as_str(), "m1");
+async fn memu_delete_memory(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
     assert!(req.query_string().contains("displayed_summary=Memory+summary"));
+    if path.as_str() == "m2" {
+        return HttpResponse::Ok().json(json!({"status": "deleted"}));
+    }
+    assert_eq!(path.as_str(), "m1");
     HttpResponse::Conflict().json(json!({
         "detail": {
             "message": "Memory is cited in dossier prose",
@@ -647,7 +650,7 @@ fn start_memu_memory_stub() -> (String, actix_web::dev::ServerHandle) {
             .route("/category/{id}", web::patch().to(memu_update_category))
             .route(
                 "/memory/{id}",
-                web::delete().to(memu_delete_memory_conflict),
+                web::delete().to(memu_delete_memory),
             )
             .route("/memory/{id}/approve", web::post().to(memu_approve_empty))
     })
@@ -1053,10 +1056,11 @@ async fn test_openalma_rejects_another_workspace_database() {
 }
 
 #[actix_web::test]
-async fn test_cited_memory_delete_preserves_conflict_response() {
+async fn test_memory_delete_broadcasts_only_after_success_and_preserves_conflict() {
     let (memu_url, memu_handle) = start_memu_memory_stub();
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
     let app = actix_test::init_service(test_app(&ctx)).await;
+    let mut events = ctx.state.event_tx.subscribe();
 
     let req = actix_test::TestRequest::delete()
         .uri("/api/memu/reviews/memory/m1?displayed_summary=Memory%20summary")
@@ -1068,6 +1072,25 @@ async fn test_cited_memory_delete_preserves_conflict_response() {
     assert_eq!(response.status(), 409);
     let body: Value = actix_test::read_body_json(response).await;
     assert_eq!(body["error"]["dossiers"][0]["ref"], "M1");
+    assert!(events.try_recv().is_err());
+
+    let req = actix_test::TestRequest::delete()
+        .uri("/api/memu/reviews/memory/m2?displayed_summary=Memory%20summary")
+        .insert_header(ctx.auth_header())
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+        .to_request();
+    let response = actix_test::call_service(&app, req).await;
+    assert_eq!(response.status(), 200);
+    let event = events.try_recv().unwrap();
+    assert_eq!(event.owner(), Some(("TestOwner", "TestSoul")));
+    match event {
+        atomic_server::state::ServerEvent::MemuMemoryDeleted { id, .. } => {
+            assert_eq!(id, "memory:m2");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(events.try_recv().is_err());
 
     memu_handle.stop(true).await;
 }

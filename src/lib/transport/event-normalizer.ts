@@ -44,6 +44,8 @@ export function normalizeServerEvent(data: Record<string, unknown>): NormalizedE
       } };
     case 'MemuSoulSummaryChanged':
       return { event: 'memu-soul-summary-changed', payload: data.summary };
+    case 'MemuMemoryDeleted':
+      return { event: 'memu-memory-deleted', payload: { id: data.id } };
     case 'EmbeddingsReset':
       return { event: 'embeddings-reset', payload: data };
     case 'ImportProgress':

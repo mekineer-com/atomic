@@ -521,7 +521,18 @@ pub async fn delete_memory(
     )
     .await
     {
-        Ok(body) => HttpResponse::Ok().json(body),
+        Ok(body) => {
+            let id = format!(
+                "memory:{}",
+                memory_id.strip_prefix("memory:").unwrap_or(&memory_id)
+            );
+            let _ = state.event_tx.send(ServerEvent::MemuMemoryDeleted {
+                id,
+                user_id: config.user_id.clone(),
+                soul_id: config.soul_id.clone(),
+            });
+            HttpResponse::Ok().json(body)
+        }
         Err(response) => response,
     }
 }

@@ -217,6 +217,17 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     }));
   }), [markStale]);
 
+  useEffect(() => getTransport().subscribe<{ id: string }>('memu-memory-deleted', ({ id }) => {
+    if (stale.current) return;
+    reviewEvents.current += 1;
+    if (dirtyReviews.current.has(id) && busyReview.current !== id) {
+      markStale();
+      return;
+    }
+    setReviews((current) => ({ ...current, items: current.items.filter((item) => item.id !== id) }));
+    useCanvasStore.getState().invalidateCanvasData();
+  }), [markStale]);
+
   const removeCategory = (id: string) => setReviews((r) => ({ ...r, categories: r.categories.filter((cat) => cat.id !== id) }));
   const acceptRevision = (revision: number) => {
     if (Number.isFinite(revision)) summariesRevision.current = Math.max(summariesRevision.current, revision);

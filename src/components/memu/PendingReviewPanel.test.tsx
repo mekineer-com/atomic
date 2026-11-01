@@ -283,6 +283,92 @@ describe('PendingReviewPanel', () => {
     await act(async () => { root.unmount(); });
   });
 
+  it.each([false, true])('handles a memory deleted elsewhere without losing a dirty draft (%s)', async (dirty) => {
+    const onStale = vi.fn();
+    transport.invoke.mockResolvedValue({
+      items: [{ id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' }],
+      categories: [], soul_summaries: [], summaries_revision: 1,
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
+    try {
+      const textarea = container.querySelector('textarea')!;
+      if (dirty) {
+        await act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'local draft');
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      }
+      await act(async () => { transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:other' }); });
+      expect(container.querySelector('textarea')).not.toBeNull();
+      expect(onStale).not.toHaveBeenCalled();
+      await act(async () => { transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' }); });
+      if (dirty) {
+        expect(textarea.value).toBe('local draft');
+        expect(textarea.readOnly).toBe(true);
+        expect(onStale).toHaveBeenCalledOnce();
+      } else {
+        expect(container.querySelector('textarea')).toBeNull();
+        expect(onStale).not.toHaveBeenCalled();
+      }
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it('does not let an in-flight reload restore a deleted memory', async () => {
+    let finishLoad!: (value: unknown) => void;
+    transport.invoke
+      .mockImplementationOnce(() => new Promise(resolve => { finishLoad = resolve; }))
+      .mockResolvedValueOnce({ items: [], categories: [], soul_summaries: [], summaries_revision: 1 });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => { root.render(<PendingReviewPanel />); });
+    try {
+      await act(async () => {
+        transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' });
+        finishLoad({
+          items: [{ id: 'memory:m1', summary: 'deleted pending row', memory_type: 'knowledge' }],
+          categories: [], soul_summaries: [], summaries_revision: 1,
+        });
+      });
+      expect(container.querySelector('textarea')).toBeNull();
+      expect(transport.invoke).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it('does not retire a draft when its own delete notification arrives', async () => {
+    const onStale = vi.fn();
+    transport.invoke.mockResolvedValueOnce({
+      items: [{ id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' }],
+      categories: [], soul_summaries: [], summaries_revision: 1,
+    }).mockImplementationOnce(async () => {
+      transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' });
+      return { status: 'deleted' };
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
+    try {
+      const textarea = container.querySelector('textarea')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'local draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent === 'Delete')!.click();
+      });
+      expect(onStale).not.toHaveBeenCalled();
+      expect(container.querySelector('textarea')).toBeNull();
+      expect(transport.invoke).toHaveBeenLastCalledWith('delete_memory', { id: 'memory:m1', displayed_summary: 'pending memory' });
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
   it('retires instead of reloading over a draft when a soul event has no revision', async () => {
     const onStale = vi.fn();
     transport.invoke.mockResolvedValue({

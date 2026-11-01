@@ -27,4 +27,10 @@ describe('normalizeServerEvent', () => {
       payload: summary,
     });
   });
+
+  it('normalizes scoped memory deletion', () => {
+    expect(normalizeServerEvent({
+      type: 'MemuMemoryDeleted', id: 'memory:m1', user_id: 'owner', soul_id: 'soul',
+    })).toEqual({ event: 'memu-memory-deleted', payload: { id: 'memory:m1' } });
+  });
 });
