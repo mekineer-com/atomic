@@ -134,7 +134,8 @@ class ClaudeSafePreservationTest(unittest.TestCase):
                 self.assertEqual(prepare_atomic_session(result.candidate_bytes).candidate_bytes, result.candidate_bytes)
 
     def test_unfinished_commentary_does_not_displace_completed_exchange(self):
-        for tail in ("pending", "settled", "partial", "complete", "unknown", "truncated", "user_unknown", "user_unknown_text"):
+        for tail in ("pending", "settled", "partial", "complete", "unknown", "truncated", "user_unknown", "user_unknown_text",
+                     "later_complete", "later_pending", "late_old_result"):
             with self.subTest(tail=tail):
                 records = [
                     row("user", "u0", None, "Completed question"),
@@ -169,12 +170,32 @@ class ClaudeSafePreservationTest(unittest.TestCase):
                     records.append(row("assistant", "answer1", records[-1]["uuid"], content))
                     if tail == "truncated":
                         records[-1]["message"]["stop_reason"] = "max_tokens"
+                if tail in {"later_complete", "later_pending", "late_old_result"}:
+                    records.extend([
+                        row("user", "u2", "comment", "A fresh request after abandoned work"),
+                        row("assistant", "think2", "u2", [
+                            {"type": "thinking", "thinking": "Newest reasoning", "signature": "whole"}]),
+                        row("assistant", "use2", "think2", [
+                            {"type": "text", "text": "I will check."},
+                            {"type": "tool_use", "id": "call3", "name": "fictional", "input": {}}]),
+                    ])
+                    if tail != "later_pending":
+                        records.extend([
+                            row("user", "result2", "use2", [
+                                {"type": "tool_result", "tool_use_id": "call3", "content": "y" * 900}]),
+                            row("assistant", "answer2", "result2", "A genuinely completed answer"),
+                        ])
+                    if tail == "late_old_result":
+                        records.append(row("user", "late_result", "answer2", [
+                            {"type": "tool_result", "tool_use_id": "call1", "content": "Old result arrived late"}]))
                 records.append(row("user", "recap", records[-1]["uuid"], "Tool-free recap prompt"))
                 records.append(dict(row("assistant", "failure", "recap", "Context failure"), isApiErrorMessage=True))
                 source = [json.dumps(record).encode() + b"\n" for record in records]
                 output = prepare_atomic_session(b"".join(source)).candidate_bytes.splitlines(keepends=True)
-                if tail == "complete":
+                if tail in {"complete", "later_complete"}:
                     self.assertEqual(json.loads(output[1])["message"]["content"], [])
+                    if tail == "later_complete":
+                        self.assertEqual(output[7:], source[7:])
                 else:
                     self.assertEqual(output, source)
 

@@ -281,6 +281,9 @@ def prepare_atomic_session(source_bytes: bytes) -> AtomicSessionCandidate:
             continue
         if record.get("type") not in ("user", "assistant"):
             continue
+        new_turn = is_user_turn_start(record)
+        if new_turn:
+            pending_calls.clear()
         message = record["message"]
         content = message.get("content")
         row_unclear = False
@@ -301,7 +304,7 @@ def prepare_atomic_session(source_bytes: bytes) -> AtomicSessionCandidate:
             row_unclear = True
         if pending_calls or row_unclear:
             answered = False
-        if is_user_turn_start(record):
+        if new_turn:
             if pending_start is not None and answered:
                 latest_start = pending_start
             pending_start, answered = index, False
