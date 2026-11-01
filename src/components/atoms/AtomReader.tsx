@@ -187,6 +187,8 @@ interface AtomReaderProps {
   initialEditing?: boolean;
   tabId?: string;
   active?: boolean;
+  // Current history entry, even when its tab is inactive.
+  current?: boolean;
   retired?: boolean;
 }
 
@@ -197,6 +199,7 @@ export function AtomReader({
   initialEditing,
   tabId,
   active = true,
+  current = true,
   retired = false,
 }: AtomReaderProps) {
   const identity = currentIdentity();
@@ -220,9 +223,11 @@ export function AtomReader({
   const dirtyRef = useRef(false);
   const savingRef = useRef(false);
   const retiredRef = useRef(retired);
+  const currentRef = useRef(current);
   const [currentAvailable, setCurrentAvailable] = useState(true);
   atomRef.current = atom;
   retiredRef.current = retired;
+  currentRef.current = current;
 
   const fetchCurrentAtom = useCallback(
     () => getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atomId }),
@@ -235,12 +240,12 @@ export function AtomReader({
   }, [retireTab, tabId]);
 
   const refreshAtom = useCallback(async () => {
-    if (retiredRef.current || savingRef.current) return;
+    if (retiredRef.current || savingRef.current || !currentRef.current) return;
     const startingAtom = atomRef.current;
     const fetchedAtom = await fetchCurrentAtom();
-    if (retiredRef.current || savingRef.current || atomRef.current !== startingAtom) return;
-    const current = atomRef.current;
-    if (tabId && dirtyRef.current && current && (!fetchedAtom || memuEditableFieldsChanged(current, fetchedAtom))) {
+    if (retiredRef.current || savingRef.current || !currentRef.current || atomRef.current !== startingAtom) return;
+    const currentAtom = atomRef.current;
+    if (tabId && dirtyRef.current && currentAtom && (!fetchedAtom || memuEditableFieldsChanged(currentAtom, fetchedAtom))) {
       retire(Boolean(fetchedAtom));
       return;
     }
@@ -250,7 +255,6 @@ export function AtomReader({
     lastFetchedAt.current = fetchedAtom?.updated_at ?? null;
   }, [cacheKey, fetchCurrentAtom, retire, tabId]);
 
-
   // Watch the atoms store for updates to the currently viewed atom
   const storeAtom = useAtomsStore((s) =>
     s.atoms.find((a) => a.id === atomId)
@@ -258,6 +262,8 @@ export function AtomReader({
 
   // Fetch atom from database
   useEffect(() => {
+    currentRef.current = current;
+    if (memuReader && !current) return;
     const cached = cacheKey ? atomDetailCache.get(cacheKey) : null;
     if (cached) {
       setAtom(cached);
@@ -266,7 +272,8 @@ export function AtomReader({
       setShowLoading(false);
       return;
     }
-    setIsLoadingAtom(true);
+    // Revalidating retained history must not unmount its existing draft.
+    setIsLoadingAtom(!memuReader || !atomRef.current);
     setShowLoading(false);
 
     // Only show loading indicator if fetch takes longer than 200ms
@@ -280,13 +287,16 @@ export function AtomReader({
       .catch((error) => {
         clearTimeout(loadingTimer);
         console.error('Failed to fetch atom:', error);
-        setAtom(null);
+        if (!memuReader || !atomRef.current) setAtom(null);
         setIsLoadingAtom(false);
         // atom loaded
       });
 
-    return () => clearTimeout(loadingTimer);
-  }, [atomId, cacheKey, refreshAtom]);
+    return () => {
+      clearTimeout(loadingTimer);
+      if (memuReader) currentRef.current = false;
+    };
+  }, [atomId, cacheKey, refreshAtom, current, memuReader]);
 
   // Re-fetch when store summary changes (e.g., after tag extraction)
   const storeAtomUpdatedAt = storeAtom?.updated_at;
@@ -358,8 +368,7 @@ export function AtomReader({
                 setCurrentAvailable(false);
                 return;
               }
-              console.error('Failed to check current memU item:', error);
-              return;
+              throw error;
             }
             if (cacheKey) atomDetailCache.delete(cacheKey);
             openReader(atomId, undefined, { newTab: true });
@@ -491,9 +500,12 @@ function AtomReaderContent({
     setMemuDescription(atom.description ?? '');
     setMemuKind(atom.category_kind ?? 'topic');
     setMemuSummary(atom.content);
-    setMemuEditing(Boolean(initialEditing));
     setMemuError(null);
-  }, [atom.id, atom.title, atom.description, atom.category_kind, atom.content, initialEditing, retired]);
+  }, [atom.id, atom.title, atom.description, atom.category_kind, atom.content, retired]);
+
+  useEffect(() => {
+    if (initialEditing && !retired) setMemuEditing(true);
+  }, [initialEditing, retired]);
 
   useEffect(() => {
     onDirtyChange(memuEdited);
@@ -824,7 +836,14 @@ function AtomReaderContent({
               ? `This ${isMemuCategory ? 'category' : 'memory'} changed while you were editing. This tab is now a read-only snapshot.`
               : `This ${isMemuCategory ? 'category' : 'memory'} changed while you were editing. This tab is now a read-only snapshot; no current version is available.`}
           </span>
-          {currentAvailable && <button type="button" data-dead-tab-action className="rounded border border-amber-500/50 px-3 py-1" onClick={() => void onOpenCurrent()}>Open current version</button>}
+          {currentAvailable && <button type="button" data-dead-tab-action className="rounded border border-amber-500/50 px-3 py-1" onClick={async () => {
+            setMemuError(null);
+            try {
+              await onOpenCurrent();
+            } catch (error) {
+              setMemuError(String(error));
+            }
+          }}>Open current version</button>}
         </div>
       )}
       {/* @container makes the two-column layout react to the actual reader

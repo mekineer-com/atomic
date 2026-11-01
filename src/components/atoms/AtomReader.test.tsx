@@ -49,9 +49,9 @@ const memory = (content: string, updatedAt: string): AtomWithTags => ({
   dossier_usages: [],
 });
 
-function ReaderHarness() {
+function ReaderHarness({ current = true }: { current?: boolean }) {
   const retired = useUIStore(state => Boolean(state.tabs[0]?.retired));
-  return <AtomReader atomId="memory:m1" viewKey="tab-1:memory:m1" tabId="tab-1" active retired={retired} />;
+  return <AtomReader atomId="memory:m1" viewKey="tab-1:memory:m1" tabId="tab-1" active={current} current={current} retired={retired} />;
 }
 
 afterEach(() => {
@@ -61,6 +61,116 @@ afterEach(() => {
 });
 
 describe('AtomReader stale snapshots', () => {
+  it('keeps Cancel closed with initialEditing true and does not collapse an edit returned to baseline', async () => {
+    const category = { ...memory('Original dossier', '2026-01-01T00:00:00Z'), id: 'category:c1', summaries_revision: 1 };
+    transport.invoke.mockResolvedValue(category);
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<AtomReader atomId={category.id} viewKey={category.id} initialEditing />); });
+      const textarea = [...container.querySelectorAll('textarea')].find(input => input.value === category.content)!;
+      for (const text of ['Fictional edit', category.content]) {
+        await act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, text);
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      }
+      expect(container.contains(textarea)).toBe(true);
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Discard this fictional edit');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent === 'Cancel')!.click();
+      });
+      expect(container.querySelector('textarea')).toBeNull();
+      await act(async () => { root.render(<AtomReader atomId={category.id} viewKey={category.id} initialEditing />); });
+      expect(container.querySelector('textarea')).toBeNull();
+      expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Edit')).toBe(true);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it('updates clean memory text without retiring its tab', async () => {
+    transport.invoke
+      .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
+      .mockResolvedValueOnce(memory('external memory', '2026-01-02T00:00:00Z'));
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      await act(async () => { useAtomsStore.setState({ atoms: [memory('external memory', '2026-01-02T00:00:00Z')] }); });
+      expect(container.querySelector('textarea')?.value).toBe('external memory');
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it('discards a pending refresh after its item is buried, then checks the draft on return', async () => {
+    let finishRefresh!: (value: AtomWithTags) => void;
+    let finishReturn!: (value: AtomWithTags) => void;
+    transport.invoke
+      .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
+      .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishReturn = resolve; }));
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { useAtomsStore.setState({ atoms: [memory('external memory', '2026-01-02T00:00:00Z')] }); });
+      await act(async () => { root.render(<ReaderHarness current={false} />); });
+      await act(async () => { finishRefresh(memory('external memory', '2026-01-02T00:00:00Z')); });
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+      expect(textarea.value).toBe('Fictional draft');
+      expect(textarea.readOnly).toBe(false);
+      await act(async () => { root.render(<ReaderHarness />); });
+      expect(container.querySelector('textarea')).toBe(textarea);
+      expect(textarea.value).toBe('Fictional draft');
+      await act(async () => { finishReturn(memory('external memory', '2026-01-02T00:00:00Z')); });
+      expect(useUIStore.getState().tabs[0].retired).toBe(true);
+      expect(container.querySelector('textarea')).toBe(textarea);
+      expect(textarea.value).toBe('Fictional draft');
+      expect(textarea.readOnly).toBe(true);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it('does not retire a replacement scoped reader when an unmounted draft refresh finishes', async () => {
+    let finishOld!: (value: AtomWithTags) => void;
+    transport.invoke
+      .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
+      .mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }))
+      .mockResolvedValue(memory('Other fictional scope', '2026-01-03T00:00:00Z'));
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness key="old-scope" />); });
+      const textarea = container.querySelector('textarea')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Old fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { useAtomsStore.setState({ atoms: [memory('old scope changed', '2026-01-02T00:00:00Z')] }); });
+      await act(async () => { root.render(<ReaderHarness key="replacement-scope" />); });
+      await act(async () => { finishOld(memory('old scope changed', '2026-01-02T00:00:00Z')); });
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+      expect(container.querySelector('textarea')?.value).toBe('Other fictional scope');
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
   it('sends loaded category identity and does not retry over an unseen description', async () => {
     const category = {
       ...memory('Shown', '2026-01-01T00:00:00Z'), id: 'category:c1',
@@ -98,11 +208,12 @@ describe('AtomReader stale snapshots', () => {
     await act(async () => { root.unmount(); });
   });
 
-  it('keeps a dirty draft mounted and read-only when a refetch changes its baseline', async () => {
+  it.each(['memory not found', 'HTTP 404: memory not found', null])('keeps a dirty snapshot and handles missing current state: %s', async (missing) => {
     transport.invoke
       .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
-      .mockResolvedValueOnce(memory('external memory', '2026-01-02T00:00:00Z'))
-      .mockRejectedValueOnce('memory not found');
+      .mockResolvedValueOnce(memory('external memory', '2026-01-02T00:00:00Z'));
+    if (missing === null) transport.invoke.mockResolvedValueOnce(null);
+    else transport.invoke.mockRejectedValueOnce(missing);
     useUIStore.setState({
       tabs: [{
         id: 'tab-1',
@@ -144,6 +255,43 @@ describe('AtomReader stale snapshots', () => {
     expect(container.textContent).toContain('no current version is available');
     expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Open current version')).toBe(false);
     await act(async () => { root.unmount(); });
+  });
+
+  it('shows a current-version network failure without losing the snapshot or retry', async () => {
+    transport.invoke
+      .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
+      .mockResolvedValueOnce(memory('external memory', '2026-01-02T00:00:00Z'))
+      .mockRejectedValueOnce(new Error('Fictional network unavailable'))
+      .mockResolvedValueOnce(memory('external memory', '2026-01-02T00:00:00Z'));
+    useUIStore.setState({
+      tabs: [{ id: 'tab-1', stack: [{ type: 'atom', atomId: 'memory:m1', tagId: null, highlightText: null, editing: false }], stackIndex: 0, ordinal: 1 }],
+      activeTabId: 'tab-1', nextTabOrdinal: 2,
+    });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Unsaved fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { useAtomsStore.setState({ atoms: [memory('external memory', '2026-01-02T00:00:00Z')] }); });
+      const openCurrent = () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Open current version')!;
+      await act(async () => { openCurrent().click(); });
+      expect(container.textContent).toContain('Fictional network unavailable');
+      expect(container.textContent).not.toContain('no current version is available');
+      expect(container.querySelector('textarea')).toBe(textarea);
+      expect(textarea.value).toBe('Unsaved fictional draft');
+      expect(textarea.readOnly).toBe(true);
+      expect(useUIStore.getState().tabs).toHaveLength(1);
+      await act(async () => { openCurrent().click(); });
+      expect(container.textContent).not.toContain('Fictional network unavailable');
+      expect(useUIStore.getState().tabs).toHaveLength(2);
+      expect(useUIStore.getState().tabs[0].retired).toBe(true);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
   });
 
   it('discards a slow refetch that started before a successful save', async () => {

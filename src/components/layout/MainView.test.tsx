@@ -4,12 +4,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const transport = vi.hoisted(() => ({ invoke: vi.fn() }));
+const transport = vi.hoisted(() => ({ invoke: vi.fn(), subscribe: vi.fn(() => () => undefined) }));
 vi.mock('../../lib/transport', () => ({ getTransport: () => transport }));
-vi.mock('../../hooks', () => ({ useIsMobile: () => false }));
+vi.mock('../../hooks', () => ({
+  useIsMobile: () => false,
+  useInlineEditor: () => ({
+    editContent: '', editSourceUrl: '', editTags: [], saveStatus: 'idle', editorRevision: 0,
+    startEditing: vi.fn(), setEditContent: vi.fn(), setEditSourceUrl: vi.fn(), setEditTags: vi.fn(),
+    saveNow: vi.fn(), flushDraft: vi.fn(),
+  }),
+}));
 vi.mock('../atoms/AtomGrid', () => ({ AtomGrid: () => null }));
 vi.mock('../atoms/AtomList', () => ({ AtomList: () => null }));
-vi.mock('../atoms/AtomReader', () => ({ AtomReader: () => <div>Memory reader</div> }));
+vi.mock('../canvas/MiniGraphPreview', () => ({ MiniGraphPreview: () => null }));
+vi.mock('../../lib/api', () => ({ findSimilarAtoms: vi.fn().mockResolvedValue([]) }));
+vi.mock('@atomic-editor/editor', () => ({ AtomicCodeMirrorEditor: () => null, wikiLinks: () => ({}) }));
+vi.mock('@atomic-editor/editor/code-languages', () => ({ ATOMIC_CODE_LANGUAGES: [] }));
 vi.mock('../atoms/FilterBar', () => ({ FilterBar: () => null }));
 vi.mock('../atoms/FilterSheet', () => ({ FilterSheet: () => null }));
 vi.mock('../canvas/SigmaCanvas', () => ({ SigmaCanvas: () => null }));
@@ -24,12 +34,22 @@ vi.mock('../memu/PendingReviewPanel', () => ({ PendingReviewPanel: () => null })
 vi.mock('./TabStrip', () => ({ TabStrip: () => null }));
 
 import { currentIdentity, selectSoul } from '../../lib/openalma-identity';
-import { useAtomsStore } from '../../stores/atoms';
+import { useAtomsStore, type AtomWithTags } from '../../stores/atoms';
 import { useUIStore } from '../../stores/ui';
 import { MainView } from './MainView';
 
 let root: Root;
 let container: HTMLDivElement;
+
+function memory(id: string): AtomWithTags {
+  return {
+    id, content: 'Original fictional summary', title: 'Fictional title', snippet: '',
+    description: 'Fictional description', summaries_revision: 1,
+    source_url: null, source: null, published_at: null,
+    created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', approved_at: null,
+    embedding_status: 'complete', tagging_status: 'complete', kind: 'captured', tags: [], dossier_usages: [],
+  };
+}
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -39,6 +59,8 @@ beforeEach(() => {
   useAtomsStore.setState({ atoms: [], initialLoadComplete: true, semanticSearchResults: null });
   transport.invoke.mockImplementation((command: string, args?: { id: string }) => {
     if (command === 'get_memu_review_status') return Promise.resolve({ enabled: true });
+    if (command === 'get_atom_by_id') return Promise.resolve(memory(args!.id));
+    if (command === 'list_memu_entities') return Promise.resolve({ entities: [] });
     if (command === 'get_memu_entity') {
       const identity = currentIdentity()!;
       return Promise.resolve({
@@ -94,6 +116,89 @@ function draftValues(reader: HTMLElement) {
 }
 
 describe('MainView entity reader lifecycle', () => {
+  it('loads a retained history entry first selected after restoring a tab', async () => {
+    useUIStore.setState({
+      tabs: [{
+        id: 'restored-tab', ordinal: 1, stackIndex: 1,
+        stack: ['memory:fictional-memory', 'entity:next'].map(atomId => ({ type: 'atom', atomId, tagId: null, highlightText: null, editing: false })),
+      }],
+      activeTabId: 'restored-tab',
+    });
+    await act(async () => { root.render(<MainView />); });
+    expect(transport.invoke.mock.calls.some(([command]) => command === 'get_atom_by_id')).toBe(false);
+    await act(async () => { useUIStore.getState().tabBack(); });
+    expect(container.querySelector('textarea')?.value).toBe('Original fictional summary');
+  });
+
+  it('retains back and forward drafts, deduplicates repeated items and removes truncated history', async () => {
+    const tabId = await openEntity();
+    const first = activeReader();
+    await edit(first, ['First unsaved draft']);
+    first.scrollTop = 123;
+    await act(async () => { useUIStore.getState().openReader('entity:second'); });
+    const second = activeReader();
+    await edit(second, ['Second unsaved draft']);
+    expect(first.isConnected).toBe(true);
+    expect(first.parentElement!.classList.contains('hidden')).toBe(true);
+
+    await act(async () => { useUIStore.getState().tabBack(); });
+    expect(activeReader()).toBe(first);
+    expect(draftValues(first)[0]).toBe('First unsaved draft');
+    expect(first.scrollTop).toBe(123);
+    expect(second.isConnected).toBe(true);
+    await act(async () => { useUIStore.getState().tabForward(); });
+    expect(activeReader()).toBe(second);
+    expect(draftValues(second)[0]).toBe('Second unsaved draft');
+
+    await act(async () => { useUIStore.getState().openReader('entity:fictional-entity'); });
+    expect(activeReader()).toBe(first);
+    expect(container.querySelectorAll('article')).toHaveLength(2);
+    await act(async () => { useUIStore.getState().tabBack(); useUIStore.getState().tabBack(); });
+    await act(async () => { useUIStore.getState().openReader('entity:replacement'); });
+    expect(second.isConnected).toBe(false);
+    expect(first.isConnected).toBe(true);
+    await act(async () => { useUIStore.getState().closeTab(tabId); });
+    expect(first.isConnected).toBe(false);
+    expect(container.querySelector('article')).toBeNull();
+  });
+
+  it.each(['memory:fictional-memory', 'category:fictional-dossier'])(
+    'preserves the actual %s editor through same-tab history and revalidates only its current item', async (id) => {
+      await act(async () => {
+        useUIStore.getState().openReaderEditing(id, { newTab: true });
+        root.render(<MainView />);
+      });
+      const textarea = [...container.querySelectorAll('textarea')].find(input => input.value === 'Original fictional summary')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Unsaved fictional prose');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { useUIStore.getState().openReader(id); });
+      expect([...container.querySelectorAll('textarea')]).toContain(textarea);
+      expect(textarea.value).toBe('Unsaved fictional prose');
+      await act(async () => { useUIStore.getState().openReader('entity:next'); });
+      expect(textarea.isConnected).toBe(true);
+      expect(textarea.value).toBe('Unsaved fictional prose');
+      const save = new KeyboardEvent('keydown', { key: 's', ctrlKey: true, cancelable: true });
+      await act(async () => { document.dispatchEvent(save); });
+      expect(save.defaultPrevented).toBe(false);
+      expect(transport.invoke.mock.calls.some(([command]) => command === 'update_memory_summary' || command === 'update_category_summary')).toBe(false);
+      const reads = transport.invoke.mock.calls.filter(([command]) => command === 'get_atom_by_id').length;
+      transport.invoke.mockImplementation((command: string, args?: { id: string }) => {
+        if (command === 'get_atom_by_id') return Promise.resolve({ ...memory(args!.id), content: 'Changed fictional prose' });
+        throw new Error(`Unexpected command: ${command}`);
+      });
+      await act(async () => { useAtomsStore.setState({ atoms: [{ ...memory(id), updated_at: '2026-01-02T00:00:00Z' }] }); });
+      expect(transport.invoke.mock.calls.filter(([command]) => command === 'get_atom_by_id')).toHaveLength(reads);
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+      await act(async () => { useUIStore.getState().tabBack(); });
+      expect([...container.querySelectorAll('textarea')]).toContain(textarea);
+      expect(textarea.value).toBe('Unsaved fictional prose');
+      expect(textarea.readOnly).toBe(true);
+      expect(useUIStore.getState().tabs[0].retired).toBe(true);
+    },
+  );
+
   it('keeps the actual entity draft and scroll mounted while another reader tab is active', async () => {
     const tabId = await openEntity();
     const reader = activeReader();

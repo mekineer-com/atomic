@@ -114,10 +114,16 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const entityPanelOpen = activeEntry?.type === 'tool' && activeEntry.tool === 'entities';
   const reviewTabs = tabs.filter(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'approvals'));
   const memuReaderTabs = tabs.flatMap((tab) => {
-    const entry = tab.stack[tab.stackIndex];
-    const memuReader = entry?.type === 'atom'
-      && (entry.atomId.startsWith('memory:') || entry.atomId.startsWith('category:') || entry.atomId.startsWith('entity:'));
-    return memuReader ? [{ tab, entry }] : [];
+    const entries = tab.stack.flatMap(entry => entry.type === 'atom'
+      && (entry.atomId.startsWith('memory:') || entry.atomId.startsWith('category:') || entry.atomId.startsWith('entity:')) ? [entry] : []);
+    const readers = new Map(entries.map(entry => [entry.atomId, entry]));
+    const currentEntry = tab.stack[tab.stackIndex];
+    if (currentEntry?.type === 'atom' && readers.has(currentEntry.atomId)) {
+      readers.set(currentEntry.atomId, currentEntry);
+    }
+    return [...readers.values()].map(entry => ({
+      tab, entry, current: currentEntry?.type === 'atom' && currentEntry.atomId === entry.atomId,
+    }));
   });
   const entityPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'entities'));
   const isMobile = useIsMobile();
@@ -640,8 +646,8 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
           const open = tab.id === activeTabId && entry?.type === 'tool' && entry.tool === 'approvals';
           return <div key={tab.id} className={`absolute inset-0 ${open ? '' : 'hidden'}`}><PendingReviewPanel onStale={() => retireTab(tab.id)} /></div>;
         })}
-        {memuReaderTabs.map(({ tab, entry }) => {
-          const open = tab.id === activeTabId;
+        {memuReaderTabs.map(({ tab, entry, current }) => {
+          const open = tab.id === activeTabId && current;
           const viewKey = `${identity?.userId ?? 'standalone'}:${identity?.soulId ?? 'default'}:${tab.id}:${entry.atomId}`;
           return (
             <div key={viewKey} className={`absolute inset-0 ${open ? '' : 'hidden'}`}>
@@ -655,6 +661,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
                   initialEditing={entry.editing}
                   tabId={tab.id}
                   active={open}
+                  current={current}
                   retired={Boolean(tab.retired)}
                 />
               )}
