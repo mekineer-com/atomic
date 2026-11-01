@@ -303,9 +303,11 @@ def prepare_atomic_session(source_bytes: bytes) -> AtomicSessionCandidate:
                     unclear = True
         elif not isinstance(content, str):
             unclear = True
-        if record.get("type") == "assistant":
+        if pending_calls or unclear:
+            answered = False
+        elif record.get("type") == "assistant":
             # Commentary is not completion, even if its calls settle in a later row.
-            if (record.get("isApiErrorMessage") or record.get("error") or pending_calls or unclear
+            if (record.get("isApiErrorMessage") or record.get("error")
                     or message.get("stop_reason") not in (None, "end_turn", "stop_sequence")):
                 answered = False
             elif extract_message_text(content):
