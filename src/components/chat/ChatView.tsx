@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { MessageSquare } from 'lucide-react';
-import { chatMaintenancePending, chatRetryMessageId, useChatStore, type Conversation, type ChatMessageWithContext } from '../../stores/chat';
+import { chatMaintenancePending, chatRetryMessageId, isAtomicRecapPrompt, useChatStore, type Conversation, type ChatMessageWithContext } from '../../stores/chat';
 import { useUIStore, type TabEntry } from '../../stores/ui';
 import { useChatEvents } from '../../hooks/useChatEvents';
 import { useContentSearch } from '../../hooks';
@@ -23,8 +23,7 @@ export function chatDisplayMessages(conversation: Conversation, messages: ChatMe
   return messages.flatMap(message => {
     if (message.id === recap?.request_message_id
       || (message.id !== conversation.atomic_chat_state?.active?.user_message_id && message.role === 'user'
-        && message.content.trim().startsWith('This Atomic session is ending. Write a recap of your activity')
-        && message.content.split('\n').includes('Full Atomic transcript:'))) {
+        && isAtomicRecapPrompt(message.content))) {
       legacyRecap = true;
       return [];
     }

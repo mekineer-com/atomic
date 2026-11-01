@@ -40,6 +40,12 @@ export interface AtomicChatState {
   } | null;
 }
 
+export function isAtomicRecapPrompt(content: string): boolean {
+  const text = content.trim();
+  return text.startsWith('This Atomic session is ending. Write a recap of your activity')
+    && text.split(/\r?\n/).includes('Full Atomic transcript:');
+}
+
 export function chatRetryMessageId(conversation: Conversation, messages: ChatMessageWithContext[]): string | null {
   const state = conversation.atomic_chat_state;
   if (chatMaintenancePending(state) || state?.maintenance?.status === 'blocked') return null;
@@ -49,7 +55,7 @@ export function chatRetryMessageId(conversation: Conversation, messages: ChatMes
   const user = active ? messages.find(message => message.id === active.user_message_id)
     : [...messages].reverse().find(message => message.role === 'user' || message.role === 'assistant');
   if (!active && (user?.role !== 'user' || user.id.startsWith('temp-')
-    || user.content.trim().startsWith('This Atomic session is ending. Write a recap of your activity'))) return null;
+    || isAtomicRecapPrompt(user.content))) return null;
   if (user?.tool_calls.some(call => call.status === 'running'
     || (typeof call.tool_output === 'object' && call.tool_output !== null
       && 'outcome_unknown' in call.tool_output && call.tool_output.outcome_unknown === true))) return null;

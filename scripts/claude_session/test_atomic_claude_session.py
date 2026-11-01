@@ -133,6 +133,45 @@ class ClaudeSafePreservationTest(unittest.TestCase):
                 self.assertEqual(result.changes, {"thinking_blocks_removed": 1, "records_changed": 1})
                 self.assertEqual(prepare_atomic_session(result.candidate_bytes).candidate_bytes, result.candidate_bytes)
 
+    def test_unfinished_commentary_does_not_displace_completed_exchange(self):
+        for tail in ("pending", "settled", "partial", "complete", "unknown", "truncated"):
+            with self.subTest(tail=tail):
+                records = [
+                    row("user", "u0", None, "Completed question"),
+                    row("assistant", "think0", "u0", [
+                        {"type": "thinking", "thinking": "Keep completed reasoning", "signature": "whole"}]),
+                    row("assistant", "use0", "think0", [
+                        {"type": "tool_use", "id": "call0", "name": "fictional", "input": {}}]),
+                    row("user", "result0", "use0", [
+                        {"type": "tool_result", "tool_use_id": "call0", "content": "x" * 900}]),
+                    row("assistant", "answer0", "result0", "Completed answer"),
+                    row("user", "u1", "answer0", "Next question"),
+                    row("assistant", "comment", "u1", [
+                        {"type": "text", "text": "I will inspect this."},
+                        {"type": "tool_use", "id": "call1", "name": "fictional", "input": {}},
+                        {"type": "tool_use", "id": "call2", "name": "fictional", "input": {}}]),
+                ]
+                if tail in {"settled", "partial", "complete", "unknown", "truncated"}:
+                    results = [{"type": "tool_result", "tool_use_id": "call1", "content": "First"}]
+                    if tail != "partial":
+                        results.append({"type": "tool_result", "tool_use_id": "call2", "content": "Second"})
+                    records.append(row("user", "results1", "comment", results))
+                if tail in {"partial", "complete", "unknown", "truncated"}:
+                    content = [{"type": "text", "text": "Final text"}]
+                    if tail == "unknown":
+                        content.append({"type": "future_call", "opaque": True})
+                    records.append(row("assistant", "answer1", records[-1]["uuid"], content))
+                    if tail == "truncated":
+                        records[-1]["message"]["stop_reason"] = "max_tokens"
+                records.append(row("user", "recap", records[-1]["uuid"], "Tool-free recap prompt"))
+                records.append(dict(row("assistant", "failure", "recap", "Context failure"), isApiErrorMessage=True))
+                source = [json.dumps(record).encode() + b"\n" for record in records]
+                output = prepare_atomic_session(b"".join(source)).candidate_bytes.splitlines(keepends=True)
+                if tail == "complete":
+                    self.assertEqual(json.loads(output[1])["message"]["content"], [])
+                else:
+                    self.assertEqual(output, source)
+
     def test_atomic_import_and_preparation_do_not_load_cli_or_posix_modules(self):
         code = '''
 import importlib.abc, sys

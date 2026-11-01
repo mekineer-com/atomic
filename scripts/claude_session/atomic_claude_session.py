@@ -15,6 +15,7 @@ from typing import Any
 
 
 TOOL_OUTPUT_PLACEHOLDER = "[Compacted Claude tool result"
+TOOL_USE_TYPES = ("tool_use", "server_tool_use", "mcp_tool_use")
 
 
 COMMAND_WRAPPER_RE = re.compile(
@@ -188,7 +189,7 @@ def validate_claude_records(records: list[dict[str, Any]]) -> None:
                 meaningful = meaningful or bool(str(block.get("text", "")).strip())
             else:
                 meaningful = True
-            if block_type in ("tool_use", "server_tool_use", "mcp_tool_use"):
+            if block_type in TOOL_USE_TYPES:
                 if not isinstance(block.get("id"), str) or not block["id"].strip():
                     raise ValueError("Claude tool invocation has no valid ID.")
                 tool_uses.setdefault(row_uuid, set()).add(block["id"])
@@ -273,6 +274,8 @@ def prepare_atomic_session(source_bytes: bytes) -> AtomicSessionCandidate:
     latest_start = 0
     pending_start = None
     answered = False
+    pending_calls: set[str] = set()
+    unclear = False
     for index, record in enumerate(records):
         if record.get("isSidechain") or record.get("isMeta"):
             continue
@@ -280,10 +283,32 @@ def prepare_atomic_session(source_bytes: bytes) -> AtomicSessionCandidate:
             if pending_start is not None and answered:
                 latest_start = pending_start
             pending_start, answered = index, False
-        elif pending_start is not None and record.get("type") == "assistant":
-            if record.get("isApiErrorMessage") or record.get("error"):
+            unclear = False
+        if pending_start is None or record.get("type") not in ("user", "assistant"):
+            continue
+        message = record["message"]
+        content = message.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    unclear = True
+                elif block.get("type") in TOOL_USE_TYPES:
+                    pending_calls.add(block["id"])
+                    answered = False
+                elif block.get("type") == "tool_result":
+                    if block["tool_use_id"] not in pending_calls:
+                        unclear = True
+                    pending_calls.discard(block["tool_use_id"])
+                elif block.get("type") not in ("text", "thinking", "image", "document"):
+                    unclear = True
+        elif not isinstance(content, str):
+            unclear = True
+        if record.get("type") == "assistant":
+            # Commentary is not completion, even if its calls settle in a later row.
+            if (record.get("isApiErrorMessage") or record.get("error") or pending_calls or unclear
+                    or message.get("stop_reason") not in (None, "end_turn", "stop_sequence")):
                 answered = False
-            elif extract_message_text(record["message"].get("content")):
+            elif extract_message_text(content):
                 answered = True
     if pending_start is not None and answered:
         latest_start = pending_start
@@ -292,7 +317,7 @@ def prepare_atomic_session(source_bytes: bytes) -> AtomicSessionCandidate:
     output = []
     for index, (record, line) in enumerate(zip(records, lines)):
         candidate = record
-        if index < latest_start and not record.get("isSidechain") and record.get("type") in {"user", "assistant"}:
+        if index < latest_start and not record.get("isSidechain") and record.get("type") in ("user", "assistant"):
             message = record["message"]
             content = message.get("content")
             reduced = compact_record({"type": record["type"], "message": {"content": content}},

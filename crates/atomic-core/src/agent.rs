@@ -4302,13 +4302,18 @@ mod tests {
         };
         let dir = TempDir::new().unwrap();
         let core = AtomicCore::open_or_create(dir.path().join("legacy.db")).unwrap();
-        for (content, tool_status) in [
-            ("Fictional legacy request", None),
-            ("Fictional interrupted request", Some("failed")),
-            ("Fictional running tool", Some("running")),
+        for (content, tool_status, legacy_control) in [
+            ("Fictional legacy request", None, false),
+            ("This Atomic session is ending. Write a recap of your activity is a quote", None, false),
+            ("Fictional interrupted request", Some("failed"), false),
+            ("Fictional running tool", Some("running"), false),
             (
-                "This Atomic session is ending. Write a recap of your activity with TestOwner",
-                None,
+                "This Atomic session is ending. Write a recap of your activity with TestOwner\nFull Atomic transcript:\nOlder dialogue",
+                None, true,
+            ),
+            (
+                "This Atomic session is ending. Write a recap of your activity with TestOwner\r\nFull Atomic transcript:\r\nOlder dialogue",
+                None, true,
             ),
         ] {
             let conv = core
@@ -4317,6 +4322,11 @@ mod tests {
                 .unwrap();
             let cid = &conv.conversation.id;
             let user = core.save_message(cid, "user", content).await.unwrap();
+            let initial = crate::chat::bound_chat_state(None, &Backend::Api, Some("user")).unwrap();
+            let close = Request::Recap { instruction: "Fresh tool-free recap".into() };
+            let (control, _) = crate::chat::chat_admission_input(&initial, Some(&user), &close);
+            assert_eq!(crate::chat::is_atomic_recap_prompt(content), legacy_control);
+            assert_eq!(control.is_some(), legacy_control);
             if let Some(status) = tool_status {
                 let call = ChatToolCall {
                     id: Uuid::new_v4().to_string(),
@@ -4347,7 +4357,7 @@ mod tests {
                 .await;
             if tool_status.is_some() {
                 assert!(result.unwrap_err().to_string().contains("unknown"));
-            } else if content.starts_with("This Atomic") {
+            } else if legacy_control {
                 assert!(result.unwrap_err().to_string().contains("legacy recap"));
                 core.set_chat_phase(cid, "TestOwner", "TestSoul", &Backend::Api, &Phase::Closing)
                     .await

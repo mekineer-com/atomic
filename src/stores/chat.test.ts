@@ -66,7 +66,11 @@ it('recognizes legacy unanswered input without offering standalone or recap Retr
   expect(chatRetryMessageId({ ...conversation, user_id: null, soul_id: null }, [user])).toBeNull();
   expect(chatRetryMessageId(conversation, [user, { ...user, id: 'answer', role: 'assistant' }])).toBeNull();
   expect(chatRetryMessageId(conversation, [{ ...user,
-    content: 'This Atomic session is ending. Write a recap of your activity' }])).toBeNull();
+    content: 'This Atomic session is ending. Write a recap of your activity is a quote' }])).toBe(user.id);
+  for (const newline of ['\n', '\r\n']) {
+    expect(chatRetryMessageId(conversation, [{ ...user,
+      content: `This Atomic session is ending. Write a recap of your activity${newline}Full Atomic transcript:${newline}Older dialogue` }])).toBeNull();
+  }
   expect(chatRetryMessageId({ ...conversation, atomic_chat_state: { backend: 'api', phase: 'open', active: null } }, [user])).toBe(user.id);
 });
 

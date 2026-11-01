@@ -558,11 +558,6 @@ fn existing_recap(conv: &atomic_core::ConversationWithMessages) -> Option<String
     for (idx, message) in messages.iter().enumerate().rev() {
         if message.message.role == "user"
             && is_atomic_recap_prompt(&message.message.content)
-            && message
-                .message
-                .content
-                .lines()
-                .any(|line| line == "Full Atomic transcript:")
         {
             let assistant_idx = messages
                 .iter()

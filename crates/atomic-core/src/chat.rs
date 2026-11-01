@@ -634,12 +634,13 @@ pub(crate) fn changed_chat_phase(
 
 /// Only legacy, unidentified controls use wording; managed controls use saved IDs.
 pub fn is_atomic_recap_prompt(content: &str) -> bool {
+    let content = content.trim();
     content
-        .trim()
         .lines()
         .next()
         .unwrap_or("")
         .starts_with("This Atomic session is ending. Write a recap of your activity")
+        && content.lines().any(|line| line == "Full Atomic transcript:")
 }
 
 /// Saved controls are not dialogue. Wording is only for old nested-transcript rows.
@@ -666,12 +667,7 @@ pub fn dialogue_messages<'a>(
                 || recap.is_some_and(|recap| recap.request_message_id == id)
                 || (ordinary_id != Some(id)
                     && row.message.role == "user"
-                    && is_atomic_recap_prompt(&row.message.content)
-                    && row
-                        .message
-                        .content
-                        .lines()
-                        .any(|line| line == "Full Atomic transcript:"));
+                    && is_atomic_recap_prompt(&row.message.content));
             let omitted =
                 control || reply_id == Some(id) || (skip_reply && row.message.role == "assistant");
             skip_reply = control;
