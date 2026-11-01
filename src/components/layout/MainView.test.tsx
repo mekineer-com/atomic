@@ -116,6 +116,46 @@ function draftValues(reader: HTMLElement) {
 }
 
 describe('MainView entity reader lifecycle', () => {
+  it.each([
+    ['resolve', 'before'], ['resolve', 'after'], ['reject', 'before'], ['reject', 'after'],
+  ])('ignores an obsolete initial read that will %s %s the replacement read after Back', async (outcome, order) => {
+    let finishOld!: (value: AtomWithTags) => void;
+    let failOld!: (error: Error) => void;
+    let finishCurrent!: (value: AtomWithTags) => void;
+    let reads = 0;
+    const invoke = transport.invoke.getMockImplementation()!;
+    transport.invoke.mockImplementation((command: string, args?: { id: string }) => {
+      if (command !== 'get_atom_by_id') return invoke(command, args);
+      return new Promise((resolve, reject) => {
+        if (++reads === 1) { finishOld = resolve; failOld = reject; }
+        else finishCurrent = resolve;
+      });
+    });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await act(async () => {
+        useUIStore.getState().openReader('memory:fictional-memory', undefined, { newTab: true });
+        root.render(<MainView />);
+      });
+      await act(async () => { useUIStore.getState().openReader('entity:next'); });
+      await act(async () => { useUIStore.getState().tabBack(); });
+      expect(reads).toBe(2);
+      const latest = { ...memory('memory:fictional-memory'), content: 'Current fictional summary' };
+      if (order === 'after') await act(async () => { finishCurrent(latest); });
+      await act(async () => {
+        if (outcome === 'resolve') finishOld({ ...latest, content: 'Obsolete fictional summary' });
+        else failOld(new Error('Obsolete fictional failure'));
+      });
+      expect(container.textContent).not.toContain('Obsolete fictional summary');
+      expect(container.textContent).not.toContain('Atom not found');
+      expect(errors).not.toHaveBeenCalled();
+      if (order === 'before') await act(async () => { finishCurrent(latest); });
+      expect(container.querySelector('textarea')?.value).toBe('Current fictional summary');
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it('loads a retained history entry first selected after restoring a tab', async () => {
     useUIStore.setState({
       tabs: [{

@@ -224,6 +224,7 @@ export function AtomReader({
   const savingRef = useRef(false);
   const retiredRef = useRef(retired);
   const currentRef = useRef(current);
+  const loadGeneration = useRef(0);
   const [currentAvailable, setCurrentAvailable] = useState(true);
   atomRef.current = atom;
   retiredRef.current = retired;
@@ -241,9 +242,10 @@ export function AtomReader({
 
   const refreshAtom = useCallback(async () => {
     if (retiredRef.current || savingRef.current || !currentRef.current) return;
+    const generation = loadGeneration.current;
     const startingAtom = atomRef.current;
     const fetchedAtom = await fetchCurrentAtom();
-    if (retiredRef.current || savingRef.current || !currentRef.current || atomRef.current !== startingAtom) return;
+    if (generation !== loadGeneration.current || retiredRef.current || savingRef.current || !currentRef.current || atomRef.current !== startingAtom) return;
     const currentAtom = atomRef.current;
     if (tabId && dirtyRef.current && currentAtom && (!fetchedAtom || memuEditableFieldsChanged(currentAtom, fetchedAtom))) {
       retire(Boolean(fetchedAtom));
@@ -264,6 +266,7 @@ export function AtomReader({
   useEffect(() => {
     currentRef.current = current;
     if (memuReader && !current) return;
+    const generation = loadGeneration.current;
     const cached = cacheKey ? atomDetailCache.get(cacheKey) : null;
     if (cached) {
       setAtom(cached);
@@ -277,14 +280,18 @@ export function AtomReader({
     setShowLoading(false);
 
     // Only show loading indicator if fetch takes longer than 200ms
-    const loadingTimer = setTimeout(() => setShowLoading(true), 200);
+    const loadingTimer = setTimeout(() => {
+      if (generation === loadGeneration.current) setShowLoading(true);
+    }, 200);
 
     refreshAtom()
       .then(() => {
+        if (generation !== loadGeneration.current) return;
         clearTimeout(loadingTimer);
         setIsLoadingAtom(false);
       })
       .catch((error) => {
+        if (generation !== loadGeneration.current) return;
         clearTimeout(loadingTimer);
         console.error('Failed to fetch atom:', error);
         if (!memuReader || !atomRef.current) setAtom(null);
@@ -294,7 +301,10 @@ export function AtomReader({
 
     return () => {
       clearTimeout(loadingTimer);
-      if (memuReader) currentRef.current = false;
+      if (memuReader) {
+        currentRef.current = false;
+        loadGeneration.current += 1;
+      }
     };
   }, [atomId, cacheKey, refreshAtom, current, memuReader]);
 
