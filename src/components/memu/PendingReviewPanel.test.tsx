@@ -340,16 +340,22 @@ describe('PendingReviewPanel', () => {
     }
   });
 
-  it('does not retire a draft when its own delete notification arrives', async () => {
+  it.each([false, true])('does not retire a draft on its own delete while another review is busy (%s)', async (concurrent) => {
     const onStale = vi.fn();
+    const container = document.createElement('div');
     transport.invoke.mockResolvedValueOnce({
-      items: [{ id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' }],
+      items: [
+        { id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' },
+        ...(concurrent ? [{ id: 'memory:m2', summary: 'other memory', memory_type: 'knowledge' }] : []),
+      ],
       categories: [], soul_summaries: [], summaries_revision: 1,
     }).mockImplementationOnce(async () => {
+      if (concurrent) {
+        [...container.querySelectorAll('button')].find(button => button.textContent === 'Approve')!.click();
+      }
       transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' });
       return { status: 'deleted' };
-    });
-    const container = document.createElement('div');
+    }).mockResolvedValueOnce({ status: 'approved' });
     const root = createRoot(container);
     await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
     try {
@@ -363,7 +369,39 @@ describe('PendingReviewPanel', () => {
       });
       expect(onStale).not.toHaveBeenCalled();
       expect(container.querySelector('textarea')).toBeNull();
-      expect(transport.invoke).toHaveBeenLastCalledWith('delete_memory', { id: 'memory:m1', displayed_summary: 'pending memory' });
+      expect(transport.invoke).toHaveBeenCalledWith('delete_memory', { id: 'memory:m1', displayed_summary: 'pending memory' });
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it('keeps a saving draft if another client deletes the memory before the save fails', async () => {
+    const onStale = vi.fn();
+    let failSave!: (error: unknown) => void;
+    transport.invoke.mockResolvedValueOnce({
+      items: [{ id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' }],
+      categories: [], soul_summaries: [], summaries_revision: 1,
+    }).mockImplementationOnce(() => new Promise((_resolve, reject) => { failSave = reject; }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
+    try {
+      const textarea = container.querySelector('textarea')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, 'saving draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')!.click();
+      });
+      await act(async () => {
+        transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' });
+        failSave('memory not found');
+      });
+      expect(container.contains(textarea)).toBe(true);
+      expect(textarea.value).toBe('saving draft');
+      expect(textarea.readOnly).toBe(true);
+      expect(onStale).toHaveBeenCalledOnce();
     } finally {
       await act(async () => { root.unmount(); });
     }

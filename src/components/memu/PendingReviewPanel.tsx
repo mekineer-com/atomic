@@ -82,7 +82,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
   const [summariesStale, setSummariesStale] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [hasDirtyReviews, setHasDirtyReviews] = useState(false);
-  const busyReview = useRef<string | null>(null);
+  const busyReviews = useRef(new Map<string, boolean>());
   const dirtyReviews = useRef(new Set<string>());
   const summariesRevision = useRef(0);
   const reviewEvents = useRef(0);
@@ -95,9 +95,10 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     setSummariesStale(true);
     onStaleRef.current?.();
   }, []);
-  const changeSummaryBusy = useCallback((busy: boolean, reviewKey: string) => {
-    busyReview.current = busy ? reviewKey : null;
-    setSummaryBusy(busy);
+  const changeSummaryBusy = useCallback((busy: boolean, reviewKey: string, deleting = false) => {
+    if (busy) busyReviews.current.set(reviewKey, deleting);
+    else busyReviews.current.delete(reviewKey);
+    setSummaryBusy(busyReviews.current.size > 0);
   }, []);
   const changeSummaryDirty = useCallback((reviewKey: string, dirty: boolean) => {
     if (dirty) dirtyReviews.current.add(reviewKey);
@@ -156,7 +157,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     reviewEvents.current += 1;
     if (change.summaries_revision <= summariesRevision.current) return;
     const reviewKey = `category:${change.category_id}`;
-    if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
+    if (dirtyReviews.current.has(reviewKey) && !busyReviews.current.has(reviewKey)) {
       markStale();
       return;
     }
@@ -185,7 +186,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     }
     if (change.summaries_revision <= summariesRevision.current || !change.kind) return;
     const reviewKey = `soul:${change.kind}`;
-    if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
+    if (dirtyReviews.current.has(reviewKey) && !busyReviews.current.has(reviewKey)) {
       markStale();
       return;
     }
@@ -204,11 +205,11 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
     reviewEvents.current += 1;
     const id = atom.id;
     const reviewKey = id;
-    if (dirtyReviews.current.has(reviewKey) && busyReview.current !== reviewKey) {
+    if (dirtyReviews.current.has(reviewKey) && !busyReviews.current.has(reviewKey)) {
       markStale();
       return;
     }
-    if (busyReview.current === reviewKey) return;
+    if (busyReviews.current.has(reviewKey)) return;
     setReviews((current) => ({
       ...current,
       items: atom.approved_at
@@ -220,7 +221,8 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
   useEffect(() => getTransport().subscribe<{ id: string }>('memu-memory-deleted', ({ id }) => {
     if (stale.current) return;
     reviewEvents.current += 1;
-    if (dirtyReviews.current.has(id) && busyReview.current !== id) {
+    const ownDelete = busyReviews.current.get(id) === true;
+    if (dirtyReviews.current.has(id) && !ownDelete) {
       markStale();
       return;
     }
@@ -352,7 +354,7 @@ function MemoryRow({
   disabled: boolean;
   onStale: () => void;
   onDirtyChange: (id: string, dirty: boolean) => void;
-  onBusyChange: (busy: boolean, reviewKey: string) => void;
+  onBusyChange: (busy: boolean, reviewKey: string, deleting?: boolean) => void;
   onDone: () => void;
   onError: (err: unknown) => void;
 }) {
@@ -366,9 +368,9 @@ function MemoryRow({
     onDirtyChange(reviewKey, edited);
     return () => onDirtyChange(reviewKey, false);
   }, [edited, onDirtyChange, reviewKey]);
-  const run = async (fn: () => Promise<unknown>) => {
+  const run = async (fn: () => Promise<unknown>, deleting = false) => {
     setBusy(true);
-    onBusyChange(true, reviewKey);
+    onBusyChange(true, reviewKey, deleting);
     try {
       await fn();
       await onDone();
@@ -405,7 +407,7 @@ function MemoryRow({
       </div>
       <div className="mt-2 flex gap-2">
         <button disabled={busy || disabled} className="rounded bg-[var(--color-accent)] px-3 py-1 text-sm text-white transition enabled:hover:brightness-110 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke(edited ? 'update_memory_summary' : 'approve_memory', edited ? { id: item.id, summary, displayed_summary: item.summary } : { id: item.id, displayed_summary: item.summary }))}>{edited ? 'Save + approve' : 'Approve'}</button>
-        <button disabled={busy || disabled || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id, displayed_summary: item.summary }))}>Delete</button>
+        <button disabled={busy || disabled || cited} title={cited ? 'Review current dossier citations before deleting' : undefined} className="rounded border border-red-500/50 px-3 py-1 text-sm text-red-500 transition-colors enabled:hover:border-red-500 enabled:hover:bg-red-500/10 enabled:focus-visible:outline enabled:focus-visible:outline-2 enabled:focus-visible:outline-offset-2 enabled:focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-[0.45]" onClick={() => run(() => getTransport().invoke('delete_memory', { id: item.id, displayed_summary: item.summary }), true)}>Delete</button>
       </div>
     </article>
   );
