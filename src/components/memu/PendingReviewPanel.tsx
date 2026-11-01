@@ -240,6 +240,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
   // consistent visuals beat live-updating cluster membership mid-review.
   const removeMemory = (id: string) => {
     useCanvasStore.getState().invalidateCanvasData();
+    if (stale.current) return;
     setReviews((r) => ({ ...r, items: r.items.filter((item) => item.id !== id) }));
   };
   const reportError = (err: unknown) => setError(String(err));
@@ -301,6 +302,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
                 onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => {
+                  if (stale.current) return;
                   acceptRevision(result.summaries_revision);
                   useCanvasStore.getState().invalidateCanvasData();
                   removeCategory(category.id);
@@ -321,6 +323,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
                 onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}
                 onDone={(result) => {
+                  if (stale.current) return;
                   acceptRevision(result.summaries_revision);
                   setReviews((r) => ({
                     ...r,

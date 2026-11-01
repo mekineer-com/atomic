@@ -375,13 +375,14 @@ describe('PendingReviewPanel', () => {
     }
   });
 
-  it('keeps a saving draft if another client deletes the memory before the save fails', async () => {
+  it.each([false, true])('keeps a retired draft when its pending save finishes (%s)', async (succeeds) => {
     const onStale = vi.fn();
     let failSave!: (error: unknown) => void;
+    let finishSave!: (result: unknown) => void;
     transport.invoke.mockResolvedValueOnce({
       items: [{ id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' }],
       categories: [], soul_summaries: [], summaries_revision: 1,
-    }).mockImplementationOnce(() => new Promise((_resolve, reject) => { failSave = reject; }));
+    }).mockImplementationOnce(() => new Promise((resolve, reject) => { finishSave = resolve; failSave = reject; }));
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () => { root.render(<PendingReviewPanel onStale={onStale} />); });
@@ -396,12 +397,46 @@ describe('PendingReviewPanel', () => {
       });
       await act(async () => {
         transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' });
-        failSave('memory not found');
+        if (succeeds) finishSave({ status: 'approved' });
+        else failSave('memory not found');
       });
       expect(container.contains(textarea)).toBe(true);
       expect(textarea.value).toBe('saving draft');
       expect(textarea.readOnly).toBe(true);
       expect(onStale).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each(['category', 'soul'])('keeps a retired %s review when its pending approval succeeds', async (kind) => {
+    let finishApprove!: (result: unknown) => void;
+    const review = { id: `${kind}:fictional`, kind: 'narrative_self', label: 'Fictional review', summary: 'Review prose' };
+    transport.invoke.mockResolvedValueOnce({
+      items: [{ id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' }],
+      categories: kind === 'category' ? [review] : [],
+      soul_summaries: kind === 'soul' ? [review] : [], summaries_revision: 1,
+    }).mockImplementationOnce(() => new Promise(resolve => { finishApprove = resolve; }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => { root.render(<PendingReviewPanel />); });
+    try {
+      const memory = container.querySelector('textarea')!;
+      const prose = container.querySelector('textarea[aria-label="Proposed summary"]')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(memory, 'local draft');
+        memory.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent === 'Approve')!.click();
+      });
+      await act(async () => {
+        transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' });
+        finishApprove({ ...review, pending: false, summaries_revision: 2 });
+      });
+      expect(container.contains(prose)).toBe(true);
+      expect(memory.value).toBe('local draft');
+      expect(memory.readOnly).toBe(true);
     } finally {
       await act(async () => { root.unmount(); });
     }
