@@ -116,7 +116,7 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const memuReaderTabs = tabs.flatMap((tab) => {
     const entry = tab.stack[tab.stackIndex];
     const memuReader = entry?.type === 'atom'
-      && (entry.atomId.startsWith('memory:') || entry.atomId.startsWith('category:'));
+      && (entry.atomId.startsWith('memory:') || entry.atomId.startsWith('category:') || entry.atomId.startsWith('entity:'));
     return memuReader ? [{ tab, entry }] : [];
   });
   const entityPanelMounted = tabs.some(tab => tab.stack.some(entry => entry.type === 'tool' && entry.tool === 'entities'));
@@ -645,15 +645,19 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
           const viewKey = `${identity?.userId ?? 'standalone'}:${identity?.soulId ?? 'default'}:${tab.id}:${entry.atomId}`;
           return (
             <div key={viewKey} className={`absolute inset-0 ${open ? '' : 'hidden'}`}>
-              <AtomReader
-                atomId={entry.atomId}
-                viewKey={viewKey}
-                highlightText={entry.highlightText}
-                initialEditing={entry.editing}
-                tabId={tab.id}
-                active={open}
-                retired={Boolean(tab.retired)}
-              />
+              {entry.atomId.startsWith('entity:') ? (
+                <EntityReader entityId={entry.atomId.slice('entity:'.length)} />
+              ) : (
+                <AtomReader
+                  atomId={entry.atomId}
+                  viewKey={viewKey}
+                  highlightText={entry.highlightText}
+                  initialEditing={entry.editing}
+                  tabId={tab.id}
+                  active={open}
+                  retired={Boolean(tab.retired)}
+                />
+              )}
             </div>
           );
         })}
@@ -663,11 +667,9 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
         {!reviewPanelOpen && !entityPanelOpen && (localGraph.isOpen && localGraph.centerAtomId ? (
           <LocalGraphView />
         ) : readerState.atomId ? (
-          readerState.atomId.startsWith('entity:')
-            ? <EntityReader entityId={readerState.atomId.slice('entity:'.length)} />
-            : (readerState.atomId.startsWith('memory:') || readerState.atomId.startsWith('category:'))
-              ? null
-              : <AtomReader key={readerViewKey} atomId={readerState.atomId} viewKey={readerViewKey} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
+          (readerState.atomId.startsWith('memory:') || readerState.atomId.startsWith('category:') || readerState.atomId.startsWith('entity:'))
+            ? null
+            : <AtomReader key={readerViewKey} atomId={readerState.atomId} viewKey={readerViewKey} highlightText={readerState.highlightText} initialEditing={readerState.editing} />
         ) : wikiReaderState.tagId && wikiReaderState.tagName ? (
           <WikiReader
             tagId={wikiReaderState.tagId}
