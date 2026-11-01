@@ -786,7 +786,7 @@ struct NativeStream {
     refused: bool,
     usage: Option<AtomicChatUsage>,
     text_message: Option<String>,
-    blocks: std::collections::BTreeMap<usize, String>,
+    blocks: Vec<(String, std::collections::BTreeMap<usize, String>)>,
 }
 
 impl NativeStream {
@@ -812,15 +812,23 @@ impl NativeStream {
             }
             Frame::Text { identity, text } => {
                 if identity.parent_call_id.is_none() {
-                    let key = identity.message_id.unwrap_or(identity.record_id);
+                    let key = identity.message_id.unwrap_or_else(|| identity.record_id.clone());
                     if self.text_message.as_ref() != Some(&key) {
                         self.blocks.clear();
                         self.text_message = Some(key);
                     }
-                    self.blocks.insert(identity.block_index, text);
+                    let record_index = match self.blocks.iter().position(|(id, _)| id == &identity.record_id) {
+                        Some(index) => index,
+                        None => {
+                            self.blocks.push((identity.record_id, Default::default()));
+                            self.blocks.len() - 1
+                        }
+                    };
+                    self.blocks[record_index].1.insert(identity.block_index, text);
                     on_event(ChatEvent::StreamDelta {
                         conversation_id: turn.conversation_id.into(),
-                        content: self.blocks.values().cloned().collect::<Vec<_>>().join(""),
+                        content: self.blocks.iter().flat_map(|(_, blocks)| blocks.values())
+                            .cloned().collect::<Vec<_>>().join(""),
                     });
                 }
             }
@@ -1412,16 +1420,26 @@ mod tests {
         accept(
             serde_json::json!({"type":"session","session_id":"native","turn_id":"turn","attempt_id":"attempt","profile":{"fingerprint":"fingerprint"}}),
         );
-        for (index, text, parent) in [
-            (0, "old", None),
-            (0, "first", None),
-            (1, " second", None),
-            (0, "nested", Some("parent")),
+        for (record, message, index, text, parent) in [
+            ("z-record", Some("message"), 0, "old", None),
+            ("z-record", Some("message"), 0, "first", None),
+            ("z-record", Some("message"), 1, " second", None),
+            ("a-record", Some("message"), 0, " third", None),
+            ("z-record", Some("message"), 1, " revised", None),
+            ("nested-record", Some("nested-message"), 0, "nested", Some("parent")),
+            ("z-record", Some("message"), 0, "first", None),
+            ("a-record", Some("new-message"), 0, "new", None),
+            ("z-fallback", None, 1, "tail", None),
+            ("z-fallback", None, 0, "head ", None),
+            ("z-fallback", None, 1, "replacement", None),
+            ("a-fallback", None, 0, "other fallback", None),
         ] {
-            accept(
-                serde_json::json!({"type":"text","record_id":"record","message_id":"message","parent_call_id":parent,
-                "block_index":index,"mode":"replace","text":text}),
-            );
+            let mut frame = serde_json::json!({"type":"text","record_id":record,"parent_call_id":parent,
+                "block_index":index,"mode":"replace","text":text});
+            if let Some(message) = message {
+                frame["message_id"] = serde_json::json!(message);
+            }
+            accept(frame);
         }
         for message in ["earlier", "latest"] {
             accept(serde_json::json!({"type":"usage","message_id":message,"usage":counts()}));
@@ -1432,7 +1450,8 @@ mod tests {
         );
         assert_eq!(
             *stream_events.lock().unwrap(),
-            ["old", "first", "first second"]
+            ["old", "first", "first second", "first second third", "first revised third",
+             "first revised third", "new", "tail", "head tail", "head replacement", "other fallback"]
         );
         assert_eq!(stream.usage.unwrap().message_id, "latest");
         let mut status: NativeStatus = serde_json::from_value(serde_json::json!({
