@@ -4,6 +4,7 @@
 //! database and exercises the endpoints with actual HTTP requests.
 
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, web};
+use atomic_core::storage::{AtomStore, SqliteStorage};
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -1062,7 +1063,7 @@ async fn test_workspace_retry_and_settings_reembed_keep_database_scope() {
     let core = ctx.state.manager.active_core().await.unwrap();
     let database_id = ctx.state.manager.active_id().unwrap();
     // No credentials: both operations fail locally without calling a provider.
-    core.storage().insert_atom_impl(
+    SqliteStorage::new(core.database().unwrap()).insert_atom(
         "workspace-note",
         &atomic_core::CreateAtomRequest {
             content: "A fictional workspace note".into(),
