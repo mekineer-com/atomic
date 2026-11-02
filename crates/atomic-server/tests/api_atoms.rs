@@ -1056,6 +1056,56 @@ async fn test_openalma_rejects_another_workspace_database() {
 }
 
 #[actix_web::test]
+async fn test_workspace_retry_and_settings_reembed_keep_database_scope() {
+    let (memu_url, memu_handle) = start_memu_memory_stub();
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let core = ctx.state.manager.active_core().await.unwrap();
+    let database_id = ctx.state.manager.active_id().unwrap();
+    // No credentials: both operations fail locally without calling a provider.
+    core.storage().insert_atom_impl(
+        "workspace-note",
+        &atomic_core::CreateAtomRequest {
+            content: "A fictional workspace note".into(),
+            ..Default::default()
+        },
+        "2026-01-01T00:00:00Z",
+    ).await.unwrap();
+    let app = actix_test::init_service(test_app(&ctx)).await;
+
+    for request in [
+        actix_test::TestRequest::post().uri("/api/embeddings/retry/workspace-note"),
+        actix_test::TestRequest::put().uri("/api/settings/embedding_model")
+            .set_json(json!({"value": "fictional-embedding-model"})),
+    ] {
+        let mut events = ctx.state.event_tx.subscribe();
+        let req = request
+            .insert_header(ctx.auth_header())
+            .insert_header(("X-Atomic-Source", "workspace"))
+            .insert_header(("X-OpenAlma-User", "TestOwner"))
+            .insert_header(("X-OpenAlma-Soul", "TestSoul"))
+            .to_request();
+        let response = actix_test::call_service(&app, req).await;
+        assert_eq!(response.status(), 200);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut failed = false;
+            loop {
+                let event = events.recv().await.unwrap();
+                if let atomic_server::state::ServerEvent::EmbeddingFailed { atom_id, .. } = &event {
+                    assert_eq!(atom_id, "workspace-note");
+                    assert_eq!(event.database_id(), Some(database_id.as_str()));
+                    failed = true;
+                }
+                if matches!(event, atomic_server::state::ServerEvent::PipelineQueueCompleted { .. }) {
+                    assert!(failed, "queue completed without an atom failure event");
+                    break;
+                }
+            }
+        }).await.expect("missing terminal embedding event");
+    }
+    memu_handle.stop(true).await;
+}
+
+#[actix_web::test]
 async fn test_memory_delete_broadcasts_only_after_success_and_preserves_conflict() {
     let (memu_url, memu_handle) = start_memu_memory_stub();
     let ctx = TestCtx::new_with_memu(Some(memu_url)).await;

@@ -2,7 +2,7 @@
 
 use crate::db_extractor::Db;
 use crate::error::ApiErrorResponse;
-use crate::event_bridge::embedding_event_callback;
+use crate::event_bridge::scoped_embedding_event_callback;
 use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use atomic_core::models::PipelineStatus;
@@ -23,7 +23,7 @@ pub struct AllPipelineStatuses {
 
 #[utoipa::path(post, path = "/api/embeddings/process-pending", responses((status = 200, description = "Number of atoms queued for embedding")), tag = "embeddings")]
 pub async fn process_pending_embeddings(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.process_pending_embeddings(on_event).await {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),
@@ -32,7 +32,7 @@ pub async fn process_pending_embeddings(state: web::Data<AppState>, db: Db) -> H
 
 #[utoipa::path(post, path = "/api/embeddings/process-tagging", responses((status = 200, description = "Number of atoms queued for tagging")), tag = "embeddings")]
 pub async fn process_pending_tagging(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.process_pending_tagging(on_event).await {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),
@@ -46,7 +46,7 @@ pub async fn retry_embedding(
     path: web::Path<String>,
 ) -> HttpResponse {
     let atom_id = path.into_inner();
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.retry_embedding(&atom_id, on_event).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "ok"})),
         Err(e) => crate::error::error_response(e),
@@ -60,7 +60,7 @@ pub async fn retry_tagging(
     path: web::Path<String>,
 ) -> HttpResponse {
     let atom_id = path.into_inner();
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.retry_tagging(&atom_id, on_event).await {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "ok"})),
         Err(e) => crate::error::error_response(e),
@@ -69,7 +69,7 @@ pub async fn retry_tagging(
 
 #[utoipa::path(post, path = "/api/embeddings/retry-failed", responses((status = 200, description = "Number of failed embeddings queued")), tag = "embeddings")]
 pub async fn retry_failed_embeddings(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.retry_failed_embeddings(on_event).await {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),
@@ -78,7 +78,7 @@ pub async fn retry_failed_embeddings(state: web::Data<AppState>, db: Db) -> Http
 
 #[utoipa::path(post, path = "/api/tagging/retry-failed", responses((status = 200, description = "Number of failed tagging jobs queued")), tag = "embeddings")]
 pub async fn retry_failed_tagging(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.retry_failed_tagging(on_event).await {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),
@@ -87,7 +87,7 @@ pub async fn retry_failed_tagging(state: web::Data<AppState>, db: Db) -> HttpRes
 
 #[utoipa::path(post, path = "/api/embeddings/reembed-all", responses((status = 200, description = "Number of atoms queued for re-embedding")), tag = "embeddings")]
 pub async fn reembed_all_atoms(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.reembed_all_atoms(on_event).await {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),
@@ -96,7 +96,7 @@ pub async fn reembed_all_atoms(state: web::Data<AppState>, db: Db) -> HttpRespon
 
 #[utoipa::path(post, path = "/api/tagging/retag-all", responses((status = 200, description = "Number of atoms queued for re-tagging")), tag = "embeddings")]
 pub async fn retag_all_atoms(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    let on_event = embedding_event_callback(state.event_tx.clone());
+    let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
     match db.0.retag_all_atoms(on_event).await {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),

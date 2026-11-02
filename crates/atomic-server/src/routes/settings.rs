@@ -18,6 +18,7 @@
 
 use crate::db_extractor::Db;
 use crate::error::{ok_or_error, ApiErrorResponse};
+use crate::event_bridge::scoped_embedding_event_callback;
 use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use serde::{Deserialize, Serialize};
@@ -46,7 +47,7 @@ pub async fn set_setting(
 
     // Handle embedding-space settings via set_setting_with_reembed (avoids deadlock)
     if atomic_core::settings::is_embedding_space_key(&key) {
-        let on_event = crate::event_bridge::embedding_event_callback(state.event_tx.clone());
+        let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
         // `set_setting_with_reembed` writes through the resolver's routing:
         // workspace-only → registry, overridable + N≤1 → registry, overridable
         // + N>1 → per-DB override for the active database. It then re-embeds
@@ -77,7 +78,7 @@ pub async fn clear_setting_override(
 ) -> HttpResponse {
     let key = path.into_inner();
     if atomic_core::settings::is_embedding_space_key(&key) {
-        let on_event = crate::event_bridge::embedding_event_callback(state.event_tx.clone());
+        let on_event = scoped_embedding_event_callback(state.event_tx.clone(), db.1.clone());
         ok_or_error(db.0.clear_override_with_reembed(&key, on_event).await)
     } else {
         ok_or_error(db.0.clear_override(&key).await)
