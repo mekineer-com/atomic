@@ -64,6 +64,33 @@ describe('entitySaveCommand', () => {
 });
 
 describe('entity reader ownership and link refresh', () => {
+  it.each(['success', 'failure'])('keeps submitted fields read-only until Save ends with %s', async outcome => {
+    const original = { ...entity('A'), is_relationship: true };
+    const saved = { ...original, name: 'Submitted fictional name' };
+    let finish!: () => void;
+    let fail!: (error: Error) => void;
+    transport.invoke.mockImplementation((command: string) => {
+      if (command === 'get_memu_entity') return Promise.resolve(saved);
+      if (command === 'update_memu_relationship') return new Promise((resolve, reject) => {
+        finish = () => resolve(saved);
+        fail = reject;
+      });
+      throw new Error(command);
+    });
+    await act(async () => { root.render(createElement(EntityReader, { entityId: 'A' })); });
+    await click('Edit');
+    const fields = () => [...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('article input, article textarea')].slice(0, 4);
+    expect(fields()).toHaveLength(4);
+    expect(fields().every(input => !input.readOnly)).toBe(true);
+    await click('Save');
+    expect(fields().every(input => input.readOnly && !input.disabled)).toBe(true);
+    await act(async () => { if (outcome === 'success') finish(); else fail(new Error('Fictional save failure')); });
+    if (outcome === 'success') await click('Edit');
+    else expect(container.textContent).toContain('Fictional save failure');
+    expect(fields().every(input => !input.readOnly)).toBe(true);
+    expect(fields()[0].value).toBe(saved.name);
+  });
+
   it.each(['save', 'delete'])('keeps B selected after A completes %s', async action => {
     let finish!: () => void;
     let entities = [entity('A'), entity('C'), entity('B')];
