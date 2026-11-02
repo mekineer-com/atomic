@@ -375,6 +375,48 @@ describe('PendingReviewPanel', () => {
     }
   });
 
+  it.each([false, true])('locks only the saving memory until its request finishes (%s)', async (succeeds) => {
+    let finishSave!: (result: unknown) => void;
+    let failSave!: (error: unknown) => void;
+    transport.invoke.mockResolvedValueOnce({
+      items: [
+        { id: 'memory:m1', summary: 'pending memory', memory_type: 'knowledge' },
+        { id: 'memory:m2', summary: 'other memory', memory_type: 'knowledge' },
+      ],
+      categories: [], soul_summaries: [], summaries_revision: 1,
+    }).mockImplementationOnce(() => new Promise((resolve, reject) => { finishSave = resolve; failSave = reject; }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<PendingReviewPanel />); });
+      const [textarea, other] = container.querySelectorAll('textarea');
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'saving draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')!.click();
+      });
+      expect(transport.invoke).toHaveBeenLastCalledWith('update_memory_summary', {
+        id: 'memory:m1', summary: 'saving draft', displayed_summary: 'pending memory',
+      });
+      expect(other.readOnly).toBe(false);
+      expect(textarea.readOnly).toBe(true);
+      await act(async () => {
+        if (succeeds) finishSave({ status: 'approved' });
+        else failSave('Fictional save failed');
+      });
+      expect(container.contains(textarea)).toBe(!succeeds);
+      if (!succeeds) {
+        expect(textarea.value).toBe('saving draft');
+        expect(textarea.readOnly).toBe(false);
+      }
+      expect(other.readOnly).toBe(false);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
   it.each([false, true])('keeps a retired draft when its pending save finishes (%s)', async (succeeds) => {
     const onStale = vi.fn();
     let failSave!: (error: unknown) => void;
@@ -396,6 +438,8 @@ describe('PendingReviewPanel', () => {
         [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')!.click();
       });
       await act(async () => {
+        // A committed save can be deleted using its new summary before its HTTP response arrives.
+        if (succeeds) transport.listeners.get('atom-updated')?.({ id: 'memory:m1', content: 'saving draft', approved_at: '2026-01-01T00:00:00Z' });
         transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' });
         if (succeeds) finishSave({ status: 'approved' });
         else failSave('memory not found');

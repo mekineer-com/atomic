@@ -403,7 +403,7 @@ function MemoryRow({
           </span>
         )}
       </div>
-      <textarea readOnly={disabled} className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
+      <textarea readOnly={disabled || busy} className="min-h-28 w-full rounded border border-[var(--color-border)] bg-transparent p-2 text-sm" value={summary} onChange={(e) => setSummary(e.target.value)} />
       <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-tertiary)]">
         {item.memory_ref && <span className="font-medium text-[var(--color-text-secondary)]">M{item.memory_ref}</span>}
         <DossierUsageLinks usages={item.dossier_usages} />
