@@ -343,6 +343,9 @@ async fn memu_search_value(
         ("soul_id", config.soul_id),
         ("limit", request.limit.unwrap_or(20).max(1).to_string()),
     ];
+    if let Some(threshold) = request.threshold {
+        params.push(("threshold", threshold.to_string()));
+    }
     if request.memory_only {
         params.push(("memory_only", "true".to_string()));
     }
