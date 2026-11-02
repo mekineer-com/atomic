@@ -26,7 +26,16 @@ vi.mock('../../hooks', () => ({
   }),
 }));
 vi.mock('../canvas/MiniGraphPreview', () => ({ MiniGraphPreview: () => null }));
-vi.mock('../memu/EntityManager', () => ({ MemoryEntityControls: ({ entityNames = [] }: { entityNames?: string[] }) => <div data-entity-links>{entityNames.join(', ')}</div> }));
+vi.mock('../memu/EntityManager', () => ({
+  MemoryEntityControls: ({ entityNames = [], onUpdated, readOnly }: {
+    entityNames?: string[]; onUpdated: (atom: AtomWithTags) => void; readOnly?: boolean;
+  }) => <>
+    <div data-entity-links>{entityNames.join(', ')}</div>
+    <button disabled={readOnly} onClick={async () => {
+      onUpdated(await transport.invoke('detach_memu_entity', { memoryId: 'm1', entityId: 'old' }));
+    }}>Detach entity</button>
+  </>,
+}));
 vi.mock('../../lib/api', () => ({ findSimilarAtoms: vi.fn().mockResolvedValue([]) }));
 vi.mock('@atomic-editor/editor', () => ({ AtomicCodeMirrorEditor: () => null, wikiLinks: () => ({}) }));
 vi.mock('@atomic-editor/editor/code-languages', () => ({ ATOMIC_CODE_LANGUAGES: [] }));
@@ -53,9 +62,11 @@ const memory = (content: string, updatedAt: string): AtomWithTags => ({
   dossier_usages: [],
 });
 
-function ReaderHarness({ current = true }: { current?: boolean }) {
+function ReaderHarness({ current = true, atomId = 'memory:m1', initialEditing = false }: {
+  current?: boolean; atomId?: string; initialEditing?: boolean;
+}) {
   const retired = useUIStore(state => Boolean(state.tabs[0]?.retired));
-  return <AtomReader atomId="memory:m1" viewKey="tab-1:memory:m1" tabId="tab-1" active={current} current={current} retired={retired} />;
+  return <AtomReader atomId={atomId} viewKey={`tab-1:${atomId}`} tabId="tab-1" active={current} current={current} retired={retired} initialEditing={initialEditing} />;
 }
 
 afterEach(() => {
@@ -663,5 +674,113 @@ describe('AtomReader stale snapshots', () => {
     expect(transport.invoke).toHaveBeenCalledTimes(2);
     expect(secondContainer.querySelector('textarea')?.value).toBe('current memory');
     await act(async () => { secondRoot.unmount(); });
+  });
+});
+
+describe.each(['memory', 'category'])('AtomReader %s link draft protection', kind => {
+  const originalValue = (): AtomWithTags => ({
+    ...memory('Original prose', '2026-01-01T00:00:00Z'),
+    id: kind === 'memory' ? 'memory:m1' : 'category:c1',
+    entity_ids: ['entity:old'], entity_names: ['Old link'],
+    summaries_revision: 1, description: '', category_kind: 'topic',
+    members: [{
+      id: 'memory:member', memory_id: 'member', memory_ref: 'M1', summary: 'Fictional member',
+      memory_type: 'event', happened_at: null, created_at: null, status: 'Active', cited: false,
+    }],
+  });
+  const mount = async (id: string) => {
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => { root.render(<ReaderHarness atomId={id} initialEditing />); });
+    return { container, root };
+  };
+  const edit = async (container: HTMLDivElement) => {
+    const textarea = [...container.querySelectorAll('textarea')].find(input => input.value === 'Original prose')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    return textarea;
+  };
+
+  it.each(['settled', 'before-effects', 'direct-response'])('preserves a draft when external prose arrives %s', async order => {
+    const original = originalValue();
+    const linked = { ...original, entity_ids: [], entity_names: [], members: [] };
+    let finishLink!: (value: AtomWithTags) => void;
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockImplementationOnce(() => new Promise(resolve => { finishLink = resolve; }))
+      .mockResolvedValue({ ...linked, content: 'External prose' });
+    const { container, root } = await mount(original.id);
+    try {
+      const textarea = await edit(container);
+      if (kind === 'category') await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent?.startsWith('Memories in this dossier'))!.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent === (kind === 'memory' ? 'Detach entity' : 'Detach'))!.click();
+      });
+      const refresh = () => transport.listeners.get('tagging-complete')?.({ atom_id: original.id });
+      if (order === 'before-effects') {
+        await act(async () => {
+          finishLink(linked);
+          await Promise.resolve();
+          // Complete the refresh before React restores the dirty ref through its effect.
+          refresh();
+          await Promise.resolve();
+        });
+      } else {
+        await act(async () => { finishLink(order === 'direct-response' ? { ...linked, content: 'External prose' } : linked); });
+        if (order === 'settled') {
+          expect(textarea.value).toBe('Fictional draft');
+          expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+          if (kind === 'memory') expect(container.querySelector('[data-entity-links]')?.textContent).toBe('');
+          else expect(container.textContent).toContain('Memories in this dossier (0)');
+          await act(async () => { refresh(); });
+        }
+      }
+      expect(container.querySelectorAll('textarea')).toContain(textarea);
+      expect(textarea.value).toBe('Fictional draft');
+      expect(textarea.readOnly).toBe(true);
+      expect(useUIStore.getState().tabs[0].retired).toBe(true);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each([
+    ['Save', 'success'], ['Save', 'failure'], ['Approve', 'success'], ['Approve', 'failure'],
+  ])('handles a queued external refresh after %s %s', async (action, outcome) => {
+    const original = originalValue();
+    if (action === 'Save') Object.assign(original, {
+      approved_at: original.updated_at, approved_summary: original.content, approved_description: '',
+    });
+    let finish!: (value: AtomWithTags) => void;
+    let fail!: (error: Error) => void;
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }))
+      .mockResolvedValue({ ...original, content: 'External prose' });
+    const { container, root } = await mount(original.id);
+    try {
+      const textarea = action === 'Save' ? await edit(container) : null;
+      await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === action)!.click(); });
+      await act(async () => { transport.listeners.get('tagging-complete')?.({ atom_id: original.id }); });
+      await act(async () => {
+        if (outcome === 'failure') fail(new Error('Fictional mutation failure'));
+        else finish({ ...original, content: action === 'Save' ? 'Fictional draft' : original.content });
+      });
+      const keepDraft = action === 'Save' && outcome === 'failure';
+      expect(Boolean(useUIStore.getState().tabs[0].retired)).toBe(keepDraft);
+      if (keepDraft) {
+        expect(textarea!.value).toBe('Fictional draft');
+        expect(textarea!.readOnly).toBe(true);
+      } else {
+        expect(container.textContent).not.toContain('read-only snapshot');
+        expect([...container.querySelectorAll('textarea')].some(input => input.value === 'External prose')
+          || container.textContent?.includes('External prose')).toBe(true);
+      }
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
   });
 });

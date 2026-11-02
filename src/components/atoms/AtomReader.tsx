@@ -448,7 +448,10 @@ export function AtomReader({
           }}
           onAtomUpdated={(updated) => {
             if (retiredRef.current) return;
-            dirtyRef.current = false;
+            if (tabId && dirtyRef.current && atomRef.current && memuEditableFieldsChanged(atomRef.current, updated)) {
+              retire(true);
+              return;
+            }
             atomRef.current = updated;
             if (cacheKey) atomDetailCache.set(cacheKey, updated);
             setAtom(updated);
@@ -621,13 +624,14 @@ function AtomReaderContent({
       );
       if (!updated) return;
       useCanvasStore.getState().invalidateCanvasData();
+      onDirtyChange(false);
       onAtomUpdated?.(updated);
       if (isMemuCategory) setMemuEditing(false);
     } finally {
       onSavingChange(false);
       setMemuStatus('idle');
     }
-  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuKind, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated, onSavingChange, runMemuMutation]);
+  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuKind, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated, onDirtyChange, onSavingChange, runMemuMutation]);
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -645,12 +649,13 @@ function AtomReaderContent({
       );
       if (!updated) return;
       useCanvasStore.getState().invalidateCanvasData();
+      onDirtyChange(false);
       onAtomUpdated?.(updated);
     } finally {
       onSavingChange(false);
       setMemuStatus('idle');
     }
-  }, [atom, isMemuCategory, isMemuMemory, onAtomUpdated, onSavingChange, runMemuMutation]);
+  }, [atom, isMemuCategory, isMemuMemory, onAtomUpdated, onDirtyChange, onSavingChange, runMemuMutation]);
 
   useEffect(() => {
     if (!active || retired) return;
