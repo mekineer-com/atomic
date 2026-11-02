@@ -372,14 +372,17 @@ describe('AtomReader stale snapshots', () => {
     }
   });
 
-  it('discards a pending refresh after its item is buried, then checks the draft on return', async () => {
+  it.each(['refresh', 'link'])('discards a pending %s response after its item is buried, then checks the draft on return', async source => {
     let finishRefresh!: (value: AtomWithTags) => void;
     let finishReturn!: (value: AtomWithTags) => void;
     transport.invoke
       .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
       .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }))
       .mockImplementationOnce(() => new Promise(resolve => { finishReturn = resolve; }));
-    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    useUIStore.setState({
+      tabs: [{ id: 'tab-1', stack: [{ type: 'atom', atomId: 'memory:m1', tagId: null, highlightText: null, editing: false }], stackIndex: 0, ordinal: 1 }],
+      activeTabId: 'tab-1',
+    });
     const container = document.createElement('div');
     const root = createRoot(container);
     try {
@@ -389,13 +392,23 @@ describe('AtomReader stale snapshots', () => {
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
       });
-      await act(async () => { useAtomsStore.setState({ atoms: [memory('external memory', '2026-01-02T00:00:00Z')] }); });
-      await act(async () => { root.render(<ReaderHarness current={false} />); });
+      await act(async () => {
+        if (source === 'refresh') useAtomsStore.setState({ atoms: [memory('external memory', '2026-01-02T00:00:00Z')] });
+        else [...container.querySelectorAll('button')].find(button => button.textContent === 'Detach entity')!.click();
+      });
+      await act(async () => {
+        useUIStore.getState().openReader('entity:old');
+        root.render(<ReaderHarness current={false} />);
+      });
       await act(async () => { finishRefresh(memory('external memory', '2026-01-02T00:00:00Z')); });
       expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+      expect(useUIStore.getState().tabs[0].stack[1]).toMatchObject({ atomId: 'entity:old' });
       expect(textarea.value).toBe('Fictional draft');
       expect(textarea.readOnly).toBe(false);
-      await act(async () => { root.render(<ReaderHarness />); });
+      await act(async () => {
+        useUIStore.getState().tabBack();
+        root.render(<ReaderHarness />);
+      });
       expect(container.querySelector('textarea')).toBe(textarea);
       expect(textarea.value).toBe('Fictional draft');
       await act(async () => { finishReturn(memory('external memory', '2026-01-02T00:00:00Z')); });
@@ -445,7 +458,7 @@ describe('AtomReader stale snapshots', () => {
     }
   });
 
-  it('does not retire a replacement scoped reader when an unmounted draft refresh finishes', async () => {
+  it.each(['refresh', 'link'])('does not retire a replacement scoped reader when an unmounted draft %s finishes', async source => {
     let finishOld!: (value: AtomWithTags) => void;
     transport.invoke
       .mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'))
@@ -461,7 +474,10 @@ describe('AtomReader stale snapshots', () => {
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Old fictional draft');
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
       });
-      await act(async () => { useAtomsStore.setState({ atoms: [memory('old scope changed', '2026-01-02T00:00:00Z')] }); });
+      await act(async () => {
+        if (source === 'refresh') useAtomsStore.setState({ atoms: [memory('old scope changed', '2026-01-02T00:00:00Z')] });
+        else [...container.querySelectorAll('button')].find(button => button.textContent === 'Detach entity')!.click();
+      });
       await act(async () => { root.render(<ReaderHarness key="replacement-scope" />); });
       await act(async () => { finishOld(memory('old scope changed', '2026-01-02T00:00:00Z')); });
       expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
