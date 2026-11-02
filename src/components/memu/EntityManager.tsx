@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Plus, Search, Users } from 'lucide-react';
 import { getTransport } from '../../lib/transport';
 import type { AtomWithTags, SemanticSearchResult } from '../../stores/atoms';
@@ -170,6 +170,10 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   const [mergePreview, setMergePreview] = useState<EntityMergePreview | null>(null);
   const openReader = useUIStore(s => s.openReader);
   const removeAtomFromTabs = useUIStore(s => s.removeAtomFromTabs);
+  const onChangedRef = useRef(onChanged);
+  const loadGeneration = useRef(0);
+  const displayOnLoad = useRef<'initial' | 'refresh' | null>('initial');
+  onChangedRef.current = onChanged;
 
   const display = useCallback((value: EntityDetail) => {
     setEntity(value);
@@ -179,25 +183,52 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     setRelationship(value.properties.relationship ?? '');
     setPromoting(false);
   }, []);
-  const load = useCallback(async () => {
-    return getTransport().invoke<EntityDetail>('get_memu_entity', { id: entityId });
-  }, [entityId]);
+  const load = useCallback(async (linksOnly = false) => {
+    const generation = ++loadGeneration.current;
+    if (!linksOnly && displayOnLoad.current !== 'initial') displayOnLoad.current = 'refresh';
+    try {
+      const value = await getTransport().invoke<EntityDetail>('get_memu_entity', { id: entityId });
+      if (generation !== loadGeneration.current) return;
+      // A newer link read can also finish initialization or an explicit Save refresh.
+      if (displayOnLoad.current) {
+        displayOnLoad.current = null;
+        display(value);
+      } else {
+        setEntity(current => current && ({
+          ...current,
+          memories: value.memories,
+          linked_memory_count: value.linked_memory_count,
+          last_mentioned_at: value.last_mentioned_at,
+          orphan: value.orphan,
+        }));
+      }
+      if (linksOnly) onChangedRef.current?.();
+    } catch (err) {
+      if (generation === loadGeneration.current) {
+        if (displayOnLoad.current === 'refresh') displayOnLoad.current = null;
+        throw err;
+      }
+    }
+  }, [display, entityId]);
 
   useEffect(() => {
-    let cancelled = false;
+    displayOnLoad.current = 'initial';
     setEntity(null);
     setError(null);
     setMemoryQuery('');
     setMemoryResults([]);
     setLinkedMemoryResult(null);
-    load()
-      .then(value => { if (!cancelled) display(value); })
-      .catch(err => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); });
-    return () => { cancelled = true; };
-  }, [display, load]);
+    const failed = (err: unknown) => setError(err instanceof Error ? err.message : String(err));
+    const unsubscribe = getTransport().subscribe<{ id: string }>('atom-updated', atom => {
+      if (!atom.id.startsWith('memory:')) return;
+      void load(true).catch(failed);
+    });
+    void load().catch(failed);
+    return () => { loadGeneration.current += 1; unsubscribe(); };
+  }, [entityId, load]);
 
   const refresh = async () => {
-    display(await load());
+    await load();
     onChanged?.();
   };
 
@@ -321,6 +352,8 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
       );
       removeAtomFromTabs(`entity:${duplicateId}`);
       useCanvasStore.getState().invalidateCanvasData();
+      loadGeneration.current += 1;
+      displayOnLoad.current = null;
       display(merged);
       setMergeOpen(false);
       onChanged?.();
@@ -622,7 +655,7 @@ export function EntityManager() {
         </div>
       </aside>
       <main className="min-h-[30rem] md:min-h-0 md:overflow-hidden">
-        {selectedId ? <EntityReader entityId={selectedId} onChanged={() => void loadEntities()} onDeleted={() => { setSelectedId(null); void loadEntities(); }} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
+        {selectedId ? <EntityReader key={selectedId} entityId={selectedId} onChanged={() => void loadEntities()} onDeleted={() => { setSelectedId(current => current === selectedId ? null : current); void loadEntities(); }} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
       </main>
     </div>
   );

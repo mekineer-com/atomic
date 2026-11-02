@@ -225,6 +225,8 @@ export function AtomReader({
   const retiredRef = useRef(retired);
   const currentRef = useRef(current);
   const loadGeneration = useRef(0);
+  const refreshRequest = useRef(0);
+  const refreshPending = useRef(false);
   const [currentAvailable, setCurrentAvailable] = useState(true);
   atomRef.current = atom;
   retiredRef.current = retired;
@@ -241,14 +243,23 @@ export function AtomReader({
   }, [retireTab, tabId]);
 
   const refreshAtom = useCallback(async () => {
-    if (retiredRef.current || savingRef.current || !currentRef.current) return;
+    if (retiredRef.current || !currentRef.current) return;
+    if (savingRef.current) {
+      refreshPending.current = true;
+      return;
+    }
+    refreshPending.current = false;
     const generation = loadGeneration.current;
+    const request = ++refreshRequest.current;
     const startingAtom = atomRef.current;
     const fetchedAtom = await fetchCurrentAtom().catch(error => {
+      if (generation !== loadGeneration.current || request !== refreshRequest.current) return null;
       if (isMissingMemoryError(error)) return null;
+      setIsLoadingAtom(false);
       throw error;
     });
-    if (generation !== loadGeneration.current || retiredRef.current || savingRef.current || !currentRef.current || atomRef.current !== startingAtom) return;
+    if (generation !== loadGeneration.current || request !== refreshRequest.current || retiredRef.current
+      || savingRef.current || !currentRef.current || atomRef.current !== startingAtom) return;
     const currentAtom = atomRef.current;
     if (tabId && dirtyRef.current && currentAtom && (!fetchedAtom || memuEditableFieldsChanged(currentAtom, fetchedAtom))) {
       retire(Boolean(fetchedAtom));
@@ -258,7 +269,16 @@ export function AtomReader({
     else if (cacheKey) atomDetailCache.delete(cacheKey);
     setAtom(fetchedAtom);
     lastFetchedAt.current = fetchedAtom?.updated_at ?? null;
+    setIsLoadingAtom(false);
   }, [cacheKey, fetchCurrentAtom, retire, tabId]);
+
+  useEffect(() => {
+    if (!atomId.startsWith('memory:')) return;
+    return getTransport().subscribe<{ id: string }>('atom-updated', updated => {
+      // WebSocket Atom payloads omit entity fields; detail remains their source of truth.
+      if (updated.id === atomId) void refreshAtom().catch(console.error);
+    });
+  }, [atomId, refreshAtom]);
 
   // Watch the atoms store for updates to the currently viewed atom
   const storeAtom = useAtomsStore((s) =>
@@ -287,11 +307,13 @@ export function AtomReader({
       if (generation === loadGeneration.current) setShowLoading(true);
     }, 200);
 
-    refreshAtom()
+    const reading = refreshAtom();
+    const request = refreshRequest.current;
+    reading
       .then(() => {
         if (generation !== loadGeneration.current) return;
         clearTimeout(loadingTimer);
-        setIsLoadingAtom(false);
+        if (request === refreshRequest.current) setIsLoadingAtom(false);
       })
       .catch((error) => {
         if (generation !== loadGeneration.current) return;
@@ -367,7 +389,10 @@ export function AtomReader({
           retired={retired}
           currentAvailable={currentAvailable}
           onDirtyChange={(dirty) => { dirtyRef.current = dirty; }}
-          onSavingChange={(saving) => { savingRef.current = saving; }}
+          onSavingChange={(saving) => {
+            savingRef.current = saving;
+            if (!saving && refreshPending.current) void refreshAtom().catch(console.error);
+          }}
           onConflict={retire}
           onFetchCurrent={fetchCurrentAtom}
           onOpenCurrent={async () => {

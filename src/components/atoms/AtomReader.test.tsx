@@ -7,7 +7,11 @@ import type { AtomWithTags } from '../../stores/atoms';
 
 const transport = vi.hoisted(() => ({
   invoke: vi.fn(),
-  subscribe: vi.fn(() => () => undefined),
+  listeners: new Map<string, (payload: unknown) => void>(),
+  subscribe: vi.fn((event: string, callback: (payload: unknown) => void) => {
+    transport.listeners.set(event, callback);
+    return () => { transport.listeners.delete(event); };
+  }),
 }));
 
 vi.mock('../../lib/transport', () => ({ getTransport: () => transport }));
@@ -22,7 +26,7 @@ vi.mock('../../hooks', () => ({
   }),
 }));
 vi.mock('../canvas/MiniGraphPreview', () => ({ MiniGraphPreview: () => null }));
-vi.mock('../memu/EntityManager', () => ({ MemoryEntityControls: () => null }));
+vi.mock('../memu/EntityManager', () => ({ MemoryEntityControls: ({ entityNames = [] }: { entityNames?: string[] }) => <div data-entity-links>{entityNames.join(', ')}</div> }));
 vi.mock('../../lib/api', () => ({ findSimilarAtoms: vi.fn().mockResolvedValue([]) }));
 vi.mock('@atomic-editor/editor', () => ({ AtomicCodeMirrorEditor: () => null, wikiLinks: () => ({}) }));
 vi.mock('@atomic-editor/editor/code-languages', () => ({ ATOMIC_CODE_LANGUAGES: [] }));
@@ -56,11 +60,221 @@ function ReaderHarness({ current = true }: { current?: boolean }) {
 
 afterEach(() => {
   transport.invoke.mockReset();
+  transport.listeners.clear();
   useAtomsStore.setState({ atoms: [] });
   useUIStore.setState({ tabs: [], activeTabId: null, nextTabOrdinal: 1 });
 });
 
 describe('AtomReader stale snapshots', () => {
+  it('settles loading without fetching when mounted as a retired snapshot', async () => {
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<AtomReader atomId="memory:m1" viewKey="retired" retired />); });
+      expect(container.textContent).toContain('Atom not found');
+      expect(transport.invoke).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each([false, true])('refetches links from stripped events without changing prose or retiring a draft (dirty=%s)', async dirty => {
+    const original = { ...memory('Original prose', '2026-01-01T00:00:00Z'), entity_ids: ['entity:old'], entity_names: ['Old link'] };
+    transport.invoke.mockResolvedValueOnce(original).mockResolvedValueOnce({
+      ...original, entity_ids: ['entity:new'], entity_names: ['New link'],
+    });
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      if (dirty) await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { transport.listeners.get('atom-updated')?.(memory('Event without entity metadata', original.updated_at)); });
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+      expect(container.querySelector('textarea')).toBe(textarea);
+      expect(textarea.value).toBe(dirty ? 'Fictional draft' : 'Original prose');
+      expect(textarea.readOnly).toBe(false);
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+      expect(transport.invoke).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each(['old-first', 'new-first'])('keeps fresh link detail over an initial read (%s)', async order => {
+    let old!: (value: AtomWithTags) => void;
+    let fresh!: (value: AtomWithTags) => void;
+    transport.invoke.mockImplementationOnce(() => new Promise(resolve => { old = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { fresh = resolve; }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+      for (const read of order === 'old-first' ? ['old', 'new'] : ['new', 'old']) {
+        await act(async () => {
+          const value = memory('Original prose', '2026-01-01T00:00:00Z');
+          if (read === 'old') old({ ...value, entity_names: ['Old link'], entity_ids: ['entity:old'] });
+          else fresh({ ...value, entity_names: ['New link'], entity_ids: ['entity:new'] });
+        });
+      }
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each(['before', 'after'])('ignores an initial read error superseded by event detail (%s the newer read)', async order => {
+    let failOld!: (error: Error) => void;
+    let finishNew!: (value: AtomWithTags) => void;
+    transport.invoke.mockImplementationOnce(() => new Promise((_resolve, reject) => { failOld = reject; }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishNew = resolve; }));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+      const fail = async () => act(async () => { failOld(new Error('Obsolete initial error')); });
+      if (order === 'before') {
+        await fail();
+        expect(container.textContent).not.toContain('Atom not found');
+      }
+      await act(async () => { finishNew({ ...memory('Current prose', '2026-01-01T00:00:00Z'), entity_names: ['New link'], entity_ids: ['entity:new'] }); });
+      if (order === 'after') await fail();
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => { root.unmount(); });
+      errors.mockRestore();
+    }
+  });
+
+  it.each([false, true])('uses newer canonical event detail over a pending prose read (dirty=%s)', async dirty => {
+    const original = memory('Original prose', '2026-01-01T00:00:00Z');
+    let finishProse!: (value: AtomWithTags) => void;
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockImplementationOnce(() => new Promise(resolve => { finishProse = resolve; }))
+      .mockResolvedValueOnce({ ...memory('External prose', '2026-01-02T00:00:00Z'), entity_ids: ['entity:new'], entity_names: ['New link'] });
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      if (dirty) await act(async () => {
+        const textarea = container.querySelector('textarea')!;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { useAtomsStore.setState({ atoms: [memory('External prose', '2026-01-02T00:00:00Z')] }); });
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+      await act(async () => { finishProse(memory('External prose', '2026-01-02T00:00:00Z')); });
+      expect(container.querySelector('textarea')?.value).toBe(dirty ? 'Fictional draft' : 'External prose');
+      expect(Boolean(useUIStore.getState().tabs[0].retired)).toBe(dirty);
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe(dirty ? '' : 'New link');
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it('discards obsolete link reads and does not refresh a retired snapshot', async () => {
+    let old!: (value: AtomWithTags) => void;
+    const original = memory('Original prose', '2026-01-01T00:00:00Z');
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockImplementationOnce(() => new Promise(resolve => { old = resolve; }))
+      .mockResolvedValueOnce({ ...original, entity_ids: ['entity:new'], entity_names: ['New link'] });
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      await act(async () => {
+        transport.listeners.get('atom-updated')?.({ id: 'memory:m1' });
+        transport.listeners.get('atom-updated')?.({ id: 'memory:m1' });
+      });
+      await act(async () => { old({ ...original, entity_ids: [], entity_names: [] }); });
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+      await act(async () => { useUIStore.getState().retireTab('tab-1'); });
+      const reads = transport.invoke.mock.calls.length;
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+      expect(transport.invoke).toHaveBeenCalledTimes(reads);
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each(['success', 'failure'])('refreshes notifications received during Save after its %s', async outcome => {
+    const original = { ...memory('Original prose', '2026-01-01T00:00:00Z'), entity_ids: ['entity:old'], entity_names: ['Old link'] };
+    const saved = { ...memory('Fictional draft', '2026-01-02T00:00:00Z'), entity_ids: ['entity:old'], entity_names: ['Old link'] };
+    let finish!: (value: AtomWithTags) => void;
+    let fail!: (error: Error) => void;
+    let finishRefresh!: (value: AtomWithTags) => void;
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }));
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')!.click(); });
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+      expect(transport.invoke).toHaveBeenCalledTimes(2);
+      await act(async () => { if (outcome === 'success') finish(saved); else fail(new Error('Fictional save failure')); });
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('Old link');
+      // Save has rendered before the pending read completes, so its baseline guard is exercised.
+      expect(transport.invoke).toHaveBeenCalledTimes(3);
+      await act(async () => { finishRefresh({ ...(outcome === 'success' ? saved : original), entity_ids: ['entity:new'], entity_names: ['New link'] }); });
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+      expect(container.querySelector('textarea')).toBe(textarea);
+      expect(textarea.value).toBe('Fictional draft');
+      expect(textarea.readOnly).toBe(false);
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each([false, true])('revalidates unchanged-timestamp links after returning from history (dirty=%s)', async dirty => {
+    const original = { ...memory('Original prose', '2026-01-01T00:00:00Z'), entity_ids: ['entity:old'], entity_names: ['Old link'] };
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockResolvedValueOnce({ ...original, entity_ids: ['entity:new'], entity_names: ['New link'] });
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      if (dirty) await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { root.render(<ReaderHarness current={false} />); });
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+      expect(transport.invoke).toHaveBeenCalledTimes(1);
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('Old link');
+      await act(async () => { root.render(<ReaderHarness />); });
+      expect(transport.invoke).toHaveBeenCalledTimes(2);
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+      expect(container.querySelector('textarea')).toBe(textarea);
+      expect(textarea.value).toBe(dirty ? 'Fictional draft' : 'Original prose');
+      expect(textarea.readOnly).toBe(false);
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
   it('keeps Cancel closed with initialEditing true and does not collapse an edit returned to baseline', async () => {
     const category = { ...memory('Original dossier', '2026-01-01T00:00:00Z'), id: 'category:c1', summaries_revision: 1 };
     transport.invoke.mockResolvedValue(category);
@@ -331,7 +545,7 @@ describe('AtomReader stale snapshots', () => {
     }
   });
 
-  it('discards a slow refetch that started before a successful save', async () => {
+  it.each([false, true])('discards a slow refetch that started before a successful save (later link event=%s)', async linkEvent => {
     let finishRefresh!: (value: AtomWithTags) => void;
     transport.invoke.mockImplementation((command: string) => {
       if (command === 'get_atom_by_id' && transport.invoke.mock.calls.length === 1) {
@@ -375,6 +589,10 @@ describe('AtomReader stale snapshots', () => {
       [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')?.click();
       await Promise.resolve();
     });
+    if (linkEvent) {
+      transport.invoke.mockResolvedValueOnce({ ...memory('saved memory', '2026-01-03T00:00:00Z'), entity_ids: ['entity:new'], entity_names: ['New link'] });
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+    }
     await act(async () => {
       finishRefresh(memory('original memory', '2026-01-01T00:00:00Z'));
       await Promise.resolve();
