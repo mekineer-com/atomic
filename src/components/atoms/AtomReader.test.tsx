@@ -245,6 +245,44 @@ describe('AtomReader stale snapshots', () => {
     }
   });
 
+  it.each(['during', 'after'])('keeps a notification read that completes %s a failing Save', async order => {
+    const original = { ...memory('Original prose', '2026-01-01T00:00:00Z'), entity_ids: ['entity:old'], entity_names: ['Old link'] };
+    const linked = { ...original, entity_ids: ['entity:new'], entity_names: ['New link'] };
+    let finishRead!: (value: AtomWithTags) => void;
+    let failSave!: (error: Error) => void;
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }))
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { failSave = reject; }))
+      .mockResolvedValueOnce(linked);
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
+      await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')!.click(); });
+      if (order === 'during') {
+        await act(async () => { finishRead(linked); });
+        expect(container.querySelector('[data-entity-links]')?.textContent).toBe('Old link');
+      }
+      await act(async () => { failSave(new Error('Fictional save failure')); });
+      if (order === 'after') await act(async () => { finishRead(linked); });
+      expect(container.querySelector('[data-entity-links]')?.textContent).toBe('New link');
+      expect(container.querySelector('textarea')).toBe(textarea);
+      expect(textarea.value).toBe('Fictional draft');
+      expect(textarea.readOnly).toBe(false);
+      expect(useUIStore.getState().tabs[0].retired).not.toBe(true);
+      expect(transport.invoke.mock.calls.filter(([command]) => command === 'get_atom_by_id')).toHaveLength(order === 'during' ? 3 : 2);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
   it.each([false, true])('revalidates unchanged-timestamp links after returning from history (dirty=%s)', async dirty => {
     const original = { ...memory('Original prose', '2026-01-01T00:00:00Z'), entity_ids: ['entity:old'], entity_names: ['Old link'] };
     transport.invoke.mockResolvedValueOnce(original)

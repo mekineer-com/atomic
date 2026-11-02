@@ -259,7 +259,11 @@ export function AtomReader({
       throw error;
     });
     if (generation !== loadGeneration.current || request !== refreshRequest.current || retiredRef.current
-      || savingRef.current || !currentRef.current || atomRef.current !== startingAtom) return;
+      || !currentRef.current || atomRef.current !== startingAtom) return;
+    if (savingRef.current) {
+      refreshPending.current = true;
+      return;
+    }
     const currentAtom = atomRef.current;
     if (tabId && dirtyRef.current && currentAtom && (!fetchedAtom || memuEditableFieldsChanged(currentAtom, fetchedAtom))) {
       retire(Boolean(fetchedAtom));

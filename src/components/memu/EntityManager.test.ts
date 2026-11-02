@@ -196,4 +196,78 @@ describe('entity reader ownership and link refresh', () => {
     await act(async () => { finish(entity('A')); });
     expect(container.textContent).toContain('Fresh fictional link');
   });
+
+  it.each(['resolve', 'reject'])('protects a reopened draft after Save ends while its superseding link read will %s', async outcome => {
+    const saved = { ...entity('A'), name: 'Saved fictional name' };
+    let finishSaveRead!: (value: ReturnType<typeof entity>) => void;
+    let finishLinks!: (value: ReturnType<typeof entity>) => void;
+    let failLinks!: (error: Error) => void;
+    transport.invoke.mockResolvedValueOnce(entity('A')).mockResolvedValueOnce(saved)
+      .mockImplementationOnce(() => new Promise(resolve => { finishSaveRead = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve, reject) => { finishLinks = resolve; failLinks = reject; }));
+    await act(async () => { root.render(createElement(EntityReader, { entityId: 'A' })); });
+    await click('Edit');
+    await act(async () => {
+      const input = container.querySelector('input')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, saved.name);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click('Save');
+    await act(async () => { emitMemory(); });
+    await act(async () => { finishSaveRead(saved); });
+    await click('Edit');
+    await act(async () => {
+      const input = container.querySelector('input')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'New unsaved fictional draft');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      if (outcome === 'resolve') finishLinks({ ...entity('A', true), name: saved.name });
+      else failLinks(new Error('Fictional link read failed'));
+    });
+    expect(container.querySelector('input')?.value).toBe('New unsaved fictional draft');
+    if (outcome === 'resolve') {
+      expect(container.textContent).toContain('Fresh fictional link');
+      expect(container.querySelector('h1')?.textContent).toBe(saved.name);
+      await click('Cancel');
+      await click('Edit');
+      expect(container.querySelector('input')?.value).toBe(saved.name);
+    } else expect(container.textContent).toContain('Fictional link read failed');
+  });
+
+  it('keeps dirty entity prose through its own detach and full refresh', async () => {
+    const original = { ...entity('A', true), is_relationship: true };
+    transport.invoke.mockResolvedValueOnce(original).mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ ...entity('A'), is_relationship: true });
+    await act(async () => { root.render(createElement(EntityReader, { entityId: 'A' })); });
+    await click('Edit');
+    await act(async () => {
+      [...container.querySelectorAll('article input, article textarea')].slice(0, 4).forEach((input, index) => {
+        const prototype = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(prototype, 'value')!.set!.call(input, `Fictional draft ${index}`);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    });
+    await act(async () => { container.querySelector<HTMLButtonElement>('[aria-label="Detach memory"]')!.click(); });
+    expect(container.textContent).not.toContain('Fresh fictional link');
+    expect([...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('article input, article textarea')].slice(0, 4).map(input => input.value))
+      .toEqual([0, 1, 2, 3].map(index => `Fictional draft ${index}`));
+  });
+
+  it('seeds promotion from canonical fields and discards it only on Cancel', async () => {
+    transport.invoke.mockResolvedValueOnce(entity('A'));
+    await act(async () => { root.render(createElement(EntityReader, { entityId: 'A' })); });
+    await click('Make relationship');
+    expect([...container.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('article input, article textarea')].slice(0, 4).map(input => input.value))
+      .toEqual(['Fictional A', 'person', 'Original alias', 'Original prose']);
+    await act(async () => {
+      const input = container.querySelector('input')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Discarded fictional promotion');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click('Cancel');
+    await click('Edit');
+    expect(container.querySelector('input')?.value).toBe('Fictional A');
+    expect(container.querySelector('textarea')).toBeNull();
+  });
 });

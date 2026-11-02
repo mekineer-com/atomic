@@ -175,14 +175,14 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   const displayOnLoad = useRef<'initial' | 'refresh' | null>('initial');
   onChangedRef.current = onChanged;
 
-  const display = useCallback((value: EntityDetail) => {
-    setEntity(value);
+  // Only editing gestures seed drafts; asynchronous reads update canonical state.
+  const seedDraft = (value: EntityDetail) => {
     setName(value.name);
     setEntityType(value.entity_type);
     setAliasesText((value.properties.aliases ?? []).join(', '));
     setRelationship(value.properties.relationship ?? '');
     setPromoting(false);
-  }, []);
+  };
   const load = useCallback(async (linksOnly = false) => {
     const generation = ++loadGeneration.current;
     if (!linksOnly && displayOnLoad.current !== 'initial') displayOnLoad.current = 'refresh';
@@ -192,7 +192,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
       // A newer link read can also finish initialization or an explicit Save refresh.
       if (displayOnLoad.current) {
         displayOnLoad.current = null;
-        display(value);
+        setEntity(value);
       } else {
         setEntity(current => current && ({
           ...current,
@@ -209,7 +209,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
         throw err;
       }
     }
-  }, [display, entityId]);
+  }, [entityId]);
 
   useEffect(() => {
     displayOnLoad.current = 'initial';
@@ -252,6 +252,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
       }
       await refresh();
       setEditing(false);
+      setPromoting(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -278,7 +279,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
     setSaving(true);
     setError(null);
     try {
-      display(await getTransport().invoke<EntityDetail>(
+      setEntity(await getTransport().invoke<EntityDetail>(
         ignored ? 'ignore_memu_entity' : 'restore_memu_entity', { id: entity.id },
       ));
       useCanvasStore.getState().invalidateCanvasData();
@@ -307,6 +308,8 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   };
 
   const beginPromotion = () => {
+    if (!entity) return;
+    seedDraft(entity);
     setPromoting(true);
     setEditing(true);
   };
@@ -354,7 +357,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
       useCanvasStore.getState().invalidateCanvasData();
       loadGeneration.current += 1;
       displayOnLoad.current = null;
-      display(merged);
+      setEntity(merged);
       setMergeOpen(false);
       onChanged?.();
     } catch (err) {
@@ -409,7 +412,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
 
   const aliases = entity.properties.aliases ?? [];
   const toggleEdit = () => {
-    if (editing) display(entity);
+    seedDraft(entity);
     setEditing(value => !value);
   };
   return (
