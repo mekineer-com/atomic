@@ -244,7 +244,10 @@ export function AtomReader({
     if (retiredRef.current || savingRef.current || !currentRef.current) return;
     const generation = loadGeneration.current;
     const startingAtom = atomRef.current;
-    const fetchedAtom = await fetchCurrentAtom();
+    const fetchedAtom = await fetchCurrentAtom().catch(error => {
+      if (isMissingMemoryError(error)) return null;
+      throw error;
+    });
     if (generation !== loadGeneration.current || retiredRef.current || savingRef.current || !currentRef.current || atomRef.current !== startingAtom) return;
     const currentAtom = atomRef.current;
     if (tabId && dirtyRef.current && currentAtom && (!fetchedAtom || memuEditableFieldsChanged(currentAtom, fetchedAtom))) {
@@ -512,10 +515,6 @@ function AtomReaderContent({
     setMemuSummary(atom.content);
     setMemuError(null);
   }, [atom.id, atom.title, atom.description, atom.category_kind, atom.content, retired]);
-
-  useEffect(() => {
-    if (initialEditing && !retired) setMemuEditing(true);
-  }, [initialEditing, retired]);
 
   useEffect(() => {
     onDirtyChange(memuEdited);

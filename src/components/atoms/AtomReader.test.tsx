@@ -145,6 +145,43 @@ describe('AtomReader stale snapshots', () => {
     }
   });
 
+  it.each([false, true].flatMap(dirty => [
+    'memory not found', 'HTTP 404: memory not found', null, 'Fictional network unavailable',
+  ].map(error => ({ dirty, error }))))('revalidates retained history without losing a draft ($dirty, $error)', async ({ dirty, error }) => {
+    transport.invoke.mockResolvedValueOnce(memory('original memory', '2026-01-01T00:00:00Z'));
+    if (error === null) transport.invoke.mockResolvedValueOnce(null);
+    else transport.invoke.mockRejectedValueOnce(error);
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      if (dirty) await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Unsaved fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { root.render(<ReaderHarness current={false} />); });
+      await act(async () => { root.render(<ReaderHarness />); });
+      const missing = error !== 'Fictional network unavailable';
+      expect(useUIStore.getState().tabs[0].retired === true).toBe(dirty && missing);
+      if (missing && !dirty) {
+        expect(container.textContent).toContain('Atom not found');
+        expect(container.querySelector('textarea')).toBeNull();
+      } else {
+        expect(container.querySelector('textarea')).toBe(textarea);
+        expect(textarea.value).toBe(dirty ? 'Unsaved fictional draft' : 'original memory');
+        expect(textarea.readOnly).toBe(missing);
+        if (missing) expect(container.textContent).toContain('no current version is available');
+      }
+      expect(errors).toHaveBeenCalledTimes(missing ? 0 : 1);
+    } finally {
+      await act(async () => { root.unmount(); });
+      errors.mockRestore();
+    }
+  });
+
   it('does not retire a replacement scoped reader when an unmounted draft refresh finishes', async () => {
     let finishOld!: (value: AtomWithTags) => void;
     transport.invoke
