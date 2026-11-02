@@ -194,6 +194,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
         displayOnLoad.current = null;
         setEntity(value);
       } else {
+        // A link event must not change an open Relationship editor's fields or Save command.
         setEntity(current => current && ({
           ...current,
           memories: value.memories,
@@ -212,12 +213,6 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   }, [entityId]);
 
   useEffect(() => {
-    displayOnLoad.current = 'initial';
-    setEntity(null);
-    setError(null);
-    setMemoryQuery('');
-    setMemoryResults([]);
-    setLinkedMemoryResult(null);
     const failed = (err: unknown) => setError(err instanceof Error ? err.message : String(err));
     const unsubscribe = getTransport().subscribe<{ id: string }>('atom-updated', atom => {
       if (!atom.id.startsWith('memory:')) return;
