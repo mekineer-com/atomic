@@ -4,7 +4,10 @@ import { useUIStore } from '../stores/ui';
 import { NEW_MEMORY_EVENT, startNewAtom } from './new-atom';
 
 describe('startNewAtom', () => {
-  beforeEach(() => sessionStorage.clear());
+  beforeEach(() => {
+    sessionStorage.clear();
+    useUIStore.setState({ knowledgeSource: 'memories' });
+  });
 
   it('opens the integrated memory dialog without creating a blank atom', async () => {
     sessionStorage.setItem('openalma.user', 'TestOwner');
@@ -20,7 +23,12 @@ describe('startNewAtom', () => {
     expect(createAtom).not.toHaveBeenCalled();
   });
 
-  it('keeps standalone blank-atom editing', async () => {
+  it.each(['standalone', 'workspace'])('opens a blank note for %s', async (mode) => {
+    if (mode === 'workspace') {
+      sessionStorage.setItem('openalma.user', 'TestOwner');
+      sessionStorage.setItem('openalma.soul', 'TestSoul');
+      useUIStore.setState({ knowledgeSource: 'workspace' });
+    }
     const createAtom = vi.fn().mockResolvedValue({ id: 'atom:test' });
     const openReaderEditing = vi.fn();
     useAtomsStore.setState({ createAtom });

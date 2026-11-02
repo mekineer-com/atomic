@@ -5,7 +5,7 @@ import { useUIStore } from '../stores/ui';
 export const NEW_MEMORY_EVENT = 'atomic:new-memory';
 
 export async function startNewAtom(): Promise<void> {
-  if (currentIdentity()) {
+  if (currentIdentity() && useUIStore.getState().knowledgeSource !== 'workspace') {
     window.dispatchEvent(new Event(NEW_MEMORY_EVENT));
     return;
   }

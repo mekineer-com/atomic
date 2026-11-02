@@ -66,7 +66,6 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const search = useAtomsStore(s => s.search);
   const clearSemanticSearch = useAtomsStore(s => s.clearSemanticSearch);
   const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
-  const createAtom = useAtomsStore(s => s.createAtom);
 
   const { viewMode, atomsLayout, knowledgeSource, searchQuery, activeTabId, tabs } = useUIStore(
     useShallow(s => ({
@@ -88,7 +87,6 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
   const setAtomsLayout = useUIStore(s => s.setAtomsLayout);
   const setKnowledgeSource = useUIStore(s => s.setKnowledgeSource);
   const openReader = useUIStore(s => s.openReader);
-  const openReaderEditing = useUIStore(s => s.openReaderEditing);
   const readerState = useUIStore(s => s.readerState);
   const wikiReaderState = useUIStore(s => s.wikiReaderState);
   const reportsDetailState = useUIStore(s => s.reportsDetailState);
@@ -255,16 +253,11 @@ export function MainView({ soulSelector }: { soulSelector?: ReactNode }) {
 
   const handleNewAtom = useCallback(async () => {
     try {
-      if (knowledgeSource === 'workspace') {
-        const atom = await createAtom('');
-        openReaderEditing(atom.id);
-        return;
-      }
       await startNewAtom();
     } catch (error) {
       console.error('Failed to create atom:', error);
     }
-  }, [createAtom, knowledgeSource, openReaderEditing]);
+  }, []);
 
   const handleKnowledgeSource = useCallback(async (source: 'memories' | 'workspace') => {
     if (source === knowledgeSource) return;
