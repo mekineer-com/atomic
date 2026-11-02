@@ -372,6 +372,26 @@ describe('AtomReader stale snapshots', () => {
     }
   });
 
+  it('keeps adopting workspace callback updates when noncurrent', async () => {
+    const atom = { ...memory('Fictional workspace note', '2026-01-01T00:00:00Z'), id: 'workspace-callback-control' };
+    transport.invoke.mockResolvedValue(atom);
+    const retryTagging = useAtomsStore.getState().retryTagging;
+    useAtomsStore.setState({ retryTagging: vi.fn().mockResolvedValue(undefined) });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness atomId={atom.id} />); });
+      await act(async () => { root.render(<ReaderHarness atomId={atom.id} current={false} />); });
+      await act(async () => {
+        [...container.querySelectorAll('button')].find(button => button.textContent === 'Auto-tag')!.click();
+      });
+      expect(container.textContent).toContain('Tagging...');
+    } finally {
+      await act(async () => { root.unmount(); });
+      useAtomsStore.setState({ retryTagging });
+    }
+  });
+
   it.each(['refresh', 'link'])('discards a pending %s response after its item is buried, then checks the draft on return', async source => {
     let finishRefresh!: (value: AtomWithTags) => void;
     let finishReturn!: (value: AtomWithTags) => void;

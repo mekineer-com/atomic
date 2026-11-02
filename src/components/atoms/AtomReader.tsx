@@ -447,7 +447,7 @@ export function AtomReader({
             if (!retiredRef.current) overlayNavigate({ type: 'graph', atomId }, opts);
           }}
           onAtomUpdated={(updated) => {
-            if (retiredRef.current || !currentRef.current) return;
+            if (retiredRef.current || (memuReader && !currentRef.current)) return;
             if (tabId && dirtyRef.current && atomRef.current && memuEditableFieldsChanged(atomRef.current, updated)) {
               retire(true);
               return;
