@@ -4,6 +4,34 @@ import { HttpTransport } from './http';
 describe('HttpTransport cancellation', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('connects its socket with the exact selected owner, Soul, database, and token', async () => {
+    const socket = { onopen: null as (() => void) | null, close: vi.fn() };
+    const websocket = vi.fn(function (_url: string) { return socket; });
+    vi.stubGlobal('WebSocket', websocket);
+    const previousUser = sessionStorage.getItem('openalma.user');
+    const previousSoul = sessionStorage.getItem('openalma.soul');
+    const transport = new HttpTransport({ baseUrl: 'https://atomic.invalid/', authToken: 'fictional+token&' });
+    try {
+      sessionStorage.setItem('openalma.user', 'Test Owner & Co');
+      sessionStorage.setItem('openalma.soul', 'Paper Moon');
+      transport.setDatabaseId('workspace+1');
+      const connected = transport.connect();
+      socket.onopen!();
+      await connected;
+      const url = new URL(websocket.mock.calls[0][0]);
+      expect(url.origin + url.pathname).toBe('wss://atomic.invalid/ws');
+      expect(Object.fromEntries(url.searchParams)).toEqual({
+        token: 'fictional+token&', user_id: 'Test Owner & Co', soul_id: 'Paper Moon', db: 'workspace+1',
+      });
+    } finally {
+      transport.disconnect();
+      for (const [key, value] of [['openalma.user', previousUser], ['openalma.soul', previousSoul]] as const) {
+        if (value === null) sessionStorage.removeItem(key);
+        else sessionStorage.setItem(key, value);
+      }
+    }
+  });
+
   it('returns null only for a missing conversation read, without granting resend permission', async () => {
     const fetchMock = vi.fn(async () => new Response('{"error":"missing"}', { status: 404 }));
     vi.stubGlobal('fetch', fetchMock);

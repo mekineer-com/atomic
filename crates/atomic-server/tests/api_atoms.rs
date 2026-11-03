@@ -2209,6 +2209,125 @@ async fn test_openapi_spec_is_valid() {
     assert!(body["components"]["schemas"]["AtomWithTags"].is_object());
 }
 
+async fn idle_websocket(
+    req: HttpRequest,
+    state: web::Data<atomic_server::state::AppState>,
+    query: web::Query<atomic_server::ws::WsQuery>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let input: std::pin::Pin<Box<dyn futures::Stream<
+        Item = Result<web::Bytes, actix_web::error::PayloadError>,
+    >>> = Box::pin(futures::stream::pending());
+    let mut input = actix_web::dev::Payload::from(input);
+    let payload = <web::Payload as actix_web::FromRequest>::from_request(
+        &req, &mut input,
+    ).await?;
+    atomic_server::ws::ws_handler(req, payload, state, query).await
+}
+
+#[actix_web::test]
+async fn test_scoped_websockets_filter_other_soul_owner_database_and_conversation_events() {
+    use atomic_server::state::ServerEvent;
+
+    let server = HttpServer::new(|| App::new()
+        .route("/owner", web::get().to(memu_owner))
+        .route("/souls", web::get().to(|| async {
+            HttpResponse::Ok().json(json!({"souls": ["TestSoul", "OtherSoul"]}))
+        }))
+        .route("/memory/{id}", web::patch().to(memu_update_memory))
+    ).bind(("127.0.0.1", 0)).unwrap();
+    let memu_url = format!("http://{}", server.addrs()[0]);
+    let server = server.run();
+    let memu_handle = server.handle();
+    actix_web::rt::spawn(server);
+    let ctx = TestCtx::new_with_memu(Some(memu_url)).await;
+    let database_a = ctx.state.manager.active_id().unwrap();
+    let database_b = ctx.state.manager.create_database("Other Soul").await.unwrap().id;
+    ctx.state.bind_workspace_database("TestOwner", "OtherSoul", &database_b).unwrap();
+    let (_, token_b) = ctx.state.manager.get_core(&database_b).await.unwrap()
+        .create_api_token("other-soul-test").await.unwrap();
+    let shutdown = web::Data::new(atomic_server::shutdown::Shutdown::default());
+    let app = actix_test::init_service(test_app(&ctx)
+        .app_data(shutdown.clone())
+        .route("/ws", web::get().to(idle_websocket))
+    ).await;
+    let mut sockets = Vec::new();
+    for (soul, database, token) in [
+        ("TestSoul", &database_a, &ctx.token), ("OtherSoul", &database_b, &token_b),
+    ] {
+        let request = actix_test::TestRequest::get()
+            .uri(&format!("/ws?token={token}&user_id=TestOwner&soul_id={soul}&db={database}"))
+            .insert_header(("connection", "upgrade"))
+            .insert_header(("upgrade", "websocket"))
+            .insert_header(("sec-websocket-version", "13"))
+            .insert_header(("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="))
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::SWITCHING_PROTOCOLS);
+        sockets.push(response);
+    }
+    let request = actix_test::TestRequest::patch()
+        .uri("/api/memu/reviews/memory/m1")
+        .insert_header(("Authorization", format!("Bearer {token_b}")))
+        .insert_header(("X-OpenAlma-User", "TestOwner"))
+        .insert_header(("X-OpenAlma-Soul", "OtherSoul"))
+        .set_json(json!({"summary": "Updated memory", "displayed_summary": "Memory summary"}))
+        .to_request();
+    assert_eq!(actix_test::call_service(&app, request).await.status(), 200);
+    for (user, soul, text) in [
+        ("TestOwner", "TestSoul", "summary-a"),
+        ("TestOwner", "OtherSoul", "summary-b"),
+        ("OtherOwner", "TestSoul", "foreign-owner-summary"),
+    ] {
+        ctx.state.event_tx.send(ServerEvent::MemuSoulSummaryChanged {
+            summary: json!({"text": text}), user_id: user.into(), soul_id: soul.into(),
+        }).unwrap();
+    }
+    for (database, user, soul, text) in [
+        (&database_a, "TestOwner", "TestSoul", "chat-a"),
+        (&database_b, "TestOwner", "OtherSoul", "chat-b"),
+        (&database_a, "OtherOwner", "TestSoul", "foreign-owner-chat"),
+        (&database_a, "TestOwner", "OtherSoul", "foreign-soul-chat"),
+    ] {
+        let core = ctx.state.manager.get_core(database).await.unwrap();
+        let conversation = core.create_conversation(&[], None, Some((user, soul))).await.unwrap();
+        ctx.state.event_tx.send(ServerEvent::ChatStreamDelta {
+            database_id: database.to_string(), conversation_id: conversation.conversation.id, content: text.into(),
+        }).unwrap();
+    }
+    for (database_id, atom_id) in [
+        (Some(database_b), "workspace-b"), (None, "unscoped-event"),
+    ] {
+        ctx.state.event_tx.send(ServerEvent::EmbeddingComplete {
+            atom_id: atom_id.into(), database_id,
+        }).unwrap();
+    }
+    let response_b = sockets.pop().unwrap();
+    let response_a = sockets.pop().unwrap();
+    // Drain queued events through both actual WS actors before checking absence.
+    let ((), body_a, body_b) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(shutdown.close_streams(),
+            actix_web::body::to_bytes(response_a.into_body()),
+            actix_web::body::to_bytes(response_b.into_body()))
+    }).await.unwrap();
+    let body_a = body_a.unwrap();
+    let body_b = body_b.unwrap();
+    let frames_a = String::from_utf8_lossy(&body_a);
+    let frames_b = String::from_utf8_lossy(&body_b);
+    for text in ["summary-a", "chat-a"] {
+        assert!(frames_a.contains(text), "missing {text}: {frames_a}");
+        assert!(!frames_b.contains(text), "foreign {text}: {frames_b}");
+    }
+    for text in ["Updated memory", "summary-b", "chat-b", "workspace-b"] {
+        assert!(frames_b.contains(text), "missing {text}: {frames_b}");
+        assert!(!frames_a.contains(text), "foreign {text}: {frames_a}");
+    }
+    for text in ["foreign-owner-summary", "foreign-owner-chat", "foreign-soul-chat", "unscoped-event"] {
+        assert!(!frames_a.contains(text), "foreign {text}: {frames_a}");
+        assert!(!frames_b.contains(text), "foreign {text}: {frames_b}");
+    }
+    memu_handle.stop(true).await;
+}
+
 #[actix_web::test]
 async fn test_shutdown_websocket_keeps_final_events_without_blocking_http_drain() {
     let ctx = TestCtx::new().await;
@@ -2218,21 +2337,7 @@ async fn test_shutdown_websocket_keeps_final_events_without_blocking_http_drain(
             .app_data(ctx.state.clone())
             .app_data(shutdown.clone())
             .wrap(actix_web::middleware::from_fn(atomic_server::shutdown::admission))
-            .route("/ws", web::get().to(
-                |req: HttpRequest,
-                 state: web::Data<atomic_server::state::AppState>,
-                 query: web::Query<atomic_server::ws::WsQuery>| async move {
-                    // An idle client whose input remains open until shutdown.
-                    let input: std::pin::Pin<Box<dyn futures::Stream<
-                        Item = Result<web::Bytes, actix_web::error::PayloadError>,
-                    >>> = Box::pin(futures::stream::pending());
-                    let mut input = actix_web::dev::Payload::from(input);
-                    let payload = <web::Payload as actix_web::FromRequest>::from_request(
-                        &req, &mut input,
-                    ).await?;
-                    atomic_server::ws::ws_handler(req, payload, state, query).await
-                },
-            )),
+            .route("/ws", web::get().to(idle_websocket)),
     ).await;
     let req = actix_test::TestRequest::get()
         .uri(&format!("/ws?token={}", ctx.token))
