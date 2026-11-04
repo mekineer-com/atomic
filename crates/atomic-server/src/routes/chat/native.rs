@@ -550,7 +550,7 @@ pub(super) async fn reconcile(
     if let Some(usage) = receipt.as_mut().and_then(|receipt| receipt.usage.take()) {
         native.usage = Some(usage.snapshot(turn_id));
     }
-    if idle && (matched || purpose == Purpose::Reply) {
+    if idle {
         // The binder checkpoints any stranded running rows as unknown. Count
         // that persisted change once; the next reload reads their failed status.
         changed_tools |= conv
@@ -562,12 +562,16 @@ pub(super) async fn reconcile(
             db.0.saved_chat_tool_records(id, turn_id, tools_for(scope))
                 .await
                 .map_err(core_json_error)?;
-        if !matched && purpose == Purpose::Reply {
-            // Keep ordinary work non-replayable, while allowing End to resume
-            // the existing session. Missing receipts never prove submission.
+        if !matched {
+            // Missing ordinary receipts never prove submission; tool-free recap
+            // attempts can be retried once writer exit is confirmed.
+            let (error, uncertain) = if purpose == Purpose::Reply {
+                ("Native completion is unknown. Writer exit is confirmed; close out in the existing session, not ordinary Retry.", true)
+            } else {
+                ("The tool-free recap result was not recorded. Writer exit is confirmed; Retry close-out in this sitting.", false)
+            };
             return reconcile_failure(state, db, id, turn_id, saved, &native, purpose,
-                "Native completion is unknown. Writer exit is confirmed; close out in the existing session, not ordinary Retry.",
-                true, changed_tools).await;
+                error, uncertain, changed_tools).await;
         }
         let receipt = receipt.expect("matching receipt");
         let (error, uncertain) = match receipt_result(receipt, purpose) {
@@ -1656,7 +1660,7 @@ mod tests {
         }
         if matches!(
             mock.mode,
-            "refused_later" | "recap_refused" | "continuation_refused" | "missing_receipt"
+            "refused_later" | "recap_refused" | "continuation_refused" | "missing_receipt" | "recap_missing_receipt"
         ) {
             return HttpResponse::Conflict().json(serde_json::json!({"detail":{
                 "code":"atomic_native_turn_missing", "session_id":"native-id", "turn":null, "writer_idle":true,
@@ -1745,6 +1749,7 @@ mod tests {
             "refused_later",
             "recap_refused",
             "recap_unknown",
+            "recap_missing_receipt",
             "missing_receipt",
             "missing_unbound",
         ] {
@@ -2191,6 +2196,7 @@ mod tests {
                     | "reload_failed"
                     | "refused_later"
                     | "recap_refused"
+                    | "recap_missing_receipt"
                     | "missing_receipt"
                     | "missing_unbound"
             ) {
@@ -2277,7 +2283,7 @@ mod tests {
                 let saved = recovered.conversation.atomic_chat_state.unwrap();
                 assert_eq!(
                     saved.native_context_tokens,
-                    if matches!(mode, "missing_receipt" | "missing_unbound") {
+                    if matches!(mode, "missing_receipt" | "missing_unbound" | "recap_missing_receipt") {
                         None
                     } else {
                         Some(if matches!(mode, "refused_later" | "recap_refused") {
@@ -2294,7 +2300,7 @@ mod tests {
                         recovered.messages[1].message.content,
                         "Recovered terminal response"
                     );
-                } else if matches!(mode, "recap_lost" | "recap_refused") {
+                } else if matches!(mode, "recap_lost" | "recap_refused" | "recap_missing_receipt") {
                     assert!(matches!(
                         saved.recap.unwrap().outcome,
                         RecapOutcome::Failed { .. }
