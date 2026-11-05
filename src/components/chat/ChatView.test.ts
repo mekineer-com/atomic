@@ -105,13 +105,13 @@ it('renders a reopened saved recap as a summary in a read-only sitting', async (
   }
 });
 
-it('keeps a rejected draft and never clears newer typing after success', async () => {
+it.each(['refused', 'unknown'])('keeps a %s draft and never clears newer typing after success', async (outcome) => {
   const previous = useChatStore.getState();
   const container = document.createElement('div');
   const root = createRoot(container);
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => {});
-  const send = vi.fn().mockResolvedValue('refused');
+  const send = vi.fn().mockResolvedValue(outcome);
   useChatStore.setState({ currentConversation: {
     id: 'test-chat', title: 'Test', created_at: '', updated_at: '', is_archived: false,
     tags: [], message_count: 0, last_message_preview: null,

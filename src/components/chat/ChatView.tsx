@@ -143,7 +143,8 @@ export function ChatView() {
     setIsSending(true);
     scrollToBottom(); // Scroll to bottom when user sends a message
     try {
-      if (await sendMessage(content) === 'refused' && currentConversation) {
+      const outcome = await sendMessage(content);
+      if ((outcome === 'refused' || outcome === 'unknown') && currentConversation) {
         const drafts = useChatStore.getState().drafts;
         if (drafts[currentConversation.id] === '') {
           setDraft(currentConversation.id, inputValue);

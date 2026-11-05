@@ -169,6 +169,7 @@ function buildPageContext(): PageContext {
 
 type ChatView = 'list' | 'conversation';
 let refreshVersion = 0;
+let navigationVersion = 0;
 
 interface ChatStore {
   // View state
@@ -219,7 +220,7 @@ interface ChatStore {
   removeTagFromScope: (tagId: string) => Promise<void>;
 
   // Actions - Messaging (placeholder for now)
-  sendMessage: (content: string) => Promise<'sent' | 'refused' | 'failed'>;
+  sendMessage: (content: string) => Promise<'sent' | 'refused' | 'failed' | 'unknown'>;
   setDraft: (conversationId: string, content: string) => void;
   refreshConversation: () => Promise<boolean>;
   retryMessage: (userMessageId: string) => Promise<void>;
@@ -257,6 +258,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   // Navigation
   showList: (filterTagId?: string) => {
+    ++navigationVersion;
     set({
       view: 'list',
       listFilterTagId: filterTagId ?? null,
@@ -268,8 +270,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   openConversation: async (id: string, send?: ChatMessageWithContext) => {
+    const navigation = send ? navigationVersion : ++navigationVersion;
     let version = refreshVersion;
-    const stale = () => send && (version !== refreshVersion || get().currentConversation?.id !== id || get().lastSend !== send);
+    const stale = () => navigation !== navigationVersion || (send && (version !== refreshVersion || get().currentConversation?.id !== id || get().lastSend !== send));
     if (stale()) return;
     if (send) version = ++refreshVersion;
     set({ isLoading: true, error: null });
@@ -330,6 +333,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   goBack: () => {
+    ++navigationVersion;
     const { listFilterTagId } = get();
     set({
       view: 'list',
@@ -358,6 +362,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   createConversation: async (tagIds?: string[]) => {
+    ++navigationVersion;
     set({ isLoading: true, error: null });
     try {
       const conversation = await getTransport().invoke<ConversationWithTags>('create_conversation', {
@@ -425,7 +430,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         conversationId: currentConversation.id,
         tagIds,
       });
-      set({ currentConversation: updated });
+      if (get().currentConversation?.id !== currentConversation.id) return;
+      set(state => ({ currentConversation: { ...state.currentConversation!, ...updated, context_meter: undefined } }));
+      await get().refreshConversation();
     } catch (e) {
       set({ error: String(e) });
     }
@@ -440,7 +447,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         conversationId: currentConversation.id,
         tagId,
       });
-      set({ currentConversation: updated });
+      if (get().currentConversation?.id !== currentConversation.id) return;
+      set(state => ({ currentConversation: { ...state.currentConversation!, ...updated, context_meter: undefined } }));
+      await get().refreshConversation();
     } catch (e) {
       set({ error: String(e) });
     }
@@ -455,7 +464,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         conversationId: currentConversation.id,
         tagId,
       });
-      set({ currentConversation: updated });
+      if (get().currentConversation?.id !== currentConversation.id) return;
+      set(state => ({ currentConversation: { ...state.currentConversation!, ...updated, context_meter: undefined } }));
+      await get().refreshConversation();
     } catch (e) {
       set({ error: String(e) });
     }
@@ -577,10 +588,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (e) {
       const paused = e instanceof Error && 'code' in e && e.code === 'soul_paused';
       let unsaved = paused;
+      let unknown = false;
       if (!paused) {
         const saved = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', {
           conversationId: currentConversation.id,
         }).catch(() => undefined);
+        unknown = !saved;
         if (saved) {
           unsaved = !saved.messages.some(m => m.role === 'user' && m.content === content
             && !messages.some(previous => previous.id === m.id));
@@ -592,11 +605,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Remove the temp user message on error
       set((state) => state.currentConversation?.id === currentConversation.id && state.lastSend === userMessage ? {
         messages: state.messages.filter((m) => !m.id.startsWith('temp-')),
-        error: String(e),
+        error: unknown ? `${String(e)}\nDelivery is unknown. Your draft is retained; reload saved history before resending.` : String(e),
         isStreaming: false,
         streamingContent: '',
       } : {});
-      return unsaved ? 'refused' : 'failed';
+      return unknown ? 'unknown' : unsaved ? 'refused' : 'failed';
     }
   },
 
@@ -705,7 +718,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // Utilities
   clearError: () => set({ error: null }),
 
-  reset: () =>
+  reset: () => {
+    ++navigationVersion;
     set({
       view: 'list',
       currentConversation: null,
@@ -721,5 +735,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       streamingMessageId: null,
       streamingToolCalls: [],
       error: null,
-    }),
+    });
+  },
 }));

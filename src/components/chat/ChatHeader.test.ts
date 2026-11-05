@@ -4,10 +4,14 @@ import { createRoot } from 'react-dom/client';
 import { ChatHeader } from './ChatHeader';
 import { useChatStore, type ConversationWithTags } from '../../stores/chat';
 
-vi.mock('../../lib/transport', () => ({ getTransport: () => ({ invoke: () => Promise.resolve({ enabled: true }) }) }));
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock('../../lib/transport', () => ({ getTransport: () => ({ invoke }) }));
 vi.mock('./ScopeEditor', () => ({ ScopeEditor: () => null }));
 
-it('keeps End available to wait for managed work, offers close-out recovery and hides End when closed', async () => {
+it.each([false, true])('keeps managed End available even when status fails (%s), and hides it when closed', async (offline) => {
+  invoke.mockReset();
+  if (offline) invoke.mockRejectedValue(new Error('Status unavailable'));
+  else invoke.mockResolvedValue({ enabled: true });
   const previous = useChatStore.getState();
   const rootElement = document.createElement('div');
   const root = createRoot(rootElement);

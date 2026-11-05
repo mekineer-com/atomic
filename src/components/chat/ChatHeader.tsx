@@ -87,7 +87,7 @@ export function ChatHeader({ conversation, onBack }: ChatHeaderProps) {
             {conversation.title || 'New Conversation'}
           </h2>
         )}
-        {memuEnabled && conversation.atomic_chat_state?.phase !== 'closed' && (
+        {(memuEnabled || conversation.atomic_chat_state) && conversation.atomic_chat_state?.phase !== 'closed' && (
           <button
             onClick={endMemuSession}
             disabled={isEndingSession || (isStreaming && !conversation.atomic_chat_state)}

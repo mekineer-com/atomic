@@ -207,6 +207,48 @@ it('does not let a successful Send reload overwrite a newer durable state read',
   expect(useChatStore.getState().isLoading).toBe(false);
 });
 
+it.each(['other-chat', 'list'])('ignores a pending load after navigation to %s', async (destination) => {
+  const current = useChatStore.getState().currentConversation!;
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const pending = useChatStore.getState().openConversation('slow-chat');
+  if (destination === 'list') {
+    invoke.mockResolvedValueOnce([]);
+    useChatStore.getState().showList();
+    await Promise.resolve();
+  } else {
+    invoke.mockResolvedValueOnce({ ...current, id: destination, messages: [] });
+    await useChatStore.getState().openConversation(destination);
+  }
+  finish({ ...current, id: 'slow-chat', messages: [] });
+  await pending;
+  expect(useChatStore.getState().currentConversation?.id ?? null).toBe(destination === 'list' ? null : destination);
+  expect(useChatStore.getState().view).toBe(destination === 'list' ? 'list' : 'conversation');
+});
+
+it.each(['setScope', 'addTagToScope', 'removeTagFromScope'] as const)('refreshes context after %s and keeps profile errors if refresh fails', async (action) => {
+  const current = { ...useChatStore.getState().currentConversation!, context_error: 'Profile mismatch',
+    context_meter: { estimated_tokens: 100, limit_tokens: 180000, usable_tokens: 200000 } };
+  const { context_error: _error, context_meter: _meter, ...updated } = current;
+  for (const failed of [false, true]) {
+    useChatStore.setState({ currentConversation: current, error: null });
+    invoke.mockReset().mockResolvedValueOnce(updated);
+    if (failed) invoke.mockRejectedValueOnce(new Error('Context read unavailable'));
+    else invoke.mockResolvedValueOnce({ ...updated, messages: [], context_meter: { ...current.context_meter, estimated_tokens: 200 } });
+    if (action === 'setScope') await useChatStore.getState().setScope([]);
+    else await useChatStore.getState()[action]('tag');
+    expect(invoke.mock.calls[1][0]).toBe('get_conversation');
+    if (failed) {
+      expect(useChatStore.getState().currentConversation?.context_meter).toBeUndefined();
+      expect(useChatStore.getState().currentConversation?.context_error).toBe('Profile mismatch');
+      expect(useChatStore.getState().error).toContain('Context read unavailable');
+    } else {
+      expect(useChatStore.getState().currentConversation?.context_meter?.estimated_tokens).toBe(200);
+      expect(useChatStore.getState().currentConversation?.context_error).toBeUndefined();
+    }
+  }
+});
+
 it.each(['completion', 'retry'])('ignores a pre-%s refresh after newer work begins', async (transition) => {
   const current = { ...useChatStore.getState().currentConversation!, atomic_chat_state: {
     backend: 'api' as const, phase: 'open' as const,
@@ -255,7 +297,7 @@ it('reconciles saved user input after a provider failure without restoring it as
   expect(useChatStore.getState().error).toBe('Provider failed');
 });
 
-it('restores input only when a successful history read proves it was not saved', async () => {
+it('distinguishes refused sends from unknown delivery when history cannot be read', async () => {
   const earlier: ChatMessageWithContext = { id: 'earlier', conversation_id: 'test-chat', role: 'user', content: 'Draft',
     created_at: '', message_index: 0, tool_calls: [], citations: [] };
   useChatStore.setState({ messages: [earlier] });
@@ -265,10 +307,11 @@ it('restores input only when a successful history read proves it was not saved',
   expect(await useChatStore.getState().sendMessage('Draft')).toBe('refused');
   expect(useChatStore.getState().messages).toEqual([earlier]);
   invoke.mockRejectedValue('History unavailable');
-  expect(await useChatStore.getState().sendMessage('Draft')).toBe('failed');
+  expect(await useChatStore.getState().sendMessage('Draft')).toBe('unknown');
+  expect(useChatStore.getState().error).toContain('Delivery is unknown');
   invoke.mockImplementation((command: string) => command === 'send_chat_message'
     ? Promise.reject('Send failed') : Promise.resolve(null));
-  expect(await useChatStore.getState().sendMessage('Draft')).toBe('failed');
+  expect(await useChatStore.getState().sendMessage('Draft')).toBe('unknown');
 });
 
 it.each([
