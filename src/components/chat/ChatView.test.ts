@@ -142,6 +142,16 @@ it.each(['refused', 'unknown'])('keeps a %s draft and never clears newer typing 
     await act(async () => { finish('refused'); await pending; });
     expect(useChatStore.getState().drafts['test-chat']).toBe('Draft before navigation');
     expect(input.props!.value).toBe('');
+    const call = { id:'saved-tool', message_id:'partial-user', tool_name:'edit_atom', tool_input:{},
+      tool_output:'Saved edit', status:'complete' as const, created_at:'', completed_at:null };
+    await act(async () => useChatStore.setState({ currentConversation:{
+      ...useChatStore.getState().currentConversation!, atomic_chat_state:{ backend:'api', phase:'open',
+        active:{ user_message_id:'partial-user', status:'failed', error:'Provider failed' } } }, isStreaming:false,
+      messages:[{ id:'partial-user', conversation_id:'different-chat', role:'user', content:'Edit a note',
+        created_at:'', message_index:0, citations:[], tool_calls:[call] }] }));
+    expect(container.textContent?.match(/edit_atom/g)).toHaveLength(1);
+    await act(async () => useChatStore.setState({ isStreaming:true, streamingToolCalls:[call] }));
+    expect(container.textContent?.match(/edit_atom/g)).toHaveLength(1);
   } finally {
     await act(async () => root.unmount());
     useChatStore.setState(previous);

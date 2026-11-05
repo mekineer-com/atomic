@@ -218,7 +218,8 @@ export function ChatView() {
           <div key={message.id}>
             {isRecap && <h3 className="text-sm font-medium text-[var(--color-text-secondary)] mb-2">Session recap</h3>}
             <ChatMessage
-              message={message}
+              message={isStreaming && message.id === lifecycle?.active?.user_message_id
+                ? { ...message, tool_calls: [] } : message}
               onViewAtom={handleViewAtom}
               searchQuery={isSearchOpen ? searchQuery : ''}
               highlightText={highlightText}

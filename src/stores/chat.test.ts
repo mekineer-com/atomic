@@ -24,6 +24,42 @@ it('shows failed tool completion immediately and successful completion normally'
   expect(useChatStore.getState().streamingToolCalls[1].status).toBe('complete');
 });
 
+it('ignores an already-saved completion without clearing a newer stream', () => {
+  const answer: ChatMessageWithContext = { id:'saved-answer', conversation_id:'test-chat', role:'assistant',
+    content:'Earlier answer', created_at:'', message_index:1, citations:[], tool_calls:[] };
+  useChatStore.setState({ messages:[answer, { ...answer, id:'temp-new', role:'user', content:'Next question' }],
+    isStreaming:true, streamingContent:'Newer answer' });
+  useChatStore.getState().startStreamingToolCall({ tool_call_id:'new-tool', tool_name:'get_atom', tool_input:{} });
+  const calls = useChatStore.getState().streamingToolCalls;
+  useChatStore.getState().completeMessage(answer);
+  expect(useChatStore.getState().isStreaming).toBe(true);
+  expect(useChatStore.getState().streamingContent).toBe('Newer answer');
+  expect(useChatStore.getState().streamingToolCalls).toBe(calls);
+  useChatStore.setState({ messages:[answer] });
+  useChatStore.getState().completeMessage(answer);
+  expect(useChatStore.getState().isStreaming).toBe(false);
+  expect(useChatStore.getState().messages).toEqual([answer]);
+});
+
+it.each([false, true])('recovers saved tool cards without replacing a newer event (%s)', async (late) => {
+  const current = useChatStore.getState().currentConversation!;
+  useChatStore.setState({ currentConversation:{ ...current, atomic_chat_state:{ backend:'api', phase:'open',
+    active:{ user_message_id:'user', status:'running', error:null } } }, isStreaming:true });
+  useChatStore.getState().startStreamingToolCall({ tool_call_id:'tool', tool_name:'get_atom', tool_input:{} });
+  const call = useChatStore.getState().streamingToolCalls[0];
+  const savedCall = { ...call, status:late ? 'running' as const : 'complete' as const };
+  const missingCall = { ...call, id:'missed-start', status:'complete' as const };
+  let finish!: (value: unknown) => void;
+  invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const refresh = useChatStore.getState().refreshConversation();
+  if (late) useChatStore.getState().completeStreamingToolCall({ tool_call_id:'tool', results_count:2, is_error:false });
+  finish({ ...useChatStore.getState().currentConversation, messages:[{ id:'user', role:'user', conversation_id:current.id,
+    content:'Question', created_at:'', message_index:0, citations:[], tool_calls:[savedCall, missingCall] }] });
+  expect(await refresh).toBe(true);
+  expect(useChatStore.getState().streamingToolCalls.map(item => [item.id, item.status]))
+    .toEqual([['tool', 'complete'], ['missed-start', 'complete']]);
+});
+
 it('retains drafts per conversation and carries the closed sitting draft to a new one', async () => {
   const current = useChatStore.getState().currentConversation!;
   useChatStore.getState().setDraft(current.id, 'Refused draft');

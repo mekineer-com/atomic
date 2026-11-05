@@ -27,6 +27,7 @@ export interface Conversation {
 
 export interface AtomicChatState {
   backend: 'api' | 'claude_code';
+  sitting_wide_citations?: boolean;
   phase: 'open' | 'closing' | 'closed';
   context_window_tokens?: number | null;
   maintenance?: { attempt_id: string; kind: 'ordinary' | 'final' | 'purge';
@@ -478,11 +479,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   refreshConversation: async () => {
     const current = get().currentConversation;
     if (!current) return false;
+    const beforeCalls = get().streamingToolCalls;
     const version = ++refreshVersion;
     try {
       const saved = await getTransport().invoke<ConversationWithMessages | null>('get_conversation', { conversationId: current.id });
       if (!saved || version !== refreshVersion || get().currentConversation !== current) return false;
+      const active = saved.atomic_chat_state?.active;
+      const calls = new Map((saved.messages.find(message => message.id === active?.user_message_id)?.tool_calls ?? [])
+        .map(call => [call.id, call]));
+      for (const call of get().streamingToolCalls) {
+        if (!calls.has(call.id) || beforeCalls.find(before => before.id === call.id) !== call) calls.set(call.id, call);
+      }
       set({ currentConversation: conversationSummary(saved), messages: saved.messages, isLoading: false,
+        ...(active?.status === 'running' && get().isStreaming ? { streamingToolCalls: [...calls.values()] } : {}),
         ...(saved.atomic_chat_state && !chatIsRunning(saved.atomic_chat_state) ? { isStreaming: false, streamingContent: '', streamingToolCalls: [] } : {}),
         ...(saved.atomic_chat_state?.phase === 'closed' ? { error: null } : {}),
       });
@@ -684,20 +693,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   completeMessage: (message: ChatMessageWithContext) => {
+    const current = get();
+    const savedIndex = current.messages.findIndex(saved => saved.id === message.id);
+    if (savedIndex >= 0 && (savedIndex < current.messages.length - 1 || !current.isStreaming)) return;
     ++refreshVersion;
     set((state) => {
-      // Don't add if message already exists (prevents duplicates from event + refetch)
-      const messageExists = state.messages.some((m) => m.id === message.id);
-      if (messageExists) {
-        return {
-          isStreaming: false,
-          streamingContent: '',
-          streamingMessageId: null,
-          streamingToolCalls: [],
-        };
-      }
       return {
-        messages: [...state.messages, message],
+        messages: savedIndex >= 0 ? state.messages : [...state.messages, message],
         isStreaming: false,
         streamingContent: '',
         streamingMessageId: null,

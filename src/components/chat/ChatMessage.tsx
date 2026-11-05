@@ -255,7 +255,7 @@ export function ChatMessage({ message, isStreaming = false, onViewAtom, searchQu
               retrieval steps before the prose that references them. Rendered
               during streaming (from streamingToolCalls) and persisted after
               completion (from message.tool_calls). */}
-          {isAssistant && message.tool_calls && message.tool_calls.length > 0 && (
+          {message.tool_calls && message.tool_calls.length > 0 && (
             <ToolCallList calls={message.tool_calls} />
           )}
 
