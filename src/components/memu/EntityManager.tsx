@@ -151,7 +151,7 @@ export function MemoryEntityControls({
   );
 }
 
-export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: string; onChanged?: () => void; onDeleted?: () => void }) {
+export function EntityReader({ entityId, onChanged, onDeleted, onEditingChange }: { entityId: string; onChanged?: () => void; onDeleted?: () => void; onEditingChange?: (editing: boolean) => void }) {
   const [entity, setEntity] = useState<EntityDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -168,6 +168,11 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
   const [mergeCandidates, setMergeCandidates] = useState<EntitySummary[]>([]);
   const [duplicateId, setDuplicateId] = useState('');
   const [mergePreview, setMergePreview] = useState<EntityMergePreview | null>(null);
+  const mergeGeneration = useRef(0);
+  useEffect(() => {
+    onEditingChange?.(editing);
+    return () => onEditingChange?.(false);
+  }, [editing, onEditingChange]);
   const openReader = useUIStore(s => s.openReader);
   const removeAtomFromTabs = useUIStore(s => s.removeAtomFromTabs);
   const onChangedRef = useRef(onChanged);
@@ -304,12 +309,13 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
 
   const beginPromotion = () => {
     if (!entity) return;
-    seedDraft(entity);
+    if (!editing) seedDraft(entity);
     setPromoting(true);
     setEditing(true);
   };
 
   const openMerge = async () => {
+    ++mergeGeneration.current;
     setError(null);
     try {
       const result = await getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities');
@@ -325,13 +331,15 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
 
   const previewMerge = async () => {
     if (!duplicateId) return;
+    const generation = ++mergeGeneration.current;
     setError(null);
     try {
-      setMergePreview(await getTransport().invoke<EntityMergePreview>(
+      const preview = await getTransport().invoke<EntityMergePreview>(
         'preview_memu_entity_merge', { id: entityId, duplicateId },
-      ));
+      );
+      if (generation === mergeGeneration.current) setMergePreview(preview);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (generation === mergeGeneration.current) setError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -395,7 +403,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
         limit: 8,
         memoryOnly: true,
         excludeEntityId: entityId,
-      });
+      }, { workspace: false });
       setMemoryResults(results);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -441,7 +449,7 @@ export function EntityReader({ entityId, onChanged, onDeleted }: { entityId: str
               <h2 className="font-semibold">Keep {entity.name}, merge another entity into it</h2>
               <button type="button" onClick={() => setMergeOpen(false)} className="text-[var(--color-text-tertiary)]">×</button>
             </div>
-            <select value={duplicateId} onChange={event => { setDuplicateId(event.target.value); setMergePreview(null); }} className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2">
+            <select value={duplicateId} onChange={event => { ++mergeGeneration.current; setDuplicateId(event.target.value); setMergePreview(null); }} className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2">
               {mergeCandidates.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name} ({candidate.entity_type})</option>)}
             </select>
             <button type="button" disabled={!duplicateId} onClick={() => void previewMerge()} className="rounded border border-[var(--color-border)] px-3 py-1.5 hover:bg-[var(--color-bg-hover)] disabled:opacity-50">Preview merge</button>
@@ -539,6 +547,7 @@ export function EntityManager() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [creatingEntity, setCreatingEntity] = useState(false);
+  const [readerEditing, setReaderEditing] = useState(false);
   const [newName, setNewName] = useState('');
   const [newType, setNewType] = useState('person');
 
@@ -546,6 +555,7 @@ export function EntityManager() {
     const result = await getTransport().invoke<{ entities: EntitySummary[] }>('list_memu_entities');
     setEntities(result.entities);
     setSelectedId(current => current ?? result.entities.find(entity => !entity.ignored)?.id ?? null);
+    setError(null);
   }, []);
 
   useEffect(() => {
@@ -554,7 +564,7 @@ export function EntityManager() {
 
   const createEntity = async (event: FormEvent) => {
     event.preventDefault();
-    if (!newName.trim() || !newType.trim()) return;
+    if (creatingEntity || readerEditing || !newName.trim() || !newType.trim()) return;
     setCreatingEntity(true);
     setError(null);
     try {
@@ -594,7 +604,9 @@ export function EntityManager() {
     new Map(entities.map(entity => [entity.entity_type.toLocaleLowerCase(), entity.entity_type])).values(),
   ).sort((left, right) => left.localeCompare(right)), [entities]);
 
-  if (error && entities.length === 0) return <div className="p-6 text-sm text-red-400">{error}</div>;
+  if (error && entities.length === 0) return <div role="alert" className="p-6 text-sm text-red-400">{error}
+    <button onClick={() => void loadEntities().catch(err => setError(String(err)))} className="ml-3 rounded border px-3 py-1">Retry</button>
+  </div>;
 
   return (
     <div className="grid h-full overflow-y-auto md:grid-cols-[20rem_minmax(0,1fr)] md:overflow-hidden">
@@ -603,14 +615,14 @@ export function EntityManager() {
           <div className="mb-3 flex items-center gap-2">
             <Users className="h-5 w-5" />
             <h1 className="font-semibold">Entities</h1>
-            <button type="button" onClick={() => setCreating(value => !value)} className="ml-auto flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg-hover)]"><Plus className="h-3.5 w-3.5" />Add</button>
+            <button type="button" disabled={creatingEntity || readerEditing} onClick={() => setCreating(value => !value)} className="ml-auto flex items-center gap-1 rounded border border-[var(--color-border)] px-2 py-1 text-xs hover:bg-[var(--color-bg-hover)]"><Plus className="h-3.5 w-3.5" />Add</button>
             <span className="text-xs text-[var(--color-text-tertiary)]">{visible.length}</span>
           </div>
           {creating && <form onSubmit={createEntity} className="mb-3 space-y-2 rounded border border-[var(--color-border)] bg-[var(--color-bg-card)] p-2">
-            <input autoFocus value={newName} onChange={event => setNewName(event.target.value)} placeholder="Entity name" className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
+            <input autoFocus readOnly={creatingEntity} value={newName} onChange={event => setNewName(event.target.value)} placeholder="Entity name" className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-xs outline-none focus:border-[var(--color-accent)]" />
             <div className="flex gap-2">
-              <input value={newType} onChange={event => setNewType(event.target.value)} placeholder="Type" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-1.5 text-xs" />
-              <button type="submit" disabled={creatingEntity || !newName.trim() || !newType.trim()} className="rounded bg-[var(--color-accent)] px-2 py-1 text-xs text-white disabled:opacity-50">{creatingEntity ? 'Adding...' : 'Create'}</button>
+              <input readOnly={creatingEntity} value={newType} onChange={event => setNewType(event.target.value)} placeholder="Type" className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-1.5 text-xs" />
+              <button type="submit" disabled={creatingEntity || readerEditing || !newName.trim() || !newType.trim()} className="rounded bg-[var(--color-accent)] px-2 py-1 text-xs text-white disabled:opacity-50">{creatingEntity ? 'Adding...' : 'Create'}</button>
             </div>
           </form>}
           {error && <p className="mb-3 text-xs text-red-400">{error}</p>}
@@ -643,6 +655,8 @@ export function EntityManager() {
               key={entity.id}
               type="button"
               onClick={() => setSelectedId(entity.id)}
+              disabled={readerEditing || creatingEntity}
+              title={readerEditing ? 'Save or cancel edits before selecting another entity' : undefined}
               className={`mb-1 w-full rounded-md px-3 py-2 text-left ${selectedId === entity.id ? 'bg-[var(--color-bg-hover)] text-[var(--color-text-primary)]' : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-hover)]'}`}
             >
               <div className="truncate text-sm font-medium">{entity.name}</div>
@@ -653,7 +667,9 @@ export function EntityManager() {
         </div>
       </aside>
       <main className="min-h-[30rem] md:min-h-0 md:overflow-hidden">
-        {selectedId ? <EntityReader key={selectedId} entityId={selectedId} onChanged={() => void loadEntities()} onDeleted={() => { setSelectedId(current => current === selectedId ? null : current); void loadEntities(); }} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
+        <fieldset disabled={creatingEntity} className="m-0 h-full min-w-0 border-0 p-0">
+          {selectedId ? <EntityReader key={selectedId} entityId={selectedId} onEditingChange={setReaderEditing} onChanged={() => void loadEntities()} onDeleted={() => { setSelectedId(current => current === selectedId ? null : current); void loadEntities(); }} /> : <div className="p-6 text-sm text-[var(--color-text-tertiary)]">Select an entity.</div>}
+        </fieldset>
       </main>
     </div>
   );

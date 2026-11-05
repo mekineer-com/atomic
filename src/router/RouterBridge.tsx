@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useUIStore, type Tab, type TabEntry } from '../stores/ui';
+import { hasReaderForwardHistory, useUIStore, type Tab, type TabEntry } from '../stores/ui';
 import { parseLocation, type ParsedRoute } from './routes';
 import { setNavigateFn, type NavigateState } from './navigate-ref';
 
@@ -210,6 +210,7 @@ export function reconcileTabsForOverlay(
 
   // Active tab present, fresh URL → push onto it.
   if (activeTab) {
+    if (hasReaderForwardHistory(activeTab)) return null;
     const truncated = activeTab.stack.slice(0, activeTab.stackIndex + 1);
     const entry = entryFromRoute(parsed, activeCurrent) ?? newEntry;
     const nextStack = [...truncated, entry];

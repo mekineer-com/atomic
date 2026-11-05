@@ -16,6 +16,7 @@ vi.mock('../lib/transport', () => ({ getTransport: () => ({ invoke }) }));
 import { useAtomsStore } from './atoms';
 import { useDatabasesStore } from './databases';
 import { useTagsStore } from './tags';
+import { useUIStore } from './ui';
 
 describe('integrated cache isolation', () => {
   beforeEach(() => {
@@ -26,6 +27,18 @@ describe('integrated cache isolation', () => {
     useAtomsStore.getState().reset();
     useTagsStore.getState().reset();
     useDatabasesStore.setState({ activeId: 'test-db' });
+  });
+
+  it('does not insert a late Workspace creation into the Memories list', async () => {
+    useUIStore.setState({ knowledgeSource: 'workspace' });
+    let finish!: (value: unknown) => void;
+    invoke.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const creating = useAtomsStore.getState().createAtom('');
+    useUIStore.setState({ knowledgeSource: 'memories' });
+    finish({ id: 'workspace:late' });
+    await expect(creating).resolves.toMatchObject({ id: 'workspace:late' });
+    expect(useAtomsStore.getState().atoms).toEqual([]);
+    expect(useAtomsStore.getState().totalCount).toBe(0);
   });
 
   it('bypasses database-only cache reads and writes in OpenAlma mode', async () => {

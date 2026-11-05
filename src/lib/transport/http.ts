@@ -246,7 +246,7 @@ export class HttpTransport implements Transport {
       headers['X-OpenAlma-Soul'] = encodeURIComponent(identity.soulId);
     }
     if (this.databaseId) headers['X-Atomic-Database'] = this.databaseId;
-    if (this.workspaceMode || options?.workspace) headers['X-Atomic-Source'] = 'workspace';
+    if (options?.workspace ?? this.workspaceMode) headers['X-Atomic-Source'] = 'workspace';
 
     const fetchOpts: RequestInit = { method: spec.method, headers, signal: options?.signal };
 

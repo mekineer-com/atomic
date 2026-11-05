@@ -69,6 +69,12 @@ describe('HttpTransport cancellation', () => {
     }, { workspace: true });
 
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-Atomic-Source': 'workspace' });
+
+    transport.setWorkspaceMode(true);
+    await transport.invoke('search_atoms_hybrid', { query: 'Fictional', limit: 8, memoryOnly: true }, { workspace: false });
+    expect(fetchMock.mock.calls[1][1].headers).not.toHaveProperty('X-Atomic-Source');
+    await transport.invoke('list_atoms');
+    expect(fetchMock.mock.calls[2][1].headers).toMatchObject({ 'X-Atomic-Source': 'workspace' });
   });
 
   it('does not send the Workspace header unless requested', async () => {

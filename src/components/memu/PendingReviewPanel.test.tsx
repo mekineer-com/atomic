@@ -23,6 +23,28 @@ afterEach(() => {
 });
 
 describe('PendingReviewPanel', () => {
+  it('locks memory fields while Refresh is pending', async () => {
+    const original = { items: [{ id: 'memory:m1', summary: 'Original fictional prose' }],
+      categories: [], soul_summaries: [], summaries_revision: 1 };
+    let finish!: (value: unknown) => void;
+    transport.invoke.mockResolvedValueOnce(original)
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<PendingReviewPanel />); });
+      const textarea = container.querySelector('textarea')!;
+      expect(textarea.readOnly).toBe(false);
+      await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Refresh')!.click(); });
+      expect(textarea.readOnly).toBe(true);
+      await act(async () => { finish({ ...original, items: [{ id: 'memory:m1', summary: 'Fresh fictional prose' }] }); });
+      expect(textarea.readOnly).toBe(false);
+      expect(textarea.value).toBe('Fresh fictional prose');
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
   it('approves with loaded category identity rather than draft fields', async () => {
     transport.invoke.mockResolvedValueOnce({
       items: [], categories: [{ id: 'category:c1', label: 'Loaded title', description: 'Loaded brief', summary: 'Shown' }],

@@ -77,6 +77,46 @@ afterEach(() => {
 });
 
 describe('AtomReader stale snapshots', () => {
+  it('offers Retry for an initial outage instead of calling the memory missing', async () => {
+    transport.invoke.mockRejectedValueOnce(new Error('Fictional service outage'))
+      .mockResolvedValueOnce(memory('Recovered fictional prose', '2026-01-01T00:00:00Z'));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<AtomReader atomId="memory:m1" viewKey="retry" />); });
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain('Fictional service outage');
+      expect(container.textContent).not.toContain('Atom not found');
+      await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry')!.click(); });
+      expect(container.querySelector('textarea')?.value).toBe('Recovered fictional prose');
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
+  it.each([false, true])('revalidates a deletion notice without losing a draft (dirty=%s)', async dirty => {
+    transport.invoke.mockResolvedValueOnce(memory('Original prose', '2026-01-01T00:00:00Z')).mockResolvedValueOnce(null);
+    useUIStore.setState({ tabs: [{ id: 'tab-1', stack: [], stackIndex: 0, ordinal: 1 }], activeTabId: 'tab-1' });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => { root.render(<ReaderHarness />); });
+      const textarea = container.querySelector('textarea')!;
+      if (dirty) await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, 'Fictional draft');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => { transport.listeners.get('memu-memory-deleted')?.({ id: 'memory:m1' }); });
+      expect(Boolean(useUIStore.getState().tabs[0].retired)).toBe(dirty);
+      if (dirty) {
+        expect(textarea.value).toBe('Fictional draft');
+        expect(textarea.readOnly).toBe(true);
+      } else expect(container.textContent).toContain('Atom not found');
+      expect(transport.invoke).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => { root.unmount(); });
+    }
+  });
+
   it('settles loading without fetching when mounted as a retired snapshot', async () => {
     const container = document.createElement('div');
     const root = createRoot(container);
@@ -239,6 +279,8 @@ describe('AtomReader stale snapshots', () => {
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
       });
       await act(async () => { [...container.querySelectorAll('button')].find(button => button.textContent === 'Save + approve')!.click(); });
+      expect(textarea.readOnly).toBe(true);
+      await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true })); });
       await act(async () => { transport.listeners.get('atom-updated')?.({ id: 'memory:m1' }); });
       expect(transport.invoke).toHaveBeenCalledTimes(2);
       await act(async () => { if (outcome === 'success') finish(saved); else fail(new Error('Fictional save failure')); });

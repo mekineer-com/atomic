@@ -76,6 +76,10 @@ export interface Tab {
   ordinal: number;
 }
 
+export function hasReaderForwardHistory(tab: Tab): boolean {
+  return tab.stack.slice(tab.stackIndex + 1).some(entry => entry.type === 'atom');
+}
+
 /// Legacy shape preserved for any callers / tests that still import it.
 /// Tabs are the new home; this is a one-field projection of an active tab.
 export type OverlayNavEntry =
@@ -455,14 +459,14 @@ export const useUIStore = create<UIStore>()(
 
       /// Single entry point for opening any kind of routed entry. Three rules:
       ///   1. opts.newTab=true (cmd/ctrl+click) → always create a new tab.
-      ///   2. there is an active tab → push onto its stack (truncating any
-      ///      forward history past stackIndex).
+      ///   2. there is an active tab → push, unless that would discard retained
+      ///      readers or change a retired tab; then open another tab.
       ///   3. no active tab → if some tab's *current* entry equivalent
       ///      already shows this entry, switch to it; otherwise new tab.
       openEntry: (entry, opts) => {
         const state = get();
         const activeTab = state.activeTabId ? state.tabs.find((tab) => tab.id === state.activeTabId) : null;
-        const newTab = !!opts?.newTab || !!activeTab?.retired;
+        const newTab = !!opts?.newTab || !!activeTab?.retired || !!(activeTab && hasReaderForwardHistory(activeTab));
         const background = !!opts?.background;
 
         // Cmd/ctrl+click: always new tab.
@@ -712,39 +716,38 @@ export const useUIStore = create<UIStore>()(
 
       removeAtomFromTabs: (atomId) => {
         const state = get();
-        // Drop any tab whose *current* entry is this atom (atom or graph).
-        // Tabs whose stack merely *contains* this atom further back are kept;
-        // user can still chevron-back through other entries even if the
-        // forward history references a now-deleted atom (visiting that entry
-        // would just show "Atom not found"). Could prune those too, but
-        // surgical removal is friendlier.
+        // Retained readers are keyed by atom ID, so other entries can safely move.
+        const isDeletedEntry = (entry: TabEntry) =>
+          (entry.type === 'atom' || entry.type === 'graph') && entry.atomId === atomId;
         const isCurrentlyShowing = (tab: Tab) => {
           if (tab.retired) return false;
           const e = tab.stack[tab.stackIndex];
-          if (!e) return false;
-          if (e.type === 'atom' && e.atomId === atomId) return true;
-          if (e.type === 'graph' && e.atomId === atomId) return true;
-          return false;
+          return !!e && isDeletedEntry(e);
         };
-        const toClose = state.tabs.filter(isCurrentlyShowing).map((t) => t.id);
-        if (toClose.length === 0) return;
+        const affected = state.tabs.filter(isCurrentlyShowing).map((t) => t.id);
+        if (affected.length === 0) return;
 
-        // Closing one tab at a time so closeTab handles activation fallback.
-        const wasActive = state.activeTabId && toClose.includes(state.activeTabId);
-        const remaining = state.tabs.filter((t) => !toClose.includes(t.id));
+        const wasActive = state.activeTabId && affected.includes(state.activeTabId);
+        const remaining = state.tabs.flatMap((tab) => {
+          if (!affected.includes(tab.id)) return [tab];
+          const stack = tab.stack.filter(entry => !isDeletedEntry(entry));
+          if (stack.length === 0) return [];
+          const earlier = tab.stack.slice(0, tab.stackIndex).filter(entry => !isDeletedEntry(entry)).length;
+          return [{ ...tab, stack, stackIndex: Math.max(0, earlier - 1) }];
+        });
 
         if (wasActive) {
-          // Drop tab + fall back to atoms list (delete most likely happened
-          // from an atom view; landing on the list is the natural place).
-          const projected = projectActiveEntry(null);
+          const active = remaining.find(tab => tab.id === state.activeTabId);
+          const entry = active?.stack[active.stackIndex];
+          const projected = projectActiveEntry(entry ?? null);
           set((s) => ({
             tabs: remaining,
-            activeTabId: null,
-            viewMode: 'atoms',
+            activeTabId: active?.id ?? null,
+            viewMode: active ? s.viewMode : 'atoms',
             ...projected,
             localGraph: { ...s.localGraph, ...projected.localGraphPatch },
           }));
-          navigateTo(viewPath('atoms', state.selectedTagId));
+          navigateTo(entry ? entryUrl(entry) : viewPath('atoms', state.selectedTagId), { replace: true });
         } else {
           set({ tabs: remaining });
         }

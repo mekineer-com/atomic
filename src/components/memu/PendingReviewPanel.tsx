@@ -278,7 +278,7 @@ export function PendingReviewPanel({ onStale }: { onStale?: () => void } = {}) {
                 key={item.id}
                 item={item}
                 accentClass={item.similar_to?.length && clusterColors[item.id] != null ? CLUSTER_COLORS[clusterColors[item.id]] : null}
-                disabled={summariesStale}
+                disabled={summariesStale || loading}
                 onStale={markStale}
                 onDirtyChange={changeSummaryDirty}
                 onBusyChange={changeSummaryBusy}

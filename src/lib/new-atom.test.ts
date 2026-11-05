@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useAtomsStore } from '../stores/atoms';
+import { useAtomsStore, type AtomWithTags } from '../stores/atoms';
 import { useUIStore } from '../stores/ui';
 import { NEW_MEMORY_EVENT, startNewAtom } from './new-atom';
 
@@ -38,6 +38,20 @@ describe('startNewAtom', () => {
 
     expect(createAtom).toHaveBeenCalledWith('');
     expect(openReaderEditing).toHaveBeenCalledWith('atom:test');
+  });
+
+  it('does not open a late Workspace note after switching to Memories', async () => {
+    useUIStore.setState({ knowledgeSource: 'workspace' });
+    let finish!: (atom: { id: string }) => void;
+    const createAtom = vi.fn(() => new Promise<AtomWithTags>(resolve => { finish = atom => resolve(atom as AtomWithTags); }));
+    const openReaderEditing = vi.fn();
+    useAtomsStore.setState({ createAtom });
+    useUIStore.setState({ openReaderEditing });
+    const creating = startNewAtom();
+    useUIStore.setState({ knowledgeSource: 'memories' });
+    finish({ id: 'atom:late' });
+    await creating;
+    expect(openReaderEditing).not.toHaveBeenCalled();
   });
 });
 

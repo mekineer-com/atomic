@@ -78,14 +78,14 @@ pub async fn ws_handler(
             biased;
             broadcast = rx.recv() => match broadcast {
                 Ok(event) => {
+                    let selected_database =
+                        fixed_database.clone().or_else(|| manager.active_id().ok());
+                    if event.database_id().is_some()
+                        && event.database_id() != selected_database.as_deref()
+                    {
+                        continue;
+                    }
                     if let Some(scope) = scope.as_ref() {
-                        let selected_database =
-                            fixed_database.clone().or_else(|| manager.active_id().ok());
-                        if event.database_id().is_some()
-                            && event.database_id() != selected_database.as_deref()
-                        {
-                            continue;
-                        }
                         if let Some((conversation_id, database_id)) =
                             event.conversation_id().zip(event.database_id())
                         {

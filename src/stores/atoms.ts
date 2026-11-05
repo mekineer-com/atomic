@@ -5,6 +5,7 @@ import { cacheKey, readCache, writeCache } from '../lib/cache/idb';
 import { currentIdentity } from '../lib/openalma-identity';
 import { useDatabasesStore } from './databases';
 import { useCanvasStore } from './canvas';
+import { useUIStore } from './ui';
 
 export interface MemoryCitation {
   ref: string;
@@ -445,6 +446,7 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   },
 
   createAtom: async (content: string, sourceUrl?: string, tagIds?: string[]) => {
+    const source = useUIStore.getState().knowledgeSource;
     set({ error: null });
     try {
       const atom = await getTransport().invoke<AtomWithTags>('create_atom', {
@@ -452,6 +454,7 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
         sourceUrl: sourceUrl || null,
         tagIds: tagIds || [],
       });
+      if (useUIStore.getState().knowledgeSource !== source) return atom;
       const summary = toSummary(atom);
       // Prepend summary to list and bump total count
       set((state) => {

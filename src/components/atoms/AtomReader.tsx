@@ -132,7 +132,7 @@ function DossierMembershipControls({
         limit: 8,
         memoryOnly: true,
         excludeCategoryId: atom.id,
-      }));
+      }, { workspace: false }));
     } catch (reason) {
       setError(String(reason));
     }
@@ -218,6 +218,7 @@ export function AtomReader({
   const [atom, setAtom] = useState<AtomWithTags | null>(() => cacheKey ? atomDetailCache.get(cacheKey) ?? null : null);
   const [isLoadingAtom, setIsLoadingAtom] = useState(() => !cacheKey || !atomDetailCache.has(cacheKey));
   const [showLoading, setShowLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const lastFetchedAt = useRef<string | null>(null);
   const atomRef = useRef(atom);
   const dirtyRef = useRef(false);
@@ -255,6 +256,7 @@ export function AtomReader({
     const fetchedAtom = await fetchCurrentAtom().catch(error => {
       if (generation !== loadGeneration.current || request !== refreshRequest.current) return null;
       if (isMissingMemoryError(error)) return null;
+      setLoadError(String(error));
       setIsLoadingAtom(false);
       throw error;
     });
@@ -265,6 +267,7 @@ export function AtomReader({
       return;
     }
     const currentAtom = atomRef.current;
+    setLoadError(null);
     if (tabId && dirtyRef.current && currentAtom && (!fetchedAtom || memuEditableFieldsChanged(currentAtom, fetchedAtom))) {
       retire(Boolean(fetchedAtom));
       return;
@@ -281,6 +284,14 @@ export function AtomReader({
     return getTransport().subscribe<{ id: string }>('atom-updated', updated => {
       // WebSocket Atom payloads omit entity fields; detail remains their source of truth.
       if (updated.id === atomId) void refreshAtom().catch(console.error);
+    });
+  }, [atomId, refreshAtom]);
+
+  useEffect(() => {
+    if (!atomId.startsWith('memory:')) return;
+    return getTransport().subscribe<{ id: string }>('memu-memory-deleted', ({ id }) => {
+      if (id !== atomId || retiredRef.current || !currentRef.current || savingRef.current) return;
+      void refreshAtom().catch(() => undefined);
     });
   }, [atomId, refreshAtom]);
 
@@ -379,6 +390,11 @@ export function AtomReader({
             Loading...
           </div>
         ) : null
+      ) : !atom && loadError ? (
+        <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 text-sm text-red-400">
+          <p>{loadError}</p>
+          <button disabled={retired} onClick={() => { setIsLoadingAtom(true); setShowLoading(true); void refreshAtom().catch(() => undefined); }} className="rounded border px-3 py-1.5">Retry</button>
+        </div>
       ) : !atom ? (
         <div className="flex items-center justify-center h-full text-[var(--color-text-secondary)]">
           Atom not found
@@ -433,6 +449,7 @@ export function AtomReader({
             }
             await fetchTags();
             if (cacheKey) atomDetailCache.delete(cacheKey);
+            setAtom(null);
             removeAtomFromTabs(atomId);
           }}
           onTagClick={(tagId) => {
@@ -602,7 +619,7 @@ function AtomReaderContent({
   }, [retryTagging, atom, isMemuAtom, onAtomUpdated]);
 
   const saveMemuSummary = useCallback(async () => {
-    if (!isMemuMemory && !isMemuCategory) return;
+    if ((!isMemuMemory && !isMemuCategory) || retired || memuStatus !== 'idle') return;
     const changes = {
       ...(memuSummaryEdited ? { summary: memuSummary } : {}),
       ...(memuCategoryEdited && memuTitle !== atom.title ? { title: memuTitle } : {}),
@@ -631,7 +648,7 @@ function AtomReaderContent({
       onSavingChange(false);
       setMemuStatus('idle');
     }
-  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuKind, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated, onDirtyChange, onSavingChange, runMemuMutation]);
+  }, [atom, isMemuCategory, isMemuMemory, memuCategoryEdited, memuDescription, memuKind, memuStatus, memuSummary, memuSummaryEdited, memuTitle, onAtomUpdated, onDirtyChange, onSavingChange, retired, runMemuMutation]);
 
   const approveMemuSummary = useCallback(async () => {
     if (!isMemuMemory && !isMemuCategory) return;
@@ -722,6 +739,7 @@ function AtomReaderContent({
 
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault();
+        if (isMemuAtom && memuPrimaryDisabled) return;
         void Promise.resolve(isMemuAtom ? (memuEdited ? saveMemuSummary() : (!memuSummaryApproved && approveMemuSummary())) : saveNow()).catch(() => undefined);
         return;
       }
@@ -757,7 +775,7 @@ function AtomReaderContent({
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [active, approveMemuSummary, flushDraft, isEditing, isMemuAtom, memuEdited, memuSummaryApproved, onDismiss, retired, saveMemuSummary, saveNow, setReaderEditing, showDeleteModal]);
+  }, [active, approveMemuSummary, flushDraft, isEditing, isMemuAtom, memuEdited, memuPrimaryDisabled, memuSummaryApproved, onDismiss, retired, saveMemuSummary, saveNow, setReaderEditing, showDeleteModal]);
 
   useEffect(() => {
     if (retired) setShowDeleteModal(false);
@@ -915,16 +933,16 @@ function AtomReaderContent({
                           <>
                             <label className="block text-xs text-[var(--color-text-tertiary)]">
                               Type
-                              <select value={memuKind} onChange={(e) => setMemuKind(e.target.value as 'lore' | 'topic' | 'goal')} disabled={retired} className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2 text-sm capitalize text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none">
+                              <select value={memuKind} onChange={(e) => setMemuKind(e.target.value as 'lore' | 'topic' | 'goal')} disabled={retired || memuStatus !== 'idle'} className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-3 py-2 text-sm capitalize text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none">
                                 <option value="lore">Lore</option>
                                 <option value="topic">Topic</option>
                                 <option value="goal">Goal</option>
                               </select>
                             </label>
-                            <Input value={memuTitle} onChange={(e) => setMemuTitle(e.target.value)} placeholder="Category title" readOnly={retired} />
+                            <Input value={memuTitle} onChange={(e) => setMemuTitle(e.target.value)} placeholder="Category title" readOnly={retired || memuStatus !== 'idle'} />
                             <textarea
                               value={memuDescription}
-                              readOnly={retired}
+                              readOnly={retired || memuStatus !== 'idle'}
                               onChange={(e) => setMemuDescription(e.target.value)}
                               className="min-h-24 w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
                               placeholder="Description"
@@ -933,7 +951,7 @@ function AtomReaderContent({
                         )}
                         <textarea
                           value={memuSummary}
-                          readOnly={retired}
+                          readOnly={retired || memuStatus !== 'idle'}
                           onChange={(e) => setMemuSummary(e.target.value)}
                           className="min-h-[24rem] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] p-4 text-sm leading-6 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
                         />
@@ -1124,7 +1142,7 @@ function AtomReaderContent({
             {isMemuMemory && (
               <MemoryEntityControls
                 memoryId={atom.id}
-                readOnly={retired}
+                readOnly={retired || memuStatus !== 'idle'}
                 entityIds={atom.entity_ids}
                 entityNames={atom.entity_names}
                 onUpdated={updated => {

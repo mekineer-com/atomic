@@ -170,7 +170,7 @@ describe('MainView entity reader lifecycle', () => {
     expect(container.querySelector('textarea')?.value).toBe('Original fictional summary');
   });
 
-  it('retains back and forward drafts, deduplicates repeated items and removes truncated history', async () => {
+  it('retains back and forward drafts, deduplicates repeated items and branches without truncating', async () => {
     const tabId = await openEntity();
     const first = activeReader();
     await edit(first, ['First unsaved draft']);
@@ -195,11 +195,29 @@ describe('MainView entity reader lifecycle', () => {
     expect(container.querySelectorAll('article')).toHaveLength(2);
     await act(async () => { useUIStore.getState().tabBack(); useUIStore.getState().tabBack(); });
     await act(async () => { useUIStore.getState().openReader('entity:replacement'); });
-    expect(second.isConnected).toBe(false);
+    const replacementTab = useUIStore.getState().activeTabId!;
+    expect(replacementTab).not.toBe(tabId);
+    expect(second.isConnected).toBe(true);
+    expect(draftValues(second)[0]).toBe('Second unsaved draft');
     expect(first.isConnected).toBe(true);
     await act(async () => { useUIStore.getState().closeTab(tabId); });
     expect(first.isConnected).toBe(false);
+    expect(second.isConnected).toBe(false);
+    expect(container.querySelectorAll('article')).toHaveLength(1);
+    await act(async () => { useUIStore.getState().closeTab(replacementTab); });
     expect(container.querySelector('article')).toBeNull();
+  });
+
+  it('returns to the same draft when deleting a reader opened from it', async () => {
+    const tabId = await openEntity();
+    const first = activeReader();
+    await edit(first, ['First unsaved draft']);
+    await act(async () => { useUIStore.getState().openReader('memory:fictional-memory'); });
+    await act(async () => { useUIStore.getState().removeAtomFromTabs('memory:fictional-memory'); });
+    expect(useUIStore.getState().activeTabId).toBe(tabId);
+    expect(activeReader()).toBe(first);
+    expect(draftValues(first)[0]).toBe('First unsaved draft');
+    expect(useUIStore.getState().tabs[0].stack).toHaveLength(1);
   });
 
   it.each(['memory:fictional-memory', 'category:fictional-dossier'])(

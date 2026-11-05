@@ -64,6 +64,93 @@ describe('entitySaveCommand', () => {
 });
 
 describe('entity reader ownership and link refresh', () => {
+  it('retries an initial entity-list outage', async () => {
+    transport.invoke.mockRejectedValueOnce(new Error('Fictional service outage'))
+      .mockResolvedValueOnce({ entities: [entity('A')] }).mockResolvedValueOnce(entity('A'));
+    await act(async () => { root.render(createElement(EntityManager)); });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Fictional service outage');
+    await click('Retry');
+    expect(container.querySelector('article h1')?.textContent).toBe('Fictional A');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('keeps edited fields when making a relationship', async () => {
+    transport.invoke.mockResolvedValueOnce(entity('A'));
+    await act(async () => { root.render(createElement(EntityReader, { entityId: 'A' })); });
+    await click('Edit');
+    await act(async () => {
+      const input = container.querySelector('article input')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Fictional draft');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click('Make relationship');
+    expect(container.querySelector<HTMLInputElement>('article input')?.value).toBe('Fictional draft');
+    expect(container.querySelector('textarea')).not.toBeNull();
+  });
+
+  it.each(['resolve', 'reject'])('ignores an obsolete merge preview that will %s', async outcome => {
+    let finish!: (value: unknown) => void;
+    let fail!: (error: Error) => void;
+    transport.invoke.mockResolvedValueOnce(entity('A'))
+      .mockResolvedValueOnce({ entities: [entity('B'), entity('C')] })
+      .mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+    await act(async () => { root.render(createElement(EntityReader, { entityId: 'A' })); });
+    await click('Merge duplicate');
+    await click('Preview merge');
+    await act(async () => {
+      const select = container.querySelector<HTMLSelectElement>('article select')!;
+      select.value = 'C';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await act(async () => {
+      if (outcome === 'reject') fail(new Error('Obsolete preview failed'));
+      else finish({ can_merge: true, warnings: ['Obsolete preview'], conflicts: [], impact: {
+        memory_count: 1, speaker_memory_count: 0, current_triple_count: 0,
+        historical_triple_count: 0, category_titles: [], aliases: [], source_refs: [],
+      } });
+    });
+    expect(container.textContent).not.toContain('Obsolete preview');
+    expect(container.textContent).not.toContain('Keep Fictional A and merge selected');
+  });
+
+  it('locks creation fields and entity navigation until Create finishes', async () => {
+    let finish!: (value: unknown) => void;
+    transport.invoke.mockImplementation((command: string) => {
+      if (command === 'list_memu_entities') return Promise.resolve({ entities: [entity('A')] });
+      if (command === 'get_memu_entity') return Promise.resolve(entity('A'));
+      if (command === 'create_memu_entity') return new Promise(resolve => { finish = resolve; });
+      throw new Error(command);
+    });
+    await act(async () => { root.render(createElement(EntityManager)); });
+    await click('Add');
+    await act(async () => {
+      const input = container.querySelector('form input')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Fictional new entity');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+    expect([...container.querySelectorAll<HTMLInputElement>('aside form input')].every(input => input.readOnly)).toBe(true);
+    expect(container.querySelector<HTMLFieldSetElement>('main fieldset')?.disabled).toBe(true);
+    expect([...container.querySelectorAll<HTMLButtonElement>('aside button')].every(button => button.disabled)).toBe(true);
+    await act(async () => { finish(entity('A')); });
+    expect(container.querySelector('aside form')).toBeNull();
+    expect(container.querySelector<HTMLFieldSetElement>('main fieldset')?.disabled).toBe(false);
+  });
+
+  it('explicitly searches memories when attaching to an entity', async () => {
+    transport.invoke.mockResolvedValueOnce(entity('A')).mockResolvedValueOnce([]);
+    await act(async () => { root.render(createElement(EntityReader, { entityId: 'A' })); });
+    await act(async () => {
+      const input = container.querySelector('form input')!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Fictional memory');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => { container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); });
+    expect(transport.invoke).toHaveBeenLastCalledWith('search_atoms_hybrid', {
+      query: 'Fictional memory', limit: 8, memoryOnly: true, excludeEntityId: 'A',
+    }, { workspace: false });
+  });
+
   it.each(['success', 'failure'])('keeps submitted fields read-only until Save ends with %s', async outcome => {
     const original = { ...entity('A'), is_relationship: true };
     const saved = { ...original, name: 'Submitted fictional name' };
@@ -91,7 +178,7 @@ describe('entity reader ownership and link refresh', () => {
     expect(fields()[0].value).toBe(saved.name);
   });
 
-  it.each(['save', 'delete'])('keeps B selected after A completes %s', async action => {
+  it.each(['save', 'delete'])('protects entity selection while A completes %s', async action => {
     let finish!: () => void;
     let entities = [entity('A'), entity('C'), entity('B')];
     transport.invoke.mockImplementation((command: string, args: { id: string }) => {
@@ -109,8 +196,10 @@ describe('entity reader ownership and link refresh', () => {
     await act(async () => { root.render(createElement(EntityManager)); });
     if (action === 'save') { await click('Edit'); await click('Save'); }
     else await click('Delete');
+    const selectB = () => [...container.querySelectorAll<HTMLButtonElement>('aside button')].find(button => button.textContent?.startsWith('Fictional B'))!;
+    expect(selectB().disabled).toBe(action === 'save');
     await act(async () => {
-      [...container.querySelectorAll<HTMLButtonElement>('aside button')].find(button => button.textContent?.startsWith('Fictional B'))!.click();
+      selectB().click();
     });
     if (action === 'delete') {
       await click('Edit');
@@ -121,6 +210,10 @@ describe('entity reader ownership and link refresh', () => {
       });
     }
     await act(async () => { finish(); });
+    if (action === 'save') {
+      expect(container.querySelector('article h1')?.textContent).toBe('Fictional A');
+      await act(async () => { selectB().click(); });
+    }
     expect(container.querySelector('article h1')?.textContent).toBe('Fictional B');
     expect([...container.querySelectorAll('aside button')].find(button => button.textContent?.startsWith('Fictional B'))?.className).toContain('bg-[var(--color-bg-hover)]');
     if (action === 'delete') expect(container.querySelector<HTMLInputElement>('article input')?.value).toBe('Fictional B draft');

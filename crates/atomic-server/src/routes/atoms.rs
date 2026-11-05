@@ -277,10 +277,6 @@ pub async fn get_atom(
             Ok(config) => config,
             Err(response) => return response,
         };
-        if !memu_proxy::is_memu_id(&id) {
-            return HttpResponse::NotFound()
-                .json(serde_json::json!({"error": "memU atom not found"}));
-        }
         let client = match memu_proxy::client() {
             Ok(client) => client,
             Err(response) => return response,

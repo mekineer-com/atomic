@@ -10,6 +10,8 @@ export async function startNewAtom(): Promise<void> {
     return;
   }
 
+  const source = useUIStore.getState().knowledgeSource;
   const atom = await useAtomsStore.getState().createAtom('');
+  if (useUIStore.getState().knowledgeSource !== source) return;
   useUIStore.getState().openReaderEditing(atom.id);
 }
