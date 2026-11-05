@@ -412,6 +412,7 @@ pub(crate) fn bound_chat_state(
         }
         None => AtomicChatState {
             backend: *backend,
+            sitting_wide_citations: last_role.is_none(),
             phase: AtomicChatPhase::Open,
             active: None,
             recap: None,
@@ -546,6 +547,7 @@ pub(crate) fn completed_chat_state(
     expected_user_message_id: Option<&str>,
     reply_message_id: &str,
     native_outcome: Option<&AtomicChatNativeOutcome>,
+    tool_calls: &[ChatToolCall],
 ) -> Result<Option<AtomicChatState>, AtomicCoreError> {
     match (state, expected_user_message_id) {
         (None, None) if native_outcome.is_none() => Ok(None), // Standalone.
@@ -562,6 +564,9 @@ pub(crate) fn completed_chat_state(
                 };
             } else {
                 state.active = None;
+                if tool_calls.iter().any(ChatToolCall::outcome_unknown) {
+                    state.phase = AtomicChatPhase::Closing;
+                }
             }
             Ok(Some(state)) // Preserve Closing: publication must not reopen the sitting.
         }
@@ -1594,6 +1599,7 @@ pub fn save_chat_reply(
         expected_user_message_id,
         &message.id,
         native_outcome,
+        tool_calls,
     )?;
     write_chat_tool_state(
         &tx,
@@ -1723,6 +1729,9 @@ mod tests {
         })).unwrap();
         assert!(old.native_usage.is_none());
         assert!(old.maintenance.is_none());
+        assert!(!old.sitting_wide_citations);
+        assert!(bound_chat_state(None, &AtomicChatBackend::Api, None).unwrap().sitting_wide_citations);
+        assert!(!bound_chat_state(None, &AtomicChatBackend::Api, Some("assistant")).unwrap().sitting_wide_citations);
     }
 
     #[test]
@@ -1832,17 +1841,24 @@ mod tests {
         failed_chat_state(&mut state, "turn", "delivery unknown", true, Some(&unknown)).unwrap();
         assert_eq!(state.native_context_tokens, None);
         assert_eq!(state.active.as_ref().unwrap().native_input_recorded, None);
-        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).unwrap().unwrap().active.is_none());
+        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native), &[]).unwrap().unwrap().active.is_none());
+        let unresolved = ChatToolCall { id:"unknown-tool".into(), message_id:"turn".into(),
+            tool_name:"edit_atom".into(), tool_input:serde_json::json!({}),
+            tool_output:Some(serde_json::json!({"outcome_unknown":true})), status:"failed".into(),
+            created_at:String::new(), completed_at:None };
+        let closed_input = completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native), &[unresolved]).unwrap().unwrap();
+        assert!(closed_input.active.is_none());
+        assert_eq!(closed_input.phase, AtomicChatPhase::Closing);
         state.phase = AtomicChatPhase::Closed;
-        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).is_err());
+        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native), &[]).is_err());
         state.phase = AtomicChatPhase::Closing;
         state.recap = Some(AtomicChatRecap { request_message_id:"recap".into(), native_attempt_id:Some("recap-attempt".into()),
             outcome:AtomicChatRecapOutcome::Running });
-        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native)).is_err());
+        assert!(completed_chat_state(Some(state.clone()), Some("turn"), "reply", Some(&native), &[]).is_err());
         state.recap.as_mut().unwrap().outcome = AtomicChatRecapOutcome::Complete { reply_message_id:"saved-recap".into() };
         let recap = AtomicChatNativeOutcome { attempt_id:"recap-attempt".into(), usage:None, input_recorded:Some(true), context_tokens:None };
-        assert!(completed_chat_state(Some(state.clone()), Some("recap"), "duplicate", Some(&recap)).is_err());
-        assert!(completed_chat_state(Some(state), Some("turn"), "late ordinary", Some(&native)).is_err());
+        assert!(completed_chat_state(Some(state.clone()), Some("recap"), "duplicate", Some(&recap), &[]).is_err());
+        assert!(completed_chat_state(Some(state), Some("turn"), "late ordinary", Some(&native), &[]).is_err());
     }
 
     #[test]

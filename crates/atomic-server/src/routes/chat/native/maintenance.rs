@@ -28,7 +28,7 @@ fn action(kind: Kind) -> &'static str {
 }
 
 pub(crate) fn ordinary_due(saved: &AtomicChatState, capacity: usize, tokens: usize) -> bool {
-    tokens >= capacity.saturating_mul(70) / 100
+    saved.phase == Phase::Open && tokens >= capacity.saturating_mul(70) / 100
         && saved.maintenance.as_ref().is_none_or(|prior| !prior.ordinary_disabled && !prior.awaiting_measurement)
 }
 
@@ -237,6 +237,9 @@ mod tests {
         assert!(!ordinary_due(&saved, 200000, 140000));
         saved.maintenance.as_mut().unwrap().awaiting_measurement = false;
         assert!(ordinary_due(&saved, 200000, 140000));
+        saved.phase = Phase::Closing;
+        assert!(!ordinary_due(&saved, 200000, 140000));
+        saved.phase = Phase::Open;
         saved.maintenance.as_mut().unwrap().ordinary_disabled = true;
         assert!(!ordinary_due(&saved, 200000, 140000));
     }

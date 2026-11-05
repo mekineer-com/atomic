@@ -1158,6 +1158,11 @@ fn chat_identity(memu_tool_config: Option<&MemuToolConfig>) -> (String, &'static
 
 fn get_system_prompt(scope_description: &str, memu_tool_config: Option<&MemuToolConfig>) -> String {
     let (intro, guidelines) = chat_identity(memu_tool_config);
+    let write_tools = if memu_tool_config.is_some() { "edit_atom" } else { "create_atom or edit_atom" };
+    let write_action = if memu_tool_config.is_some() { "modify" } else { "create or modify" };
+    let creation = if memu_tool_config.is_some() { "" } else {
+        "- When you create a new atom, include [[atom_id]] in the final response so the user can open it\n"
+    };
     format!(
         r#"{intro}
 
@@ -1165,10 +1170,9 @@ fn get_system_prompt(scope_description: &str, memu_tool_config: Option<&MemuTool
 
 {guidelines}:
 - Use search_atoms to find relevant information before answering, unless another available tool more directly addresses the user's request
-- Only call create_atom or edit_atom when the user explicitly asks you to create or modify an atom
+- Only call {write_tools} when the user explicitly asks you to {write_action} an atom
 - Prefer targeted edit_atom operations. Use replace_all only for intentional full-content replacement
-- When you create a new atom, include [[atom_id]] in the final response so the user can open it
-- If the initial search doesn't find enough, try different search queries
+{creation}- If the initial search doesn't find enough, try different search queries
 - When you find relevant information, cite the exact [N] marker shown in the tool result; never renumber it
 - Be honest if you cannot find information - do not make things up
 - Keep responses concise but informative
@@ -1956,6 +1960,22 @@ impl ChatToolSession {
         })
     }
 
+    pub(crate) async fn bind_sitting_user_turn(
+        &mut self,
+        conversation: &crate::ConversationWithMessages,
+        turn: &ChatMessageWithContext,
+        recovering: bool,
+    ) -> Result<(), crate::AtomicCoreError> {
+        let prior = conversation.messages.iter()
+            .filter(|row| row.message.id != turn.message.id)
+            .flat_map(|row| row.citations.iter().cloned()).collect();
+        let high_water = self.storage.get_chat_citation_index_sync(&self.conversation_id)
+            .await?;
+        self.bind_user_turn(&turn.message.id, Some(high_water), prior,
+            turn.tool_calls.clone(), turn.citations.clone(), recovering).await
+            .map_err(crate::AtomicCoreError::Validation)
+    }
+
     pub(crate) async fn bind_user_turn(
         &mut self,
         message_id: &str,
@@ -2275,7 +2295,7 @@ impl ChatToolSession {
                                 .chars()
                                 .take(200)
                                 .collect();
-                            if !excerpt.is_empty() {
+                            if !excerpt.is_empty() && context["visible_atom"]["not_found"].as_bool() != Some(true) {
                                 let citation_index = self.add_citation(atom_id, None, excerpt);
                                 if let Some(atom) = context
                                     .get_mut("visible_atom")
@@ -2425,7 +2445,7 @@ impl ChatToolSession {
             conversation_id: self.conversation_id.clone(),
             tool_call_id: call_id.to_string(),
             results_count,
-            is_error,
+            is_error: is_error || checkpoint.is_err(),
         });
         checkpoint.map_err(|e| format!("Tool finished, but saving its outcome failed: {e}"))?;
         self.require_known_outcomes()?;
@@ -2762,7 +2782,10 @@ where
             .iter()
             .find(|row| row.message.id == user_message_id)
             .ok_or("Saved user turn not found")?;
-        tools
+        if conversation.conversation.atomic_chat_state.as_ref().is_some_and(|state| state.sitting_wide_citations) {
+            tools.bind_sitting_user_turn(&conversation, turn, false).await.map_err(|error| error.to_string())?;
+        } else {
+            tools
             .bind_user_turn(
                 &user_message_id,
                 None,
@@ -2771,6 +2794,7 @@ where
                 turn.citations.clone(), false,
             )
             .await?;
+        }
     }
     let api_messages = api_request_messages(
         &conversation,
@@ -2791,6 +2815,7 @@ where
     };
 
     // Create agent context
+    let sitting_wide_citations = tools.sitting_wide_citations;
     let ctx = AgentContext {
         messages: api_messages,
         tools,
@@ -2799,6 +2824,9 @@ where
 
     // Run agent loop with canvas context
     let (content, mut records) = run_agent_loop(provider_config, model, ctx).await?;
+    if sitting_wide_citations {
+        records = records.for_reply(&content);
+    }
     if recap_instruction.is_some() && content.trim().is_empty() {
         return Err("The recap was empty. Retry close-out to generate it again.".to_string());
     }
@@ -2811,7 +2839,7 @@ where
             &content,
             &records.tool_calls,
             &records.citations,
-            0, // API citations are per reply, not a native sitting high-water mark.
+            if sitting_wide_citations { records.citation_index } else { 0 },
             None,
         )
         .await
@@ -5834,7 +5862,7 @@ mod tests {
         assert!(events.lock().unwrap().iter().any(|event| matches!(
             event,
             ChatEvent::ToolComplete {
-                is_error: false,
+                is_error: true,
                 ..
             }
         )));
@@ -5973,6 +6001,21 @@ mod tests {
         assert_eq!(records.citations.len(), 3);
         assert_eq!(records.citations[2].citation_index, 3);
         assert_eq!(records.citations[2].atom_id, atom.atom.id);
+    }
+
+    #[tokio::test]
+    async fn missing_page_context_never_mints_a_citation() {
+        let dir = TempDir::new().unwrap();
+        let core = AtomicCore::open_or_create(dir.path().join("atomic.db")).unwrap();
+        let mut session = ChatToolSession::new(core.storage.clone(), "fictional".into(), Vec::new(),
+            HashMap::new(), None, Some(PageContext { view:Some("atom".into()), atom_id:Some("missing".into()),
+                atom_title:None, atom_snippet:Some("Stale reader text".into()), wiki_tag_id:None,
+                wiki_tag_name:None, selected_tag_id:None }), None, None, Arc::new(|_| {}));
+        let result = session.execute("missing-page", "get_current_page_context", json!({})).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(value["visible_atom"]["not_found"], true);
+        assert!(value["visible_atom"]["citation_index"].is_null());
+        assert!(session.finish().citations.is_empty());
     }
 
     #[tokio::test]
@@ -6134,6 +6177,8 @@ mod tests {
         assert!(prompt.contains("You are with TestOwner in the app Atomic"));
         assert!(prompt.contains("In Atomic, TestOwner is the user."));
         assert!(prompt.contains("Guidelines for Atomic:"));
+        assert!(prompt.contains("Only call edit_atom when"));
+        assert!(!prompt.contains("create_atom"));
         assert!(!prompt.contains("helpful AI assistant"));
     }
 

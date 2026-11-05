@@ -1160,7 +1160,7 @@ impl ChatStore for PostgresStorage {
         let message =
             write_message(&mut tx, &self.db_id, conversation_id, "assistant", content).await?;
         let state =
-            crate::chat::completed_chat_state(current, expected_user_message_id, &message.id, native_outcome)?;
+            crate::chat::completed_chat_state(current, expected_user_message_id, &message.id, native_outcome, tool_calls)?;
         write_chat_tool_state(
             &mut tx,
             &self.db_id,

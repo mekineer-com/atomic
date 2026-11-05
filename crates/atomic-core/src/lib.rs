@@ -2617,27 +2617,9 @@ impl AtomicCore {
             .iter()
             .find(|row| row.message.id == user_message_id)
             .expect("validated user turn");
-        let prior = conversation
-            .messages
-            .iter()
-            .filter(|row| row.message.id != user_message_id)
-            .flat_map(|row| row.citations.iter().cloned())
-            .collect();
-        let high_water = self
-            .storage
-            .get_chat_citation_index_sync(conversation_id)
-            .await?;
         session
-            .bind_user_turn(
-                user_message_id,
-                Some(high_water),
-                prior,
-                user_turn.tool_calls.clone(),
-                user_turn.citations.clone(),
-                recovering,
-            )
-            .await
-            .map_err(AtomicCoreError::Validation)?;
+            .bind_sitting_user_turn(&conversation, user_turn, recovering)
+            .await?;
         Ok(session)
     }
 

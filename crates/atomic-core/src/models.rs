@@ -916,6 +916,9 @@ impl AtomicChatMaintenance {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct AtomicChatState {
     pub backend: AtomicChatBackend,
+    /// Missing on older API sittings, whose existing per-reply numbers stay unchanged.
+    #[serde(default)]
+    pub sitting_wide_citations: bool,
     pub phase: AtomicChatPhase,
     pub active: Option<AtomicChatTurn>,
     #[serde(skip_serializing_if = "Option::is_none")]
