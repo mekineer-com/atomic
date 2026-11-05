@@ -534,13 +534,35 @@ fn needs_activity_recap(
             .atomic_chat_state
             .as_ref()
             .is_some_and(|saved| {
-                saved.backend == Backend::ClaudeCode
-                    && (saved
+                (saved.backend == Backend::ClaudeCode
+                    && saved
                         .active
                         .as_ref()
-                        .is_some_and(|turn| turn.native_input_recorded != Some(false))
-                        || conv.messages.iter().any(|row| !row.tool_calls.is_empty()))
+                        .is_some_and(|turn| turn.native_input_recorded != Some(false)))
+                    || conv.messages.iter().any(|row| !row.tool_calls.is_empty())
             })
+}
+
+async fn api_context_tokens(
+    db: &Db,
+    scope: &MemuScope,
+    conv: &atomic_core::ConversationWithMessages,
+    request: &ChatRequest,
+    settings: &HashMap<String, String>,
+) -> Result<usize, JsonError> {
+    let id = &conv.conversation.id;
+    let ordinary = db.0.estimate_chat_request_tokens(id, request, settings.clone(), tools_for(scope))
+        .await.map_err(core_json_error)?;
+    if conv.conversation.atomic_chat_state.is_none() || matches!(request, ChatRequest::Recap { .. }) {
+        return Ok(ordinary);
+    }
+    let recap = ChatRequest::Recap { instruction: atomic_recap_instruction(&scope.user_id) };
+    let mut closeout = db.0.estimate_chat_request_tokens(id, &recap, settings.clone(), tools_for(scope))
+        .await.map_err(core_json_error)?;
+    if let ChatRequest::New { content, .. } = request {
+        closeout = closeout.saturating_add(atomic_core::chunking::count_tokens(content) + 8);
+    }
+    Ok(ordinary.max(closeout))
 }
 
 fn existing_recap(conv: &atomic_core::ConversationWithMessages) -> Option<String> {
@@ -799,9 +821,8 @@ pub async fn get_conversation(
                     profile.check_binding(&conv)?;
                     let capacity = profile.capacity()?;
                     let tokens = match profile {
-                        AtomicChatProfileResponse::Api { settings } => db.0.estimate_chat_request_tokens(
-                            &id, &standing_request(&conv, &scope.user_id), settings, tools_for(&scope))
-                            .await.map_err(core_json_error)?,
+                        AtomicChatProfileResponse::Api { settings } => api_context_tokens(
+                            &db, &scope, &conv, &standing_request(&conv, &scope.user_id), &settings).await?,
                         AtomicChatProfileResponse::ClaudeCode { .. } => {
                             let Some(tokens) = conv.conversation.atomic_chat_state.as_ref()
                                 .and_then(|saved| saved.native_context_tokens) else { return Ok(None); };
@@ -1065,8 +1086,7 @@ async fn chat_work_with_profile(
     };
     let projected = match &profile {
         AtomicChatProfileResponse::Api { settings } =>
-            db.0.estimate_chat_request_tokens(&id, &request, settings.clone(), tools_for(&scope))
-                .await.map_err(core_json_error)?,
+            api_context_tokens(&db, &scope, &conv, &request, settings).await?,
         AtomicChatProfileResponse::ClaudeCode { .. } => prepared.as_ref().unwrap().context_tokens
             .ok_or_else(|| (StatusCode::CONFLICT, serde_json::json!({"error":
                 "Native context size is unknown. Keep this history and close out in the same sitting, or reload after native work settles; the draft is retained."})))?,
@@ -1194,14 +1214,7 @@ async fn chat_work_with_profile(
         match &profile {
             AtomicChatProfileResponse::Api { settings } => {
                 let standing = standing_request(&saved, &scope.user_id);
-                db.0.estimate_chat_request_tokens(
-                    &id,
-                    &standing,
-                    settings.clone(),
-                    tools_for(&scope),
-                )
-                .await
-                .map_err(core_json_error)
+                api_context_tokens(&db, &scope, &saved, &standing, settings).await
             }
             AtomicChatProfileResponse::ClaudeCode { .. } => saved
                 .conversation
@@ -1465,9 +1478,8 @@ async fn finish_memu_session(
         .await;
     }
     let profile = fetch_atomic_chat_profile(&memu_session).await?;
-    let request = ChatRequest::Recap {
-        instruction: atomic_recap_instruction(&memu_session.user_id),
-    };
+    let instruction = atomic_recap_instruction(&memu_session.user_id);
+    let request = ChatRequest::Recap { instruction: instruction.clone() };
     let capacity = profile.capacity()?;
     let backend = profile.backend();
     profile.check_binding(&conv)?;
@@ -1525,9 +1537,6 @@ async fn finish_memu_session(
     )
     .await?;
     if needs_recap {
-        let ChatRequest::Recap { instruction } = &request else {
-            unreachable!()
-        };
         // Recap delivery uses durable state, never an ordinary reply/stream bubble.
         match &profile {
             AtomicChatProfileResponse::ClaudeCode { cli } => {
@@ -1554,7 +1563,7 @@ async fn finish_memu_session(
                     .execute_saved_chat_recap(
                         conversation_id,
                         &control.id,
-                        instruction,
+                        &instruction,
                         |_| {},
                         settings.clone(),
                         tools_for(&memu_session),
@@ -1602,6 +1611,40 @@ async fn finish_memu_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[actix_web::test]
+    async fn api_context_includes_recorded_actions_and_pending_input() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = atomic_core::DatabaseManager::new(dir.path()).unwrap();
+        let db = Db(manager.active_core().await.unwrap(), manager.active_id().unwrap());
+        let scope = MemuScope { base_url: "http://127.0.0.1:1".into(), user_id: "TestOwner".into(), soul_id: "TestSoul".into() };
+        let conv = db.0.create_conversation(&[], None, Some((&scope.user_id, &scope.soul_id))).await.unwrap();
+        let id = &conv.conversation.id;
+        db.0.set_chat_phase(id, &scope.user_id, &scope.soul_id, &Backend::Api, &Phase::Open).await.unwrap();
+        db.0.save_message(id, "user", "Short question").await.unwrap();
+        let answer = db.0.save_message(id, "assistant", "Short answer").await.unwrap();
+        let saved = read_chat(&db, id).await.unwrap();
+        let mut records = atomic_core::agent::ChatToolRecords::from_saved_message(saved.messages.last().unwrap());
+        records.tool_calls = (0..300).map(|i| atomic_core::ChatToolCall {
+            id: format!("recorded-{i}"), message_id: answer.id.clone(), tool_name: "search_atoms".into(),
+            tool_input: serde_json::json!({"query":format!("Fictional query {i}: {}", "evidence ".repeat(18))}),
+            tool_output: Some(serde_json::json!("completed")), status: "complete".into(),
+            created_at: String::new(), completed_at: None,
+        }).collect();
+        db.0.save_chat_tool_records(id, &answer.id, &records).await.unwrap();
+        let saved = read_chat(&db, id).await.unwrap();
+        let settings: HashMap<String, String> = [("provider", "openai_compat"), ("openai_compat_base_url", "http://127.0.0.1:1"),
+            ("openai_compat_api_key", "fictional"), ("openai_compat_llm_model", "fictional")]
+            .into_iter().map(|(k,v)| (k.to_string(),v.to_string())).collect();
+        let content = "Pending draft ".repeat(50);
+        let request = ChatRequest::New { content: content.clone(), page_context: None, canvas_context: None };
+        let ordinary = db.0.estimate_chat_request_tokens(id, &request, settings.clone(), tools_for(&scope)).await.unwrap();
+        let recap = ChatRequest::Recap { instruction: atomic_recap_instruction(&scope.user_id) };
+        let closeout = db.0.estimate_chat_request_tokens(id, &recap, settings.clone(), tools_for(&scope)).await.unwrap();
+        assert!(closeout > ordinary, "short dialogue must not hide accumulated actions");
+        assert_eq!(api_context_tokens(&db, &scope, &saved, &request, &settings).await.unwrap(),
+            closeout + atomic_core::chunking::count_tokens(&content) + 8);
+    }
 
     #[test]
     fn native_profile_parses_cli_metadata_without_api_settings() {

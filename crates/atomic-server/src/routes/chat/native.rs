@@ -2374,7 +2374,7 @@ mod tests {
                         let prepared = prepared.unwrap();
                         assert_eq!(prepared.operation, Operation::Continue);
                         assert!(prepared.input.system_prompt.is_none());
-                        assert_eq!(prepared.input.prompt, "Recap the existing sitting");
+                        assert_eq!(prepared.input.prompt, "Recap the existing sitting\n\n**respond with 5 sentences or fewer**");
                     } else {
                         assert!(
                             prepared.is_err(),

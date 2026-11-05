@@ -1554,7 +1554,8 @@ async fn test_retry_reconciles_stranded_and_legacy_turns_without_replaying_unkno
                 .insert_header(ctx.auth_header()).insert_header(("X-OpenAlma-User", "TestOwner"))
                 .insert_header(("X-OpenAlma-Soul", "TestSoul")) .set_json(json!({"conversation_id":id})).to_request();
             assert_eq!(actix_test::call_service(&app, end).await.status(), 200);
-            assert_eq!(model.request_count.load(Ordering::SeqCst), before, "no interchange means no invented recap call");
+            assert_eq!(model.request_count.load(Ordering::SeqCst), before + usize::from(bound),
+                "managed tool activity needs a recap; legacy behavior stays unchanged");
         } else {
             assert_eq!(model.request_count.load(Ordering::SeqCst), before + 1);
             assert!(saved.conversation.atomic_chat_state.unwrap().active.is_none());

@@ -1792,12 +1792,17 @@ pub(crate) async fn project_claude_chat_input(
             if new_sitting {
                 return Err("Recap must resume the existing native sitting".into());
             }
+            let mut prompt = instruction.clone();
+            if let Some(limit) = memu_response_sentence_limit(&settings) {
+                prompt.push_str(&format!("\n\n{}", memu_response_limit_instruction(limit)));
+            }
+            let tokens = count_tokens(&prompt) + 8;
             return Ok((
                 ClaudeChatInput {
                     system_prompt: None,
-                    prompt: instruction.clone(),
+                    prompt,
                 },
-                count_tokens(instruction) + 8,
+                tokens,
             ));
         }
     };
@@ -4545,6 +4550,11 @@ mod tests {
             HashMap::new(), native_scope.clone(), false, None).await.unwrap();
         assert!(projected.system_prompt.is_none());
         assert_eq!(projected.prompt, "Recap without tools.");
+        assert_eq!(tokens, count_tokens(&projected.prompt) + 8);
+        let brief = [("memu_response_sentences".into(), "3".into())].into_iter().collect();
+        let (projected, tokens) = reopened.project_claude_chat_input(cid, &recap,
+            brief, native_scope.clone(), false, None).await.unwrap();
+        assert_eq!(projected.prompt, "Recap without tools.\n\n**respond with 3 sentences or fewer**");
         assert_eq!(tokens, count_tokens(&projected.prompt) + 8);
         assert!(reopened.project_claude_chat_input(cid, &recap, HashMap::new(),
             native_scope, true, None).await.is_err());
