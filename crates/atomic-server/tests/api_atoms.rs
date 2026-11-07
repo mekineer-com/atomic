@@ -2310,8 +2310,8 @@ async fn test_scoped_websockets_filter_other_soul_owner_database_and_conversatio
             actix_web::body::to_bytes(response_a.into_body()),
             actix_web::body::to_bytes(response_b.into_body()))
     }).await.unwrap();
-    let body_a = body_a.unwrap();
-    let body_b = body_b.unwrap();
+    let body_a = body_a.unwrap_or_else(|_| panic!("first WebSocket body failed"));
+    let body_b = body_b.unwrap_or_else(|_| panic!("second WebSocket body failed"));
     let frames_a = String::from_utf8_lossy(&body_a);
     let frames_b = String::from_utf8_lossy(&body_b);
     for text in ["summary-a", "chat-a"] {
